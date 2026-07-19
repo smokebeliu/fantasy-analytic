@@ -121,6 +121,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 - [`docs/data-model.md`](docs/data-model.md) documents confirmed identifiers,
   grains, mappings and unresolved questions.
+- [`docs/development-plan.md`](docs/development-plan.md) is the agent-oriented
+  execution roadmap and must be updated after every completed step.
 - [`schema/postgres.sql`](schema/postgres.sql) is the proposed PostgreSQL model.
 
 Sports.ru does not publish this GraphQL API as a stable developer interface.
