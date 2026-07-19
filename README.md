@@ -27,13 +27,13 @@ The prototype has no runtime dependencies outside the Python standard library.
 ## Run
 
 ```bash
-PYTHONPATH=src python -m fantasy_analytics --output data/discovery
+PYTHONPATH=src python3 -m fantasy_analytics --output data/discovery
 ```
 
 Select the active season:
 
 ```bash
-PYTHONPATH=src python -m fantasy_analytics \
+PYTHONPATH=src python3 -m fantasy_analytics \
   --current \
   --output data/current-season
 ```
@@ -41,7 +41,7 @@ PYTHONPATH=src python -m fantasy_analytics \
 Select an exact season:
 
 ```bash
-PYTHONPATH=src python -m fantasy_analytics \
+PYTHONPATH=src python3 -m fantasy_analytics \
   --season-name 2025/2026 \
   --output data/2025-2026
 ```
@@ -49,7 +49,7 @@ PYTHONPATH=src python -m fantasy_analytics \
 Disable representative player-history requests:
 
 ```bash
-PYTHONPATH=src python -m fantasy_analytics \
+PYTHONPATH=src python3 -m fantasy_analytics \
   --history-samples-per-role 0
 ```
 
@@ -73,7 +73,7 @@ Generated data is ignored by Git.
 ## Tests
 
 ```bash
-PYTHONPATH=src python -m unittest discover -s tests -v
+PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
 ## Model artifacts

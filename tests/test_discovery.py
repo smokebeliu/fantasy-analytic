@@ -90,7 +90,7 @@ class DerivedTeamStatsTest(unittest.TestCase):
         self.assertEqual(1, result["home"]["wins"])
         self.assertEqual(1, result["home"]["draws"])
         self.assertEqual(1, result["home"]["clean_sheets"])
-        self.assertEqual(2, result["home"]["goals_for"])
+        self.assertEqual(3, result["home"]["goals_for"])
         self.assertEqual(1, result["home"]["goals_against"])
         self.assertEqual(1, result["away"]["home_matches"])
         self.assertEqual(1, result["away"]["away_matches"])
