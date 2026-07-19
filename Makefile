@@ -26,7 +26,8 @@ discover: setup
 	$(DOCKER_COMPOSE) run --rm --build discovery
 
 start: db discover
-	@printf 'PostgreSQL is available on localhost:%s\n' "$${POSTGRES_PORT:-5432}"
+	@printf 'PostgreSQL is available on '
+	@$(DOCKER_COMPOSE) port postgres 5432
 	@printf 'Discovery artifacts are available in ./data\n'
 
 test:
