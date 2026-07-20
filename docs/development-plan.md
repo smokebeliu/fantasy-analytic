@@ -1,7 +1,7 @@
 # План дальнейшей разработки Fantasy Analytics
 
 Обновлено: 2026-07-19  
-Текущий прогресс: 1 из 14 шагов завершён.
+Текущий прогресс: 2 из 14 шагов завершён.
 
 ## Цель
 
@@ -66,8 +66,8 @@
 | Шаг | Название | Зависимости | Статус |
 | --- | --- | --- | --- |
 | 0 | Discovery-прототип и локальный Docker | — | `DONE` |
-| 1 | Persistence layer и миграции | 0 | `IN_PROGRESS` |
-| 2 | Полный исторический импорт | 1 | `PLANNED` |
+| 1 | Persistence layer и миграции | 0 | `DONE` |
+| 2 | Полный исторический импорт | 1 | `READY` |
 | 3 | Исследование расширенной match-статистики | 0 | `READY` |
 | 4 | Контроль качества и reconciliation | 2, 3 | `PLANNED` |
 | 5 | Ручной ingestion job и backend-команда | 2, 4 | `PLANNED` |
@@ -134,7 +134,7 @@ flowchart LR
 
 ### Шаг 1. Persistence layer и миграции
 
-Статус: `IN_PROGRESS`
+Статус: `DONE`
 
 Цель: заменить файловые артефакты полноценной записью нормализованных данных в
 PostgreSQL.
@@ -161,18 +161,47 @@ PostgreSQL.
 
 Не входит: полный импорт всех доменных таблиц.
 
+Фактический результат:
+
+- Модели SQLAlchemy 2 (`src/fantasy_analytics/db/models.py`) — единственный
+  авторитетный источник схемы; файл `schema/postgres.sql` удалён.
+- Настроен Alembic; начальная миграция `0001` материализует метаданные моделей
+  (применяется и откатывается). Проверено `compare_metadata`: расхождений нет.
+- Добавлены engine/session helpers, `session_scope` и конфигурация
+  `DATABASE_URL` (`db/config.py`).
+- `IngestionRepository` (`db/repository.py`) транзакционно управляет статусами
+  `ingestion_runs` и идемпотентно пишет `raw_api_responses` (dedup по SHA-256
+  хешу ответа и unique-констрейнту).
+- Добавлены CLI `fantasy-migrate` и сервис `migrate` в Compose/Make; чистая БД
+  создаётся одной командой `make migrate` (или `fantasy-migrate upgrade`).
+
 Карточка выполнения:
 
 - Начат: 2026-07-20
-- Завершён:
+- Завершён: 2026-07-20
 - Агент/ветка: `cursor/persistence-layer-migrations-bd72`
-- Commit/PR:
+- Commit/PR: `0b9d2d2`
 - Проверки:
+  - `python -m fantasy_analytics.db.cli upgrade/downgrade` на PostgreSQL 16 —
+    18 таблиц создаются и полностью удаляются.
+  - `fantasy-migrate upgrade` на чистой БД создаёт схему одной командой.
+  - `compare_metadata(models, db)` — 0 расхождений (DDL и модели совпадают).
+  - `python -m unittest discover -s tests` — 24 теста проходят (с БД);
+    без БД 9 интеграционных тестов корректно пропускаются.
+  - `python -m build --wheel` — миграции и mako попадают в дистрибутив.
 - Решения и отклонения:
+  - Начальная миграция использует `metadata.create_all/drop_all` вместо
+    статичных `op.create_table`, чтобы гарантировать единый источник схемы и
+    исключить дрейф между ORM и DDL. Последующие миграции должны использовать
+    `alembic revision --autogenerate`.
+  - Драйвер — psycopg 3 (`postgresql+psycopg://`).
+  - Docker daemon в окружении агента отсутствовал; интеграция проверена на
+    локально установленном PostgreSQL 16, полный запуск Compose должен быть
+    подтверждён локально (аналогично шагу 0).
 
 ### Шаг 2. Полный исторический импорт
 
-Статус: `PLANNED`
+Статус: `READY`
 
 Цель: загрузить прошлый сезон в PostgreSQL на уровне сезона, тура, матча, клуба
 и каждого игрока.
@@ -611,3 +640,6 @@ PostgreSQL.
 | --- | --- | --- | --- | --- |
 | 2026-07-19 | 0 | `IN_PROGRESS → DONE` | `ac9be65` | Подтверждён API, добавлены прототип, DDL и Docker |
 | 2026-07-19 | План | создан | — | Сформированы независимые шаги 1–13 |
+| 2026-07-20 | 1 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/persistence-layer-migrations-bd72` |
+| 2026-07-20 | 1 | `IN_PROGRESS → DONE` | `0b9d2d2` | SQLAlchemy 2, Alembic-миграции, repository для ingestion_runs/raw_api_responses |
+| 2026-07-20 | 2 | `PLANNED → READY` | — | Разблокирован завершением шага 1 |
