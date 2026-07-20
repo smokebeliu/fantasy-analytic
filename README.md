@@ -25,14 +25,21 @@ Requirements:
 - Make (optional)
 - Network access to `https://www.sports.ru/gql/graphql/`
 
-Start PostgreSQL, apply `schema/postgres.sql` and run discovery:
+Start PostgreSQL, apply the Alembic migrations and run discovery:
 
 ```bash
 make start
 ```
 
-The first run creates `.env`, builds the discovery image and initializes the
-database. Generated artifacts are written to `./data/discovery`.
+The first run creates `.env`, builds the image, applies migrations to the
+latest revision and runs discovery. Generated artifacts are written to
+`./data/discovery`.
+
+Apply migrations without running discovery:
+
+```bash
+make migrate
+```
 
 The same flow without Make:
 
@@ -40,6 +47,7 @@ The same flow without Make:
 cp .env.example .env
 mkdir -p data
 docker compose up -d --build --wait postgres
+docker compose run --rm --build migrate
 docker compose run --rm --build discovery
 ```
 
@@ -97,8 +105,17 @@ Generated data is ignored by Git.
 
 ## Native Python run
 
-Python 3.11 or newer is required. The prototype has no runtime dependencies
-outside the standard library.
+Python 3.11 or newer is required. The persistence layer depends on
+SQLAlchemy 2, Alembic and psycopg 3, so install the project first (a virtual
+environment is recommended):
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e .
+```
+
+Run discovery (writes JSON artifacts, no database required):
 
 ```bash
 PYTHONPATH=src python3 -m fantasy_analytics --output data/discovery
@@ -111,9 +128,35 @@ PYTHONPATH=src python3 -m fantasy_analytics \
   --history-samples-per-role 0
 ```
 
-Run tests without Docker:
+## Database migrations
+
+The database schema is defined by the SQLAlchemy models in
+`src/fantasy_analytics/db/models.py` and versioned with Alembic. Point
+`DATABASE_URL` at a PostgreSQL instance and apply migrations:
 
 ```bash
+export DATABASE_URL=postgresql+psycopg://fantasy:fantasy@localhost:5432/fantasy
+PYTHONPATH=src python3 -m fantasy_analytics.db.cli upgrade    # create schema
+PYTHONPATH=src python3 -m fantasy_analytics.db.cli current    # show revision
+PYTHONPATH=src python3 -m fantasy_analytics.db.cli downgrade  # drop schema
+```
+
+The installed project also exposes a `fantasy-migrate` console command.
+
+## Tests
+
+Run the unit tests without Docker:
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+```
+
+The persistence integration tests need a reachable PostgreSQL database. They
+are skipped automatically unless `TEST_DATABASE_URL` (or `DATABASE_URL`) points
+to one:
+
+```bash
+export TEST_DATABASE_URL=postgresql+psycopg://fantasy:fantasy@localhost:5432/fantasy_test
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
@@ -123,7 +166,10 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
   grains, mappings and unresolved questions.
 - [`docs/development-plan.md`](docs/development-plan.md) is the agent-oriented
   execution roadmap and must be updated after every completed step.
-- [`schema/postgres.sql`](schema/postgres.sql) is the proposed PostgreSQL model.
+- [`src/fantasy_analytics/db/models.py`](src/fantasy_analytics/db/models.py) is
+  the authoritative SQLAlchemy definition of the PostgreSQL schema, materialized
+  by the Alembic migrations in
+  [`src/fantasy_analytics/migrations`](src/fantasy_analytics/migrations).
 
 Sports.ru does not publish this GraphQL API as a stable developer interface.
 The collector must preserve raw responses and use contract tests before the

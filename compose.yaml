@@ -1,5 +1,8 @@
 name: fantasy-analytics
 
+x-database-url: &database-url
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-fantasy}:${POSTGRES_PASSWORD:-fantasy}@postgres:5432/${POSTGRES_DB:-fantasy}
+
 services:
   postgres:
     image: postgres:18-alpine
@@ -11,7 +14,6 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
-      - ./schema/postgres.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
     healthcheck:
       test:
         [
@@ -24,6 +26,19 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *database-url
+    entrypoint: ["fantasy-migrate"]
+    command: ["upgrade"]
+    restart: "no"
+
   discovery:
     build:
       context: .
@@ -31,6 +46,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *database-url
     command:
       - --output
       - /app/data/${DISCOVERY_DIRECTORY:-discovery}
