@@ -361,7 +361,10 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - [`docs/feature-dictionary.md`](docs/feature-dictionary.md) documents the
   analytical feature dataset, its leakage guarantees and missing-value strategy.
 - [`docs/development-plan.md`](docs/development-plan.md) is the agent-oriented
-  execution roadmap and must be updated after every completed step.
+  execution roadmap (planning, current statuses and key nuances) and must be
+  updated after every completed step.
+- [`docs/development-history.md`](docs/development-history.md) holds the detailed
+  execution cards of completed steps and the status changelog.
 - [`src/fantasy_analytics/db/models.py`](src/fantasy_analytics/db/models.py) is
   the authoritative SQLAlchemy definition of the PostgreSQL schema, materialized
   by the Alembic migrations in
