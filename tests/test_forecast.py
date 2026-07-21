@@ -1,0 +1,413 @@
+"""Unit and integration tests for the baseline forecast (development-plan step 7).
+
+The unit tests exercise the pure, interpretable pieces of the model in isolation
+(Poisson helpers, the team-goal blend, the appearance split, the event model's
+component algebra and the two baselines). The integration tests import a small
+synthetic season into a real PostgreSQL database, publish it through the quality
+gate, add a future tour and then build and persist forecasts to prove that every
+player with a fixture is forecast, that the additive components always sum to the
+expected points, that recomputing on the same snapshot is deterministic and that
+persistence is idempotent. They are skipped automatically when no database is
+reachable.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import unittest
+from datetime import datetime, timezone
+
+from sqlalchemy import text
+
+from fantasy_analytics.db import (
+    ForecastRepository,
+    create_db_engine,
+    create_session_factory,
+    migration,
+)
+from fantasy_analytics.forecast import (
+    MODEL_EVENT,
+    MODEL_MEAN,
+    MODEL_RECENT,
+    MODEL_VERSION,
+    SCORING,
+    SCORING_VERSION,
+    ForecastError,
+    appearance_probabilities,
+    build_forecast_dataset,
+    clean_sheet_probability,
+    forecast_event_model,
+    forecast_mean_baseline,
+    forecast_recent_baseline,
+    poisson_pmf,
+    run_forecast,
+    team_goal_means,
+)
+from fantasy_analytics.ingestion import IngestionOptions, run_ingestion
+from fantasy_analytics.quality import run_quality_checks
+
+# Reuse the fake client and internally consistent fixture from the siblings.
+from test_ingestion import FakeClient
+from test_quality import _consistent_fixture
+
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL") or os.environ.get(
+    "DATABASE_URL"
+)
+
+
+def _database_available() -> bool:
+    if not TEST_DATABASE_URL:
+        return False
+    try:
+        engine = create_db_engine(TEST_DATABASE_URL)
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        engine.dispose()
+    except Exception:
+        return False
+    return True
+
+
+DATABASE_AVAILABLE = _database_available()
+requires_database = unittest.skipUnless(
+    DATABASE_AVAILABLE,
+    "PostgreSQL is not reachable via TEST_DATABASE_URL/DATABASE_URL",
+)
+
+
+def _feature_row(**overrides) -> dict:
+    """A feature row with sane defaults for a fit, ever-present midfielder."""
+    row = {
+        "player_season_id": 1,
+        "fantasy_player_id": "111",
+        "player_name": "Test Player",
+        "role": "MIDFIELDER",
+        "club_id": 1,
+        "club_name": "Club A",
+        "opponent_club_id": 2,
+        "opponent_name": "Club B",
+        "match_id": 10,
+        "is_home": True,
+        "is_available": True,
+        "availability_status": "OK",
+        "price": 10.0,
+        "feature_version": "1.1.0",
+        "p_appearance": 1.0,
+        "expected_minutes": 90.0,
+        "start_share": 1.0,
+        "appearance_share": 1.0,
+        "goals_per90": 0.0,
+        "assists_per90": 0.0,
+        "saves_per90": 0.0,
+        "recoveries_per90": 0.0,
+        "yellows_per90": 0.0,
+        "club_attack": 1.0,
+        "club_defense": 1.0,
+        "opponent_attack": 1.0,
+        "opponent_defense": 1.0,
+        "total_appearances": 5,
+        "total_points": 25.0,
+        "points_avg_5": 6.0,
+    }
+    row.update(overrides)
+    return row
+
+
+class PoissonHelperTest(unittest.TestCase):
+    def test_poisson_pmf_known_values(self) -> None:
+        self.assertAlmostEqual(poisson_pmf(0, 2.0), math.exp(-2.0), places=6)
+        self.assertAlmostEqual(poisson_pmf(1, 2.0), 2.0 * math.exp(-2.0), places=6)
+        self.assertAlmostEqual(poisson_pmf(2, 2.0), 2.0 * math.exp(-2.0), places=6)
+        self.assertEqual(poisson_pmf(0, 0.0), 1.0)
+        self.assertEqual(poisson_pmf(1, 0.0), 0.0)
+
+    def test_poisson_rejects_negative_mean(self) -> None:
+        with self.assertRaises(ValueError):
+            poisson_pmf(0, -1.0)
+
+    def test_clean_sheet_probability_is_poisson_zero(self) -> None:
+        self.assertEqual(clean_sheet_probability(0.0), 1.0)
+        self.assertAlmostEqual(clean_sheet_probability(1.0), math.exp(-1.0), places=6)
+        # A negative mean is clamped to zero -> certain clean sheet.
+        self.assertEqual(clean_sheet_probability(-3.0), 1.0)
+
+    def test_team_goal_means_blend_is_symmetric(self) -> None:
+        goals_for, goals_against = team_goal_means(2.0, 1.0, 0.5, 1.5)
+        self.assertEqual(goals_for, 0.5 * (2.0 + 1.5))
+        self.assertEqual(goals_against, 0.5 * (1.0 + 0.5))
+
+    def test_appearance_probabilities_split(self) -> None:
+        p_full, p_sub = appearance_probabilities(1.0, 0.6, 1.0)
+        self.assertAlmostEqual(p_full, 0.6)
+        self.assertAlmostEqual(p_sub, 0.4)
+        # No history -> nothing is credited as a full start.
+        self.assertEqual(appearance_probabilities(0.8, 0.0, 0.0), (0.0, 0.8))
+
+
+class ScoringTableTest(unittest.TestCase):
+    def test_goal_rewards_match_position(self) -> None:
+        self.assertEqual(SCORING["GOALKEEPER"].goal, 6)
+        self.assertEqual(SCORING["DEFENDER"].goal, 6)
+        self.assertEqual(SCORING["MIDFIELDER"].goal, 5)
+        self.assertEqual(SCORING["FORWARD"].goal, 4)
+
+    def test_clean_sheet_and_concede_are_defensive_only(self) -> None:
+        self.assertEqual(SCORING["GOALKEEPER"].clean_sheet, 4)
+        self.assertEqual(SCORING["DEFENDER"].clean_sheet, 4)
+        self.assertEqual(SCORING["MIDFIELDER"].clean_sheet, 1)
+        self.assertEqual(SCORING["FORWARD"].clean_sheet, 0)
+        self.assertEqual(SCORING["GOALKEEPER"].conceded_per_two, -1)
+        self.assertEqual(SCORING["MIDFIELDER"].conceded_per_two, 0)
+
+
+class EventModelTest(unittest.TestCase):
+    def test_components_sum_to_expected_points(self) -> None:
+        row = _feature_row(
+            goals_per90=0.5,
+            assists_per90=0.25,
+            recoveries_per90=3.0,
+            club_attack=2.0,
+            opponent_defense=1.0,
+            club_defense=1.0,
+            opponent_attack=1.0,
+        )
+        result = forecast_event_model(row)
+        self.assertAlmostEqual(
+            sum(result["components"].values()), result["expected_points"], places=4
+        )
+        c = result["components"]
+        self.assertEqual(c["appearance"], 2.0)  # full appearance
+        self.assertAlmostEqual(c["goals"], 2.5, places=4)  # MID goal 5 * 0.5
+        self.assertAlmostEqual(c["assists"], 0.75, places=4)  # 3 * 0.25
+        self.assertAlmostEqual(c["recoveries"], 1.0, places=4)  # (1/3) * 3
+        # Clean sheet: MID(1) * p_full(1) * exp(-1.0).
+        self.assertAlmostEqual(c["clean_sheet"], math.exp(-1.0), places=3)
+        self.assertGreater(result["uncertainty"], 0.0)
+
+    def test_unavailable_player_scores_zero(self) -> None:
+        row = _feature_row(is_available=False, goals_per90=1.0)
+        result = forecast_event_model(row)
+        self.assertEqual(result["expected_points"], 0.0)
+        self.assertEqual(result["uncertainty"], 0.0)
+        self.assertTrue(all(v == 0.0 for v in result["components"].values()))
+
+    def test_zero_play_probability_scores_zero(self) -> None:
+        row = _feature_row(p_appearance=0.0, expected_minutes=0.0, goals_per90=1.0)
+        self.assertEqual(forecast_event_model(row)["expected_points"], 0.0)
+
+    def test_goalkeeper_saves_and_clean_sheet(self) -> None:
+        row = _feature_row(
+            role="GOALKEEPER",
+            saves_per90=3.0,
+            opponent_attack=0.0,
+            club_defense=0.0,
+        )
+        result = forecast_event_model(row)
+        # opponent scores 0 on average -> clean-sheet probability 1.0 -> +4.
+        self.assertAlmostEqual(result["components"]["clean_sheet"], 4.0, places=4)
+        self.assertAlmostEqual(result["components"]["saves"], 1.0, places=4)  # 3/3
+
+    def test_deterministic(self) -> None:
+        row = _feature_row(goals_per90=0.7, assists_per90=0.3)
+        self.assertEqual(forecast_event_model(row), forecast_event_model(row))
+
+
+class BaselineTest(unittest.TestCase):
+    def test_mean_baseline(self) -> None:
+        row = _feature_row(total_appearances=5, total_points=25.0, p_appearance=0.8)
+        result = forecast_mean_baseline(row)
+        # mean 5.0 * 0.8 play probability.
+        self.assertAlmostEqual(result["expected_points"], 4.0, places=4)
+        self.assertEqual(result["components"]["mean_points_per_appearance"], 5.0)
+
+    def test_mean_baseline_no_history(self) -> None:
+        row = _feature_row(total_appearances=0, total_points=0.0)
+        self.assertEqual(forecast_mean_baseline(row)["expected_points"], 0.0)
+
+    def test_recent_baseline(self) -> None:
+        row = _feature_row(points_avg_5=6.0, p_appearance=0.5)
+        self.assertAlmostEqual(
+            forecast_recent_baseline(row)["expected_points"], 3.0, places=4
+        )
+
+    def test_baselines_respect_availability(self) -> None:
+        row = _feature_row(is_available=False, total_points=25.0, points_avg_5=6.0)
+        self.assertEqual(forecast_mean_baseline(row)["expected_points"], 0.0)
+        self.assertEqual(forecast_recent_baseline(row)["expected_points"], 0.0)
+
+
+@requires_database
+class ForecastIntegrationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = create_db_engine(TEST_DATABASE_URL)
+        self.addCleanup(self.engine.dispose)
+        migration.downgrade(TEST_DATABASE_URL)
+        migration.upgrade(TEST_DATABASE_URL)
+        self.session_factory = create_session_factory(self.engine)
+        self.run_id = self._import_and_publish()
+        self._add_future_tour()
+
+    def _import_and_publish(self) -> int:
+        report = run_ingestion(
+            FakeClient(_consistent_fixture()),
+            self.session_factory,
+            IngestionOptions(history_workers=1),
+        )
+        run_quality_checks(self.session_factory, run_id=report["run_id"])
+        return report["run_id"]
+
+    def _exec(self, sql: str, **params):
+        with self.engine.begin() as connection:
+            return connection.execute(text(sql), params)
+
+    def _scalar(self, sql: str, **params):
+        with self.engine.connect() as connection:
+            return connection.execute(text(sql), params).scalar_one()
+
+    def _add_future_tour(self) -> None:
+        season_id = self._scalar("SELECT id FROM seasons LIMIT 1")
+        club_a = self._scalar(
+            "SELECT club_id FROM season_clubs WHERE fantasy_team_id = '10'"
+        )
+        club_b = self._scalar(
+            "SELECT club_id FROM season_clubs WHERE fantasy_team_id = '20'"
+        )
+        tour_id = self._exec(
+            """
+            INSERT INTO fantasy_tours
+                (season_id, fantasy_tour_id, name, status, starts_at,
+                 transfers_deadline_at)
+            VALUES (:season, '1773', '2 тур', 'SCHEDULED',
+                    '2025-07-25T16:00:00Z', '2025-07-24T16:00:00Z')
+            RETURNING id
+            """,
+            season=season_id,
+        ).scalar_one()
+        self._exec(
+            """
+            INSERT INTO matches
+                (season_id, tour_id, stat_match_id, scheduled_at,
+                 home_club_id, away_club_id, home_score, away_score)
+            VALUES (:season, :tour, '900002', '2025-07-25T16:00:00Z',
+                    :home, :away, NULL, NULL)
+            """,
+            season=season_id,
+            tour=tour_id,
+            home=club_a,
+            away=club_b,
+        )
+
+    def _event_rows(self, report: dict) -> dict[str, dict]:
+        return {
+            r["fantasy_player_id"]: r
+            for r in report["rows"]
+            if r["model_name"] == MODEL_EVENT
+        }
+
+    def test_forecasts_all_players_with_a_fixture(self) -> None:
+        report = build_forecast_dataset(self.session_factory, tour_ref="1773")
+
+        self.assertEqual(report["tour"]["fantasy_tour_id"], "1773")
+        self.assertEqual(report["model_version"], MODEL_VERSION)
+        self.assertEqual(report["scoring_version"], SCORING_VERSION)
+        # Two players, three models each.
+        self.assertEqual(report["counts"]["players"], 2)
+        self.assertEqual(report["counts"]["rows"], 6)
+        model_names = {r["model_name"] for r in report["rows"]}
+        self.assertEqual(model_names, {MODEL_EVENT, MODEL_MEAN, MODEL_RECENT})
+
+    def test_components_sum_to_expected_points(self) -> None:
+        report = build_forecast_dataset(self.session_factory, tour_ref="1773")
+        for row in report["rows"]:
+            if row["model_name"] != MODEL_EVENT:
+                continue
+            self.assertAlmostEqual(
+                sum(row["components"].values()),
+                float(row["expected_points"]),
+                places=4,
+            )
+
+    def test_forward_event_forecast_matches_history(self) -> None:
+        # Player 111 (forward) has one pre-cutoff match: 78', 1 goal, 2 assists,
+        # 5 recoveries, 1 yellow. Expected counts recover the raw stat line, so
+        # expected points ~= 2(app) + 4(goal) + 6(assists) + 1.67(rec) - 1(yc).
+        report = build_forecast_dataset(self.session_factory, tour_ref="1773")
+        row = self._event_rows(report)["111"]
+        self.assertEqual(row["role"], "FORWARD")
+        c = row["components"]
+        self.assertEqual(c["appearance"], 2.0)
+        self.assertAlmostEqual(c["goals"], 4.0, places=1)
+        self.assertAlmostEqual(c["assists"], 6.0, places=1)
+        self.assertAlmostEqual(c["recoveries"], 5.0 / 3.0, places=1)
+        self.assertAlmostEqual(c["yellow_cards"], -1.0, places=1)
+        self.assertEqual(c["clean_sheet"], 0.0)  # forwards get no clean sheet
+        self.assertAlmostEqual(float(row["expected_points"]), 12.67, delta=0.1)
+
+    def test_baselines_match_history(self) -> None:
+        report = build_forecast_dataset(self.session_factory, tour_ref="1773")
+        by_model = {
+            (r["fantasy_player_id"], r["model_name"]): r for r in report["rows"]
+        }
+        # One appearance of 12 points, always playing -> both baselines = 12.
+        self.assertAlmostEqual(
+            float(by_model[("111", MODEL_MEAN)]["expected_points"]), 12.0, places=4
+        )
+        self.assertAlmostEqual(
+            float(by_model[("111", MODEL_RECENT)]["expected_points"]), 12.0, places=4
+        )
+
+    def test_run_forecast_persists_idempotently(self) -> None:
+        first = run_forecast(self.session_factory, tour_ref="1773")
+        self.assertEqual(first["persisted"], 6)
+
+        tour_id = first["tour"]["tour_id"]
+        with self.session_factory() as session:
+            repo = ForecastRepository(session)
+            self.assertEqual(
+                repo.count_forecasts(run_id=self.run_id, tour_id=tour_id), 6
+            )
+
+        # Re-running replaces rather than accumulates.
+        second = run_forecast(self.session_factory, tour_ref="1773")
+        self.assertEqual(second["persisted"], 6)
+        with self.session_factory() as session:
+            repo = ForecastRepository(session)
+            self.assertEqual(
+                repo.count_forecasts(run_id=self.run_id, tour_id=tour_id), 6
+            )
+            stored = repo.list_forecasts(
+                run_id=self.run_id, tour_id=tour_id, model_name=MODEL_EVENT
+            )
+            self.assertEqual(len(stored), 2)
+
+    def test_recompute_is_deterministic(self) -> None:
+        a = build_forecast_dataset(self.session_factory, tour_ref="1773")
+        b = build_forecast_dataset(self.session_factory, tour_ref="1773")
+        a.pop("generated_at")
+        b.pop("generated_at")
+        self.assertEqual(a["rows"], b["rows"])
+
+    def test_finished_season_without_tour_raises(self) -> None:
+        # Mark the future tour finished so no implicit "next tour" remains.
+        self._exec("UPDATE fantasy_tours SET status = 'FINISHED'")
+        with self.assertRaises(ForecastError):
+            build_forecast_dataset(self.session_factory)
+
+    def test_no_persist_leaves_table_empty(self) -> None:
+        report = run_forecast(
+            self.session_factory, tour_ref="1773", persist=False
+        )
+        self.assertEqual(report["persisted"], 0)
+        with self.session_factory() as session:
+            repo = ForecastRepository(session)
+            self.assertEqual(
+                repo.count_forecasts(
+                    run_id=self.run_id, tour_id=report["tour"]["tour_id"]
+                ),
+                0,
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

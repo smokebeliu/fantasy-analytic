@@ -568,6 +568,75 @@ class ClubMatchStats(Base):
     )
 
 
+class PlayerForecast(Base):
+    """A forecast of a player's fantasy points for one tour fixture (step 7).
+
+    Every forecast is keyed to the data snapshot it was built from
+    (``ingestion_run_id``), the model that produced it (``model_name`` +
+    ``model_version``) and the feature version, so recomputing a model on the
+    same snapshot is reproducible and different models/versions coexist. The
+    additive ``components`` breakdown always sums to ``expected_points`` and
+    ``params`` records the model parameters, satisfying the "version the model,
+    parameters and data snapshot" requirement. A partial-free unique constraint
+    keeps at most one row per (run, tour, model, version, player, match).
+    """
+
+    __tablename__ = "player_forecasts"
+    __table_args__ = (
+        UniqueConstraint(
+            "ingestion_run_id",
+            "tour_id",
+            "model_name",
+            "model_version",
+            "player_season_id",
+            "match_id",
+            name="player_forecasts_run_model_player_match_key",
+        ),
+        Index(
+            "player_forecasts_run_tour_model_idx",
+            "ingestion_run_id",
+            "tour_id",
+            "model_name",
+            "model_version",
+        ),
+    )
+
+    id: Mapped[int] = _identity_pk()
+    ingestion_run_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("ingestion_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    season_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("seasons.id", ondelete="CASCADE")
+    )
+    tour_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("fantasy_tours.id", ondelete="CASCADE"), nullable=False
+    )
+    match_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("matches.id", ondelete="CASCADE"), nullable=False
+    )
+    player_season_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("player_seasons.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    model_name: Mapped[str] = mapped_column(Text, nullable=False)
+    model_version: Mapped[str] = mapped_column(Text, nullable=False)
+    feature_version: Mapped[str] = mapped_column(Text, nullable=False)
+    scoring_version: Mapped[str | None] = mapped_column(Text)
+    cutoff: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    expected_points: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    uncertainty: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    p_appearance: Mapped[Decimal | None] = mapped_column(Numeric(6, 4))
+    expected_minutes: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    components: Mapped[Any | None] = mapped_column(JSONB)
+    params: Mapped[Any | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class DataQualityIssue(Base):
     """One violation recorded by the quality gate (development-plan step 4).
 
@@ -629,6 +698,7 @@ __all__ = [
     "IngestionRun",
     "Match",
     "Player",
+    "PlayerForecast",
     "PlayerMatchStats",
     "PlayerSeason",
     "PlayerSeasonStats",

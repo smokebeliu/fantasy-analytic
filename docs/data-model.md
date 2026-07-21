@@ -110,6 +110,7 @@ These values demonstrably vary by tour. Optimizer constraints must come from
 | `stat_season.stats(id)` | `club_season_stats` |
 | Derived match scores | `club_match_stats`, `club_season_stats` |
 | Quality-gate violations (step 4) | `data_quality_issues` |
+| Points forecasts (step 7) | `player_forecasts` |
 
 ## Extended match statistics
 
@@ -248,6 +249,43 @@ touch the data model are:
 - **Availability.** Point-in-time `availability_status` from the active snapshot
   drives `is_available`; `INJURY`/`SUSPENDED`/etc. zero the appearance
   probability and expected minutes.
+
+## Baseline points forecast (step 7)
+
+`fantasy-forecast` turns the leakage-free feature dataset into an expected
+number of fantasy points for every player whose club plays a target tour, and
+persists the result to `player_forecasts`. The design points that touch the data
+model are:
+
+- **Snapshot and versioning.** Every forecast row is keyed to the data snapshot
+  (`ingestion_run_id`), the target `tour_id`/`match_id`, the `player_season_id`,
+  the model (`model_name` + `model_version`), the `feature_version` and the
+  `scoring_version`. A unique constraint on
+  `(ingestion_run_id, tour_id, model_name, model_version, player_season_id,
+  match_id)` makes re-runs idempotent, and the additive `components` JSONB always
+  sums to `expected_points`. `params` records the model's intermediate
+  expectations. Three models are stored per player: the interpretable event
+  model (`poisson_events`) plus two baselines (`season_mean`, `recent_form`).
+- **Scoring rules.** Sports.ru only publishes the fantasy scoring rules as an
+  image, and the structured per-event breakdown (`statDetails`) is empty, so the
+  scoring table (`SCORING`, version `rpl-2025-2026.1`) was reconstructed from the
+  season's own authoritative per-match `points`. Reconstructing the 9578
+  imported player-match rows from the table reproduces 83% exactly and 96%
+  within ±1 point. The residual is dominated by the indirect "fantasy assist"
+  and late ball-recovery corrections, which are not present in the imported
+  per-match columns (see "Data quality findings" 1 and 6). Confirmed rules:
+  appearance +1 (1–59') / +2 (≥60'); goal GK/DEF +6, MID +5, FWD +4; assist +3;
+  clean sheet (full appearance, opponent scoreless) GK/DEF +4, MID +1, FWD 0;
+  goals conceded −1 per 2 (GK/DEF); ball recovery +1 per 3; goalkeeper save
+  +1 per 3; yellow −1.
+- **Team goals via Poisson.** Each club's goals for/against are Poisson means
+  blended from the venue attack/defence features
+  (`0.5 * (club_attack + opponent_defense)` and the mirror), and the clean-sheet
+  probability is the Poisson probability that the opponent fails to score.
+- **Read-only inputs.** Forecasting only reads the feature dataset (which itself
+  only reads one ingestion run) and writes `player_forecasts`; it never calls the
+  Sports.ru API. The computation is pure arithmetic, so recomputing on the same
+  snapshot is deterministic.
 
 ## Questions left for the next discovery iteration
 

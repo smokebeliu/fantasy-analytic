@@ -9,6 +9,7 @@ from .config import (
     get_database_url,
     session_scope,
 )
+from .forecast_repository import ForecastRepository
 from .import_repository import DomainImportRepository
 from .job_repository import IngestionJobRepository, advisory_lock_key
 from .models import (
@@ -26,6 +27,7 @@ __all__ = [
     "DEFAULT_DATABASE_URL",
     "DataQualityIssue",
     "DomainImportRepository",
+    "ForecastRepository",
     "IngestionJob",
     "IngestionJobRepository",
     "IngestionRepository",

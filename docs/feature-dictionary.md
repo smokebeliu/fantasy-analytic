@@ -6,6 +6,10 @@ the `fantasy-features` CLI. It turns the *active* snapshot published by the
 quality gate (step 4) into a reproducible, leakage-free table with one row per
 player whose club plays a target tour.
 
+The current `feature_version` is `1.1.0`; version `1.1.0` added the
+`saves_per90`, `recoveries_per90` and `yellows_per90` rates that the step-7
+event forecast consumes.
+
 ## Reproducibility and leakage guarantees
 
 - **Keyed to a snapshot.** Every dataset is built from a single ingestion run
@@ -70,6 +74,7 @@ is treated as available so a new status never silently zeroes a player.
 | `appearances_{3,5,10}` | Appearances actually found in the last-*N* window. |
 | `total_appearances`, `total_minutes`, `total_points` | Season-to-date totals before cutoff. |
 | `points_per90`, `goals_per90`, `assists_per90` | Season-to-date per-90 rates. |
+| `saves_per90`, `recoveries_per90`, `yellows_per90` | Season-to-date goalkeeper-save, ball-recovery and yellow-card per-90 rates (consumed by the step-7 event forecast). |
 | `club_matches_before` | Club matches played before cutoff (share denominator). |
 | `appearance_share` | Share of club matches the player appeared in. |
 | `start_share` | Share of club matches the player started (>= 60 minutes). |

@@ -245,6 +245,36 @@ directory: `features.json` (metadata, feature dictionary and rows),
 and the missing-value strategy live in
 [`docs/feature-dictionary.md`](docs/feature-dictionary.md).
 
+## Points forecast
+
+Once the feature dataset can be built, `fantasy-forecast` projects the expected
+fantasy points every player scores in a target tour and persists them to
+`player_forecasts`. It produces an interpretable, event-based model
+(`poisson_events`) alongside two baselines (`season_mean` and `recent_form`) so
+the main model can always be compared. Appearance points build on the expected
+minutes and appearance probability from the features; team goals are modelled as
+Poisson rates from the venue attack/defence, driving the clean-sheet
+probability; and goals, assists, saves, ball recoveries and cards are projected
+from the player's per-90 rates. Each projected event is converted into points
+with a versioned scoring table (reconstructed from the season's own per-match
+points), so `expected_points` is the exact sum of its stored `components`.
+
+```bash
+export DATABASE_URL=postgresql+psycopg://fantasy:fantasy@localhost:5432/fantasy
+PYTHONPATH=src python3 -m fantasy_analytics.forecast_cli \
+  --tour 1786 \
+  --output data/forecast
+```
+
+Without `--tour` the next non-finished tour is used; a fully finished season
+requires an explicit tour. Every row is stamped with the model name/version, the
+feature version, the scoring version and the ingestion run it was built from, and
+the computation is pure arithmetic, so recomputing on the same snapshot is
+deterministic. Persistence is idempotent per run/tour/model; pass `--no-persist`
+to only write the `forecast.json`/`forecast.csv` artifacts. The forecast design
+and the reconstructed scoring rules live in
+[`docs/data-model.md`](docs/data-model.md).
+
 ## Manual ingestion API
 
 `fantasy-api` serves a small FastAPI control plane that triggers a full refresh

@@ -47,7 +47,8 @@ from .db.models import (
 
 # Bumped whenever the feature set or its computation changes so that datasets
 # built by different code revisions never get silently mixed.
-FEATURE_VERSION = "1.0.0"
+# 1.1.0 added the per-90 rates the event-based forecast (step 7) consumes.
+FEATURE_VERSION = "1.1.0"
 
 # Rolling look-back windows (in appearances) required by the plan.
 ROLLING_WINDOWS = (3, 5, 10)
@@ -92,6 +93,9 @@ class Appearance:
     points: int
     goals: int
     assists: int
+    saves: int = 0
+    ball_recoveries: int = 0
+    yellow_cards: int = 0
 
 
 @dataclass(frozen=True)
@@ -197,6 +201,9 @@ FEATURE_DICTIONARY: tuple[dict[str, str], ...] = (
     {"name": "points_per90", "description": "Season-to-date points per 90 minutes; 0.0 when no minutes."},
     {"name": "goals_per90", "description": "Season-to-date goals per 90 minutes; 0.0 when no minutes."},
     {"name": "assists_per90", "description": "Season-to-date assists per 90 minutes; 0.0 when no minutes."},
+    {"name": "saves_per90", "description": "Season-to-date goalkeeper saves per 90 minutes; 0.0 when no minutes."},
+    {"name": "recoveries_per90", "description": "Season-to-date ball recoveries per 90 minutes; 0.0 when no minutes."},
+    {"name": "yellows_per90", "description": "Season-to-date yellow cards per 90 minutes; 0.0 when no minutes."},
     {"name": "club_matches_before", "description": "Club matches played before cutoff (denominator for share features)."},
     {"name": "appearance_share", "description": "Share of the club's matches the player appeared in; 0.0 when the club has no prior match."},
     {"name": "start_share", "description": "Share of the club's matches the player started (>= 60 minutes); 0.0 when none."},
@@ -385,6 +392,9 @@ def _load_appearances(
             PlayerMatchStats.points,
             PlayerMatchStats.goals,
             PlayerMatchStats.assists,
+            PlayerMatchStats.saves,
+            PlayerMatchStats.ball_recoveries,
+            PlayerMatchStats.yellow_cards,
         )
         .join(Match, PlayerMatchStats.match_id == Match.id)
         .join(PlayerSeason, PlayerMatchStats.player_season_id == PlayerSeason.id)
@@ -394,15 +404,18 @@ def _load_appearances(
         )
     ).all()
     by_player: dict[int, list[Appearance]] = {}
-    for player_season_id, match_id, scheduled_at, minutes, points, goals, assists in rows:
-        by_player.setdefault(player_season_id, []).append(
+    for row in rows:
+        by_player.setdefault(row.player_season_id, []).append(
             Appearance(
-                match_id=match_id,
-                scheduled_at=scheduled_at,
-                minutes=minutes,
-                points=points,
-                goals=goals,
-                assists=assists,
+                match_id=row.match_id,
+                scheduled_at=row.scheduled_at,
+                minutes=row.field_minutes,
+                points=row.points,
+                goals=row.goals,
+                assists=row.assists,
+                saves=row.saves,
+                ball_recoveries=row.ball_recoveries,
+                yellow_cards=row.yellow_cards,
             )
         )
     return by_player
@@ -593,12 +606,18 @@ def _build_row(
     total_points = sum(a.points for a in history)
     total_goals = sum(a.goals for a in history)
     total_assists = sum(a.assists for a in history)
+    total_saves = sum(a.saves for a in history)
+    total_recoveries = sum(a.ball_recoveries for a in history)
+    total_yellows = sum(a.yellow_cards for a in history)
     row["total_appearances"] = len(history)
     row["total_minutes"] = total_minutes
     row["total_points"] = total_points
     row["points_per90"] = per90(total_points, total_minutes)
     row["goals_per90"] = per90(total_goals, total_minutes)
     row["assists_per90"] = per90(total_assists, total_minutes)
+    row["saves_per90"] = per90(total_saves, total_minutes)
+    row["recoveries_per90"] = per90(total_recoveries, total_minutes)
+    row["yellows_per90"] = per90(total_yellows, total_minutes)
     row["has_history"] = bool(history)
 
     # Appearance and start shares over the club's matches before cutoff.
