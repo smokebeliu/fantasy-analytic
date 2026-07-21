@@ -616,6 +616,14 @@
     (`error.details.job`), тест шага 5 обновлён соответствующе. Схема БД и
     миграции не менялись.
 
+### Шаг 10. Аналитический frontend
+
+Карточка выполнения:
+
+- Начат: 2026-07-21
+- Агент/ветка: `cursor/step10-analytical-frontend-b3bb`
+- Статус: `IN_PROGRESS`
+
 ## Журнал обновлений
 
 | Дата | Шаг | Изменение статуса | Commit/PR | Результат |
@@ -650,3 +658,4 @@
 | 2026-07-21 | 9 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step9-user-rest-api-6b12` |
 | 2026-07-21 | 9 | `IN_PROGRESS → DONE` | PR #14 | Read API (сезоны/туры/матчи/игроки с фильтрами, projections+компоненты), `POST /optimizer/squad` и `/optimizer/transfers`, Pydantic-контракты, пагинация, единый формат ошибок, OpenAPI `docs/openapi.json`; read-путь только из БД |
 | 2026-07-21 | 10 | `PLANNED → READY` | — | Разблокирован завершением шага 9 |
+| 2026-07-21 | 10 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step10-analytical-frontend-b3bb` |

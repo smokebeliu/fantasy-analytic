@@ -97,7 +97,7 @@ PYTHONPATH=src python3 -m fantasy_analytics.ingest_cli --season-name 2025/2026
 | 7 | Базовая модель прогноза | 6 | `DONE` |
 | 8 | Оптимизатор состава | 7 | `DONE` |
 | 9 | Пользовательский REST API | 5, 7, 8 | `DONE` |
-| 10 | Аналитический frontend | 9 | `READY` |
+| 10 | Аналитический frontend | 9 | `IN_PROGRESS` |
 | 11 | Ручное обновление из frontend | 5, 10 | `PLANNED` |
 | 12 | Backtesting и сравнение моделей | 2, 7 | `PLANNED` |
 | 13 | Интеграционная сборка и эксплуатационная готовность | 9, 11, 12 | `PLANNED` |
@@ -352,7 +352,7 @@ PostgreSQL.
 
 ### Шаг 10. Аналитический frontend
 
-Статус: `READY`
+Статус: `IN_PROGRESS`
 
 Цель: показать данные следующего тура и позволить собрать состав.
 

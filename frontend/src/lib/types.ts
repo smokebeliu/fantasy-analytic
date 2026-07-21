@@ -1,0 +1,208 @@
+// TypeScript contracts mirroring the FastAPI schemas in docs/openapi.json
+// (Fantasy Analytics API 0.2.0). Kept in sync manually; only the fields the UI
+// consumes are modelled, plus the shared envelopes.
+
+export type Role = "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD";
+
+export type ForecastModel = "poisson_events" | "season_mean" | "recent_form";
+
+export type PlayerOrder = "projection" | "price" | "name" | "selected_by";
+
+export interface PageMeta {
+  limit: number;
+  offset: number;
+  total: number;
+  count: number;
+}
+
+export interface SnapshotMeta {
+  run_id: number;
+  season_id?: number | null;
+  data_freshness?: string | null;
+  quality_checked_at?: string | null;
+}
+
+export interface SeasonRulesModel {
+  total_budget?: number | null;
+  total_players?: number | null;
+  starting_players?: number | null;
+  full_roster_constraints?: unknown;
+  starting_roster_constraints?: unknown;
+}
+
+export interface SeasonModel {
+  season_id: number;
+  fantasy_season_id: string;
+  stat_season_id: string;
+  name: string;
+  competition_name?: string | null;
+  is_active: boolean;
+  starts_at?: string | null;
+  ends_at?: string | null;
+  snapshot?: SnapshotMeta | null;
+}
+
+export interface SeasonDetailModel extends SeasonModel {
+  rules?: SeasonRulesModel | null;
+}
+
+export interface SeasonListResponse {
+  items: SeasonModel[];
+  pagination: PageMeta;
+}
+
+export interface TourModel {
+  tour_id: number;
+  season_id: number;
+  fantasy_tour_id: string;
+  name: string;
+  status: string;
+  starts_at?: string | null;
+  finishes_at?: string | null;
+  transfers_start_at?: string | null;
+  transfers_deadline_at?: string | null;
+  total_transfers?: number | null;
+  max_same_team_players?: number | null;
+}
+
+export interface TourListResponse {
+  items: TourModel[];
+  pagination: PageMeta;
+}
+
+export interface ProjectionModel {
+  model_name: string;
+  model_version: string;
+  feature_version?: string | null;
+  scoring_version?: string | null;
+  match_id?: number | null;
+  expected_points?: number | null;
+  uncertainty?: number | null;
+  p_appearance?: number | null;
+  expected_minutes?: number | null;
+  components?: Record<string, number> | null;
+}
+
+export interface PlayerModel {
+  player_season_id: number;
+  role: Role;
+  fantasy_player_id?: string | null;
+  player_name?: string | null;
+  club_id?: number | null;
+  club_name?: string | null;
+  price?: number | null;
+  availability_status?: string | null;
+  status_description?: string | null;
+  selected_by?: number | null;
+  form?: number | null;
+  season_score?: number | null;
+  average_score?: number | null;
+  last_tour_score?: number | null;
+  rank?: number | null;
+  projection?: ProjectionModel | null;
+}
+
+export interface PlayerListResponse {
+  items: PlayerModel[];
+  pagination: PageMeta;
+  snapshot?: SnapshotMeta | null;
+}
+
+export interface PlayerHistoryEntry {
+  match_id: number;
+  tour_id?: number | null;
+  scheduled_at?: string | null;
+  minutes: number;
+  points: number;
+  goals: number;
+  assists: number;
+  saves: number;
+  ball_recoveries: number;
+  yellow_cards: number;
+  red_cards: number;
+  goals_conceded: number;
+}
+
+export interface PlayerDetailModel extends PlayerModel {
+  season_id: number;
+  history: PlayerHistoryEntry[];
+  snapshot?: SnapshotMeta | null;
+}
+
+// The optimizer response keeps its nested explanation permissive on the wire.
+// The UI reads a well-known subset, so those fields are typed explicitly.
+
+export interface OptimizerCandidate {
+  player_season_id: number;
+  fantasy_player_id?: string | null;
+  player_name?: string | null;
+  role: Role;
+  club_id: number;
+  club_name?: string | null;
+  price: number;
+  expected_points: number;
+  opponent_name?: string | null;
+  is_home?: boolean | null;
+  is_starter?: boolean;
+  is_captain?: boolean;
+  is_vice_captain?: boolean;
+  bench_order?: number | null;
+}
+
+export interface OptimizerTransfers {
+  allowed: number;
+  made: number;
+  kept: number;
+  in: OptimizerCandidate[];
+  out: number[];
+  missing_from_pool: number[];
+}
+
+export interface OptimizerSolution {
+  status: string;
+  objective_expected_points: number;
+  starting_expected_points: number;
+  formation: string;
+  total_price: number;
+  unused_budget: number;
+  captain: OptimizerCandidate;
+  vice_captain: OptimizerCandidate;
+  squad: OptimizerCandidate[];
+  starting: OptimizerCandidate[];
+  bench: OptimizerCandidate[];
+  transfers?: OptimizerTransfers | null;
+}
+
+export interface OptimizerRules {
+  total_budget: number;
+  total_players: number;
+  starting_players: number;
+  full_limits: Record<string, [number, number]>;
+  starting_limits: Record<string, [number, number]>;
+  max_same_team: number;
+  total_transfers?: number | null;
+}
+
+export interface OptimizerResponse {
+  optimizer_version: string;
+  model: string;
+  mode: string;
+  generated_at: string;
+  run_id: number;
+  season_id: number;
+  season: Record<string, unknown>;
+  tour: Record<string, unknown>;
+  cutoff?: string | null;
+  rules: OptimizerRules;
+  counts: Record<string, unknown>;
+  solution: OptimizerSolution;
+  valid: boolean;
+}
+
+export interface ApiErrorBody {
+  error: {
+    type: string;
+    message: string;
+    details?: unknown;
+  };
+}
