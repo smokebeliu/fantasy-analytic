@@ -287,6 +287,40 @@ model are:
   Sports.ru API. The computation is pure arithmetic, so recomputing on the same
   snapshot is deterministic.
 
+## Squad optimizer (step 8)
+
+`fantasy-optimize` turns the expected-points forecast into a valid fantasy squad
+for a target tour. It is an integer program solved with OR-Tools CP-SAT and adds
+no schema (it only reads the forecast/feature path). The design points that
+touch the data model are:
+
+- **Rules come from the database.** The budget (`season_rules.total_budget`), the
+  squad size (`total_players`), the starting size (`starting_players`) and the
+  per-role squad/starting limits (`full_roster_constraints` /
+  `starting_roster_constraints`, each a list of
+  `{role, minCount, maxCount}`) are read from `season_rules`. The club limit
+  (`fantasy_tours.max_same_team_players`) and the transfer limit
+  (`fantasy_tours.total_transfers`) come from the target tour. Because these
+  demonstrably vary by season and tour, none of them is hard-coded.
+- **Decision variables.** Binary `pick` (in the 15-man squad), `start` (in the
+  starting eleven) and `captain` variables, with `start <= pick`,
+  `captain <= start` and exactly one captain. Per-role squad and starting counts
+  are bounded by the parsed limits, total spend by the budget, and per-club
+  picks by the club limit. The vice-captain is the best remaining starter and the
+  bench is ordered by expected points with the reserve keeper last.
+- **Objective.** Maximise `sum(expected_points * start) + expected_points(captain)`
+  — the fantasy scoring of a lineup with the captain counted twice — with a
+  strict secondary tie-break that minimises spend (maximising unused budget). A
+  single search worker and a fixed random seed make the same inputs deterministic.
+- **Two modes.** With no current squad the optimizer builds a fresh roster; given
+  a `current_squad` (fantasy ids) it keeps at least `total_players - transfers`
+  of the present players, so at most the transfer limit is spent. Players missing
+  from the candidate pool are reported as forced transfers.
+- **Independent validation.** `validate_squad` re-checks every rule on the
+  produced solution without trusting the solver, so a model bug surfaces as a
+  validation failure rather than an invalid squad, and an infeasible problem
+  raises a clear `OptimizerError`.
+
 ## Questions left for the next discovery iteration
 
 - Which `statMatch` fields reliably expose shots, possession, xG and lineups for

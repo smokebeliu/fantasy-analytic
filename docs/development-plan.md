@@ -90,7 +90,7 @@ PYTHONPATH=src python3 -m fantasy_analytics.ingest_cli --season-name 2025/2026
 | 5 | Ручной ingestion job и backend-команда | 2, 4 | `DONE` |
 | 6 | Аналитические признаки | 4 | `DONE` |
 | 7 | Базовая модель прогноза | 6 | `DONE` |
-| 8 | Оптимизатор состава | 7 | `READY` |
+| 8 | Оптимизатор состава | 7 | `IN_PROGRESS` |
 | 9 | Пользовательский REST API | 5, 7, 8 | `PLANNED` |
 | 10 | Аналитический frontend | 9 | `PLANNED` |
 | 11 | Ручное обновление из frontend | 5, 10 | `PLANNED` |
@@ -772,7 +772,7 @@ PostgreSQL.
 
 ### Шаг 8. Оптимизатор состава
 
-Статус: `PLANNED`
+Статус: `IN_PROGRESS`
 
 Цель: выбрать валидные 15 игроков, стартовый состав, капитана и скамейку.
 
@@ -799,9 +799,9 @@ PostgreSQL.
 
 Карточка выполнения:
 
-- Начат:
+- Начат: 2026-07-21
 - Завершён:
-- Агент/ветка:
+- Агент/ветка: `cursor/step8-squad-optimizer-d3bf`
 - Commit/PR:
 - Проверки:
 - Решения и отклонения:
@@ -1014,3 +1014,4 @@ PostgreSQL.
 | 2026-07-21 | 7 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step7-baseline-forecast-model-bcb6` |
 | 2026-07-21 | 7 | `IN_PROGRESS → DONE` | PR #9 | CLI `fantasy-forecast`, таблица `player_forecasts`, событийная модель (Poisson + восстановленная таблица начисления) и baseline `season_mean`/`recent_form`; аддитивные компоненты, детерминизм, идемпотентная запись |
 | 2026-07-21 | 8 | `PLANNED → READY` | — | Разблокирован завершением шага 7 |
+| 2026-07-21 | 8 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step8-squad-optimizer-d3bf` |
