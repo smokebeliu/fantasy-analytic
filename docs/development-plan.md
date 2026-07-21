@@ -86,7 +86,7 @@ PYTHONPATH=src python3 -m fantasy_analytics.ingest_cli --season-name 2025/2026
 | 1 | Persistence layer и миграции | 0 | `DONE` |
 | 2 | Полный исторический импорт | 1 | `DONE` |
 | 3 | Исследование расширенной match-статистики | 0, 2 (данные) | `DONE` |
-| 4 | Контроль качества и reconciliation | 2, 3 | `READY` |
+| 4 | Контроль качества и reconciliation | 2, 3 | `IN_PROGRESS` |
 | 5 | Ручной ingestion job и backend-команда | 2, 4 | `PLANNED` |
 | 6 | Аналитические признаки | 4 | `PLANNED` |
 | 7 | Базовая модель прогноза | 6 | `PLANNED` |
@@ -372,7 +372,7 @@ PostgreSQL.
 
 ### Шаг 4. Контроль качества и reconciliation
 
-Статус: `READY`
+Статус: `IN_PROGRESS`
 
 Цель: автоматически обнаруживать неполные или противоречивые данные до
 аналитических расчётов.
@@ -399,9 +399,9 @@ PostgreSQL.
 
 Карточка выполнения:
 
-- Начат:
+- Начат: 2026-07-21
 - Завершён:
-- Агент/ветка:
+- Агент/ветка: `cursor/step4-data-quality-reconciliation-a55e`
 - Commit/PR:
 - Проверки:
 - Решения и отклонения:
@@ -746,3 +746,4 @@ PostgreSQL.
 | 2026-07-21 | 3 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step3-match-stats-spike-e44d` |
 | 2026-07-21 | 3 | `IN_PROGRESS → DONE` | ветка `cursor/step3-match-stats-spike-e44d` | Разведка statMatch: CLI `fantasy-match-stats`, таблица покрытия 113 полей, контрактные тесты |
 | 2026-07-21 | 4 | `PLANNED → READY` | — | Разблокирован завершением шагов 2 и 3 |
+| 2026-07-21 | 4 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step4-data-quality-reconciliation-a55e` |
