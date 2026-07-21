@@ -9,6 +9,9 @@ const nextConfig = {
   reactStrictMode: true,
   // Emit a self-contained server bundle so the Docker image stays small.
   output: "standalone",
+  // Allow the dev server to accept requests proxied from other hosts (e.g. a
+  // remote browser); production (next start) is unaffected.
+  allowedDevOrigins: ["127.0.0.1", "localhost"],
   async rewrites() {
     return [
       {

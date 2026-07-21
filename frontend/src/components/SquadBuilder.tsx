@@ -135,6 +135,8 @@ export function SquadBuilder({
         model,
       });
       setResult(res);
+      // Load the optimal roster into the builder so the summary stays in sync.
+      setSelected(res.solution.squad.map(candidateToPlayer));
     } catch (err) {
       setOptimizerError(err instanceof ApiError ? err.message : "Ошибка оптимизатора");
     } finally {
@@ -161,16 +163,12 @@ export function SquadBuilder({
         model,
       });
       setResult(res);
+      setSelected(res.solution.squad.map(candidateToPlayer));
     } catch (err) {
       setOptimizerError(err instanceof ApiError ? err.message : "Ошибка оптимизатора");
     } finally {
       setOptimizing(false);
     }
-  };
-
-  const fillFromResult = () => {
-    if (!result) return;
-    setSelected(result.solution.squad.map(candidateToPlayer));
   };
 
   return (
@@ -375,11 +373,6 @@ export function SquadBuilder({
                   onClick={() => setSelected([])}
                 >
                   Очистить
-                </button>
-              )}
-              {result && (
-                <button className="btn btn--ghost btn--sm" onClick={fillFromResult}>
-                  Загрузить состав из результата
                 </button>
               )}
             </div>
