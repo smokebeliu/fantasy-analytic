@@ -460,22 +460,65 @@ PostgreSQL.
 - Документировать backup/restore и безопасные локальные secrets.
 - Добавить structured logs и endpoint состояния компонентов.
 
-Ключевые детали и нюансы (операционный трек, частично реализовано):
+Ключевые детали и нюансы (операционный трек, деплой развёрнут и работает):
 
-- Настроен деплой на выделенный OVH VPS через Dokploy: прод-стек
-  `compose.prod.yaml` (postgres + migrate + api + frontend), где публично
-  доступен только frontend через Traefik на `fantasy.smokebeliu.com` с TLS от
-  Let's Encrypt; api и postgres — в приватной сети.
-- CI/CD: `.github/workflows/ci-cd.yml` прогоняет тесты backend (unittest +
-  PostgreSQL-сервис) и frontend (typecheck, vitest, build) на PR/пуш в
-  `develop`, затем при мердже в `develop` дёргает деплой-вебхук Dokploy
-  (секрет `DOKPLOY_DEPLOY_WEBHOOK`).
-- Полное руководство (DNS, Dokploy, secrets, первичный импорт, smoke-тест) —
-  в [`docs/deployment.md`](deployment.md).
-- Ещё не сделано в рамках полного шага 13: единый локальный `docker compose up`
-  как задокументированная команда первой версии, graceful shutdown/structured
-  logs, проверка совместимости схемы при деплое и завершение шагов-зависимостей
-  11 и 12. Поэтому статус шага остаётся `PLANNED`.
+Приложение развёрнуто на выделенном OVH VPS (`145.239.74.111`) под управлением
+Dokploy и доступно на `https://fantasy.smokebeliu.com`. Полное руководство (DNS,
+Dokploy, secrets, первичный импорт, smoke-тест, бэкапы) —
+в [`docs/deployment.md`](deployment.md). Ниже — как это устроено и настроено.
+
+Архитектура прод-стека (`compose.prod.yaml`):
+
+- Сервисы: `postgres` (16-alpine, том `postgres_data`), одноразовый `migrate`
+  (`fantasy-migrate upgrade` при каждом деплое), `api` (FastAPI, `:8000`,
+  healthcheck) и `frontend` (Next.js, `:3000`).
+- Публично через reverse-proxy Traefik (входит в Dokploy) доступен **только**
+  `frontend`. Он подключён к внешней сети `dokploy-network` и несёт Traefik-метки:
+  роутер на `Host(fantasy.smokebeliu.com)`, `entrypoints=websecure`,
+  `certresolver=letsencrypt` (TLS от Let's Encrypt), плюс редирект http→https.
+- `api` и `postgres` живут в приватной сети `fantasy-internal` и наружу не
+  публикуются. Браузер ходит same-origin через `/api/backend/*`, который
+  Next.js проксирует на `http://api:8000` внутри приватной сети.
+- Домен и TLS заданы метками в compose, отдельно во вкладке Domains в Dokploy
+  ничего добавлять не нужно.
+
+Конфигурация Dokploy:
+
+- Тип приложения — **Compose**, provider **GitHub**, ветка `develop`,
+  Compose Path `compose.prod.yaml`.
+- Переменные окружения (`.env.prod.example`): `POSTGRES_DB`, `POSTGRES_USER`,
+  `POSTGRES_PASSWORD` (обязателен, дефолта нет), `FRONTEND_DOMAIN`.
+
+CI/CD и автодеплой при мердже в `develop`:
+
+- `.github/workflows/ci-cd.yml`: на PR/пуш в `develop` прогоняются тесты
+  backend (`unittest` + сервис PostgreSQL) и frontend (typecheck, vitest,
+  build); при мердже в `develop`, если тесты зелёные, job `deploy` дёргает
+  деплой-вебхук Dokploy (секрет GitHub `DOKPLOY_DEPLOY_WEBHOOK`), Dokploy
+  забирает `develop` и пересобирает стек. Проверено сквозняком.
+
+Важный нюанс сборки frontend:
+
+- `next.config.mjs` вычисляет `rewrites()` (прокси `/api/backend/*`) на этапе
+  **сборки** и «запекает» destination в манифест. Поэтому `BACKEND_URL` задаётся
+  в `frontend/Dockerfile` (builder-стадия, через `ARG`, дефолт `http://api:8000`)
+  **до** `npm run build` — иначе прокси браузера уходит в localhost и все
+  `/api/backend/*` отвечают 500. Server-компоненты читают `BACKEND_URL` в
+  рантайме, поэтому от рантайм-переменной зависит только серверный рендер.
+
+Первичное наполнение прод-БД (данные пусты после чистого деплоя):
+
+- Миграции применяются автоматически (`migrate`). Затем внутри контейнера `api`:
+  `fantasy-ingest --season-name 2025/2026` → `fantasy-quality` (публикует
+  snapshot) → `fantasy-forecast --tour <fantasy_tour_id>`. Сезон 2025/2026
+  завершён, поэтому `--tour` обязателен и задаётся именно `fantasy_tour_id` тура
+  (не порядковым номером). Проверено на проде: сезон, туры, игроки и проекции
+  отдаются через API.
+
+Ещё не сделано в рамках полного шага 13 (поэтому статус — `PLANNED`): graceful
+shutdown и structured logs, проверка совместимости схемы при деплое, кнопка
+обновления данных из UI (шаг 11), backtesting (шаг 12) и smoke-test первой
+версии в README. Автодеплой-часть и развёртывание на сервере — выполнены.
 
 Критерии приёмки:
 

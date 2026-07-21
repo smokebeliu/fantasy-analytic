@@ -86,32 +86,43 @@ dig +short fantasy.smokebeliu.com     # должно вернуть 145.239.74.1
 ## Шаг 3. Первичное наполнение данными
 
 Миграции применяются автоматически при каждом деплое (сервис `migrate`).
-Но read-эндпоинты и фронтенд показывают данные только после импорта сезона и
-расчёта прогноза. Импорт ходит в живой Sports.ru GraphQL API (нужен исходящий
-интернет с VPS).
+Но read-эндпоинты и фронтенд показывают данные только после импорта сезона,
+публикации snapshot и расчёта прогноза. Импорт ходит в живой Sports.ru GraphQL
+API (нужен исходящий интернет с VPS).
 
-Вариант A — через админ-эндпоинт API (внутри контейнера, наружу он не открыт):
-
-```bash
-# на VPS
-docker compose -p fantasy-analytics exec api \
-  python3 -c "import urllib.request,json; \
-  print(urllib.request.urlopen(urllib.request.Request( \
-  'http://localhost:8000/admin/ingestion/rpl/refresh', method='POST')).read())"
-```
-
-Вариант B — напрямую CLI внутри контейнера `api`:
+Dokploy именует контейнеры как `<project>-service-<hash>-<service>-1`, поэтому
+сначала найдите контейнер `api`, затем выполняйте команды внутри него:
 
 ```bash
-docker compose -p fantasy-analytics exec api \
-  fantasy-ingest --season-name 2025/2026
-docker compose -p fantasy-analytics exec api \
-  fantasy-forecast --tour <id-следующего-тура>
+# на VPS: найти контейнер api
+API=$(docker ps --format '{{.Names}}' | grep -- '-api-1')
+
+# 1) импорт сезона (~30 с, ходит в Sports.ru)
+docker exec "$API" fantasy-ingest --season-name 2025/2026
+# 2) контроль качества — публикует snapshot (активирует его для read API)
+docker exec "$API" fantasy-quality
+# 3) прогноз на нужный тур
+docker exec "$API" fantasy-forecast --tour <fantasy_tour_id>
 ```
 
-Полный импорт сезона занимает ~45 секунд. Без `fantasy-forecast` таблица
-проекций пуста и фронтенд не покажет прогнозы. Кнопка обновления прямо из UI
-появится в шаге 11 плана.
+Нюансы шагов:
+
+- `fantasy-quality` обязателен: без него snapshot не активен и read-эндпоинты
+  вернут пустые данные, даже если импорт прошёл.
+- Сезон 2025/2026 завершён, поэтому у `fantasy-forecast` параметр `--tour`
+  обязателен и задаётся **`fantasy_tour_id`** тура (не порядковым номером). Узнать
+  id можно из каталога:
+  `curl -s https://fantasy.smokebeliu.com/api/backend/tours?limit=200`
+  (поле `fantasy_tour_id`; напр. тур 30 → `1801`, тур 15 → `1786`). Фронтенд по
+  умолчанию открывает последний тур, поэтому прогноз на него делает страницу
+  наполненной.
+- Альтернатива для активного (незавершённого) сезона: один админ-эндпоинт
+  выполняет импорт + quality gate — `POST /admin/ingestion/rpl/refresh` (наружу
+  не открыт, только внутри контейнера), после чего всё равно нужен
+  `fantasy-forecast`.
+
+Без `fantasy-forecast` таблица проекций пуста и фронтенд не покажет прогнозы.
+Кнопка обновления прямо из UI появится в шаге 11 плана.
 
 ## Шаг 4. Автодеплой при мердже в `develop`
 
