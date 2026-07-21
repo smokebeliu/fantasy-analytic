@@ -37,9 +37,11 @@ tests should target `TEST_DATABASE_URL` (safe to drop/recreate `public`).
 ### Python dependencies
 
 - Python 3.12 system interpreter. Runtime deps (SQLAlchemy 2, Alembic, psycopg 3
- binary, FastAPI, uvicorn) plus test deps (httpx, pytest) are installed into the
- system Python via `pip --break-system-packages` and refreshed by the cloud
- update script; there is no virtualenv.
+ binary, FastAPI, uvicorn, pydantic, and ortools for the CP-SAT squad optimizer)
+ plus test deps (httpx, pytest) are installed into the system Python via
+ `pip --break-system-packages` and refreshed by the cloud update script; there is
+ no virtualenv. `ortools` (declared `>=9.10` in `pyproject.toml`) is required by
+ `fantasy_analytics.optimizer` / the `fantasy-optimize` CLI.
 - The `alembic` CLI lives in `~/.local/bin` (added to `PATH` by `~/.bashrc`).
 - The project package is imported via `PYTHONPATH=src`; it is not pip-installed,
  so the `fantasy-*` console scripts from `pyproject.toml` are not on `PATH` —
@@ -52,7 +54,10 @@ tests should target `TEST_DATABASE_URL` (safe to drop/recreate `public`).
 - Full test suite (unit + DB integration): `PYTHONPATH=src python3 -m unittest
  discover -s tests -v`. Integration tests auto-skip unless `TEST_DATABASE_URL`
  is set (it is exported by `~/.bashrc`); one live-network test stays skipped
- unless `RUN_LIVE_MATCH_STATS=1`.
+ unless `RUN_LIVE_MATCH_STATS=1`. Some test modules import sibling test modules
+ (e.g. `test_optimizer` imports `FakeClient` from `test_ingestion`), so run a
+ single module via discovery too: `PYTHONPATH=src python3 -m unittest discover -s
+ tests -p test_optimizer.py -v`, not `-m tests.test_optimizer`.
 - Ensure the schema exists before running DB tools/API:
  `PYTHONPATH=src python3 -m fantasy_analytics.db.cli upgrade`.
 - The admin API is `PYTHONPATH=src python3 -m fantasy_analytics.api --host
