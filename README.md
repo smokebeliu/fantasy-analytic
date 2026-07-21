@@ -425,6 +425,15 @@ frontend) also runs via Compose: `docker compose up -d --build` starts `postgres
 `migrate`, `api` (`:8000`) and `frontend` (`:3000`). Import a season first so the
 read endpoints have an active snapshot.
 
+## Production deployment
+
+The app is deployed to a dedicated OVH VPS via Dokploy (Docker Compose +
+Traefik) with automatic redeploys on merge to `develop`. The production stack
+lives in `compose.prod.yaml`, the CI/CD pipeline in
+`.github/workflows/ci-cd.yml`, and the full setup guide (DNS, Dokploy,
+secrets, first-time ingestion, smoke test) in
+[`docs/deployment.md`](docs/deployment.md).
+
 ## Tests
 
 Run the unit tests without Docker:

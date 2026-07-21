@@ -26,6 +26,10 @@ commit/PR, команды проверок и их результаты) и жу
 - Правила состава, лимиты клуба и трансферов берутся из API, а не из констант.
 - Авторизация и хранение cookies Sports.ru не входят в первую версию.
 - Каждый расчёт прогноза должен иметь версию модели и snapshot входных данных.
+- Деплой первой версии — на выделенный OVH VPS под управлением Dokploy
+  (Docker Compose + Traefik), приложение на `fantasy.smokebeliu.com`.
+- Автодеплой выполняется при мердже в ветку `develop` (CI-гейт на тестах,
+  затем деплой-вебхук Dokploy).
 
 ## Протокол работы независимого агента
 
@@ -455,6 +459,23 @@ PostgreSQL.
 - Добавить миграции при развёртывании и проверку совместимости схемы.
 - Документировать backup/restore и безопасные локальные secrets.
 - Добавить structured logs и endpoint состояния компонентов.
+
+Ключевые детали и нюансы (операционный трек, частично реализовано):
+
+- Настроен деплой на выделенный OVH VPS через Dokploy: прод-стек
+  `compose.prod.yaml` (postgres + migrate + api + frontend), где публично
+  доступен только frontend через Traefik на `fantasy.smokebeliu.com` с TLS от
+  Let's Encrypt; api и postgres — в приватной сети.
+- CI/CD: `.github/workflows/ci-cd.yml` прогоняет тесты backend (unittest +
+  PostgreSQL-сервис) и frontend (typecheck, vitest, build) на PR/пуш в
+  `develop`, затем при мердже в `develop` дёргает деплой-вебхук Dokploy
+  (секрет `DOKPLOY_DEPLOY_WEBHOOK`).
+- Полное руководство (DNS, Dokploy, secrets, первичный импорт, smoke-тест) —
+  в [`docs/deployment.md`](deployment.md).
+- Ещё не сделано в рамках полного шага 13: единый локальный `docker compose up`
+  как задокументированная команда первой версии, graceful shutdown/structured
+  logs, проверка совместимости схемы при деплое и завершение шагов-зависимостей
+  11 и 12. Поэтому статус шага остаётся `PLANNED`.
 
 Критерии приёмки:
 
