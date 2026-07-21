@@ -275,6 +275,35 @@ to only write the `forecast.json`/`forecast.csv` artifacts. The forecast design
 and the reconstructed scoring rules live in
 [`docs/data-model.md`](docs/data-model.md).
 
+## Squad optimizer
+
+Once forecasts can be built, `fantasy-optimize` selects the optimal fantasy
+squad for a target tour: the full roster, the starting eleven, the captain, the
+vice-captain and the ordered bench. It is a genuine integer program solved with
+OR-Tools CP-SAT that maximises the expected points of the starting eleven plus
+the captain (counted twice). The budget and per-role squad/starting limits come
+from `season_rules`, and the club limit and transfer limit come from the target
+`fantasy_tours` row — nothing is hard-coded. It only reads the database (through
+the forecast builder) and never calls the Sports.ru API.
+
+```bash
+export DATABASE_URL=postgresql+psycopg://fantasy:fantasy@localhost:5432/fantasy
+PYTHONPATH=src python3 -m fantasy_analytics.optimizer_cli \
+  --tour 1786 \
+  --output data/optimizer
+```
+
+Without `--tour` the next non-finished tour is used; a fully finished season
+requires an explicit tour. By default a fresh squad is built. Pass
+`--current-squad` (comma-separated fantasy player ids) to switch to
+limited-transfers mode, which keeps the existing roster and changes at most the
+tour's transfer limit (override it with `--max-transfers`). `--model` selects the
+forecast model to optimize on (`poisson_events` by default). Every result is
+re-checked by an independent validator, an infeasible problem raises a clear
+error, and the computation is deterministic. The full result is written to
+`optimizer.json`. The optimizer design lives in
+[`docs/data-model.md`](docs/data-model.md).
+
 ## Manual ingestion API
 
 `fantasy-api` serves a small FastAPI control plane that triggers a full refresh
