@@ -67,7 +67,7 @@
 | --- | --- | --- | --- |
 | 0 | Discovery-прототип и локальный Docker | — | `DONE` |
 | 1 | Persistence layer и миграции | 0 | `DONE` |
-| 2 | Полный исторический импорт | 1 | `READY` |
+| 2 | Полный исторический импорт | 1 | `IN_PROGRESS` |
 | 3 | Исследование расширенной match-статистики | 0 | `READY` |
 | 4 | Контроль качества и reconciliation | 2, 3 | `PLANNED` |
 | 5 | Ручной ingestion job и backend-команда | 2, 4 | `PLANNED` |
@@ -201,7 +201,7 @@ PostgreSQL.
 
 ### Шаг 2. Полный исторический импорт
 
-Статус: `READY`
+Статус: `IN_PROGRESS`
 
 Цель: загрузить прошлый сезон в PostgreSQL на уровне сезона, тура, матча, клуба
 и каждого игрока.
@@ -229,9 +229,9 @@ PostgreSQL.
 
 Карточка выполнения:
 
-- Начат:
+- Начат: 2026-07-21
 - Завершён:
-- Агент/ветка:
+- Агент/ветка: `cursor/full-historical-import-d9c2`
 - Commit/PR:
 - Проверки:
 - Решения и отклонения:
@@ -643,3 +643,4 @@ PostgreSQL.
 | 2026-07-20 | 1 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/persistence-layer-migrations-bd72` |
 | 2026-07-20 | 1 | `IN_PROGRESS → DONE` | `0b9d2d2` | SQLAlchemy 2, Alembic-миграции, repository для ingestion_runs/raw_api_responses |
 | 2026-07-20 | 2 | `PLANNED → READY` | — | Разблокирован завершением шага 1 |
+| 2026-07-21 | 2 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/full-historical-import-d9c2` |
