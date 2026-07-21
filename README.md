@@ -386,6 +386,45 @@ tour's projections. The OpenAPI schema is committed at
 PYTHONPATH=src python3 -m fantasy_analytics.openapi_cli --output docs/openapi.json
 ```
 
+## Analytical frontend
+
+`frontend/` is a Next.js (App Router) + TypeScript app that consumes the read API
+and squad optimizer. It shows the next tour's players with position/club/status/
+price filters, server-side sorting, pagination and up-to-four player comparison;
+a player card (slide-over drawer and a dedicated `/players/[id]` route) with match
+history and a forecast breakdown by scoring component; and a squad builder that
+validates every roster rule (size, per-role, budget, club limit, duplicates) on
+the client before submission and calls the optimizer to build a squad or suggest
+transfers. Data freshness and the model version are shown in the header, and
+loading/empty/error states are covered across all views.
+
+Every browser request is proxied same-origin through `/api/backend/*` to the
+FastAPI backend (no CORS), so the frontend only needs `BACKEND_URL` to reach it.
+
+Run it against a running backend (see the API sections above) and a tour whose
+projections have been persisted with `fantasy-forecast --tour <id>`:
+
+```bash
+cd frontend
+npm install
+BACKEND_URL=http://127.0.0.1:8000 npm run dev   # http://127.0.0.1:3000
+```
+
+Checks (from `frontend/`):
+
+```bash
+npm run typecheck                 # tsc --noEmit
+npm run build                     # production build (standalone output)
+npm test                          # Vitest unit + component tests
+npx playwright install chromium   # once
+BACKEND_URL=http://127.0.0.1:8000 npm run e2e   # Playwright e2e (needs API up)
+```
+
+The whole stack (PostgreSQL, migrations, API, worker-free read API and the
+frontend) also runs via Compose: `docker compose up -d --build` starts `postgres`,
+`migrate`, `api` (`:8000`) and `frontend` (`:3000`). Import a season first so the
+read endpoints have an active snapshot.
+
 ## Tests
 
 Run the unit tests without Docker:

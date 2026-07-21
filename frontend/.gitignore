@@ -1,0 +1,13 @@
+/node_modules
+/.next
+/out
+/build
+/coverage
+/playwright-report
+/test-results
+/.playwright
+next-env.d.ts.timestamp
+*.tsbuildinfo
+.env.local
+.DS_Store
+npm-debug.log*
