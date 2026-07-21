@@ -1,0 +1,113 @@
+# Production Compose for Dokploy (development-plan step 13, operational track).
+#
+# Deployed by Dokploy on the OVH VPS. Only the frontend is published through the
+# shared Traefik reverse proxy (external `dokploy-network`); PostgreSQL and the
+# API stay on the private `fantasy-internal` network and are never exposed to the
+# public internet. The frontend proxies every browser request to the API via
+# BACKEND_URL (same-origin `/api/backend/*`), so no CORS or extra domain is
+# needed for the API.
+#
+# See docs/deployment.md for the full Dokploy + DNS + CI/CD setup.
+
+name: fantasy-analytics
+
+x-database-url: &database-url
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-fantasy}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-fantasy}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fantasy}
+      POSTGRES_USER: ${POSTGRES_USER:-fantasy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - fantasy-internal
+
+  # One-off schema upgrade. Runs to completion on every (re)deploy and exits.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *database-url
+    entrypoint: ["fantasy-migrate"]
+    command: ["upgrade"]
+    restart: "no"
+    networks:
+      - fantasy-internal
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *database-url
+    entrypoint: ["python3", "-m", "fantasy_analytics.api"]
+    command: ["--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - fantasy-internal
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      BACKEND_URL: http://api:8000
+    restart: unless-stopped
+    networks:
+      - fantasy-internal
+      - dokploy-network
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      # HTTPS router (Let's Encrypt via Dokploy's Traefik).
+      - traefik.http.routers.fantasy-frontend.rule=Host(`${FRONTEND_DOMAIN:-fantasy.smokebeliu.com}`)
+      - traefik.http.routers.fantasy-frontend.entrypoints=websecure
+      - traefik.http.routers.fantasy-frontend.tls.certresolver=letsencrypt
+      - traefik.http.routers.fantasy-frontend.service=fantasy-frontend
+      # HTTP router: redirect plain traffic to HTTPS.
+      - traefik.http.routers.fantasy-frontend-web.rule=Host(`${FRONTEND_DOMAIN:-fantasy.smokebeliu.com}`)
+      - traefik.http.routers.fantasy-frontend-web.entrypoints=web
+      - traefik.http.routers.fantasy-frontend-web.middlewares=fantasy-frontend-redirect
+      - traefik.http.middlewares.fantasy-frontend-redirect.redirectscheme.scheme=https
+      - traefik.http.middlewares.fantasy-frontend-redirect.redirectscheme.permanent=true
+      # Upstream container port.
+      - traefik.http.services.fantasy-frontend.loadbalancer.server.port=3000
+
+volumes:
+  postgres_data:
+
+networks:
+  fantasy-internal:
+    driver: bridge
+  # Shared network created by Dokploy; Traefik lives here.
+  dokploy-network:
+    external: true
