@@ -532,7 +532,7 @@ PostgreSQL.
 - Начат: 2026-07-21
 - Завершён: 2026-07-21
 - Агент/ветка: `cursor/step5-manual-ingestion-job-7eae`
-- Commit/PR: PR по ветке `cursor/step5-manual-ingestion-job-7eae`
+- Commit/PR: PR #7
 - Проверки:
   - `python -m unittest discover -s tests` — 72 теста проходят (было 57),
     1 live-skip; добавлены `tests/test_api.py` (9) и
@@ -871,5 +871,5 @@ PostgreSQL.
 | 2026-07-21 | Миграции | `0001` статичный baseline | — | Переписана начальная миграция под инкрементальные изменения (autogenerate), добавлена `0002` |
 | 2026-07-21 | 5 | `PLANNED → READY` | — | Разблокирован завершением шагов 2 и 4 |
 | 2026-07-21 | 5 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step5-manual-ingestion-job-7eae` |
-| 2026-07-21 | 5 | `IN_PROGRESS → DONE` | PR по ветке `cursor/step5-manual-ingestion-job-7eae` | FastAPI `fantasy-api`, таблица `ingestion_jobs`, worker-процесс с advisory lock; refresh `202`/`409`, статус переживает рестарт, e2e-импорт опубликован |
+| 2026-07-21 | 5 | `IN_PROGRESS → DONE` | PR #7 | FastAPI `fantasy-api`, таблица `ingestion_jobs`, worker-процесс с advisory lock; refresh `202`/`409`, статус переживает рестарт, e2e-импорт опубликован |
 | 2026-07-21 | 6 | `PLANNED → READY` | — | Разблокирован завершением шага 4 |
