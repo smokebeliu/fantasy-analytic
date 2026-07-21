@@ -736,7 +736,7 @@ PostgreSQL.
 - Начат: 2026-07-21
 - Завершён: 2026-07-21
 - Агент/ветка: `cursor/step7-baseline-forecast-model-bcb6`
-- Commit/PR: PR по ветке `cursor/step7-baseline-forecast-model-bcb6`
+- Commit/PR: PR #9
 - Проверки:
   - `python -m unittest discover -s tests` — 106 тестов проходят (было 82),
     1 live-skip; добавлен `tests/test_forecast.py` (24 теста: Poisson-хелперы,
@@ -1012,5 +1012,5 @@ PostgreSQL.
 | 2026-07-21 | 6 | `IN_PROGRESS → DONE` | PR по ветке `cursor/step6-analytical-features-5fc2` | CLI `fantasy-features`, leakage-free dataset (rolling 3/5/10, per-90, сила клубов/соперника, p_appearance/expected_minutes), словарь признаков |
 | 2026-07-21 | 7 | `PLANNED → READY` | — | Разблокирован завершением шага 6 |
 | 2026-07-21 | 7 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step7-baseline-forecast-model-bcb6` |
-| 2026-07-21 | 7 | `IN_PROGRESS → DONE` | PR по ветке `cursor/step7-baseline-forecast-model-bcb6` | CLI `fantasy-forecast`, таблица `player_forecasts`, событийная модель (Poisson + восстановленная таблица начисления) и baseline `season_mean`/`recent_form`; аддитивные компоненты, детерминизм, идемпотентная запись |
+| 2026-07-21 | 7 | `IN_PROGRESS → DONE` | PR #9 | CLI `fantasy-forecast`, таблица `player_forecasts`, событийная модель (Poisson + восстановленная таблица начисления) и baseline `season_mean`/`recent_form`; аддитивные компоненты, детерминизм, идемпотентная запись |
 | 2026-07-21 | 8 | `PLANNED → READY` | — | Разблокирован завершением шага 7 |
