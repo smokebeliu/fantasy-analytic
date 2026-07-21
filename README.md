@@ -219,6 +219,39 @@ explain). Reconciliation compares club season aggregates against results derived
 from `club_match_stats` and each player's season fantasy total against the sum
 of their per-match stats.
 
+## Manual ingestion API
+
+`fantasy-api` serves a small FastAPI control plane that triggers a full refresh
+on demand (no scheduler). The request only enqueues a job and returns
+immediately; a separate worker process runs the import followed by the quality
+gate, so a snapshot is published only after both succeed. Job state lives in the
+`ingestion_jobs` table, so statuses survive an API restart, and a partial unique
+index plus a PostgreSQL advisory lock guarantee at most one refresh per
+tournament at a time (no Redis).
+
+```bash
+export DATABASE_URL=postgresql+psycopg://fantasy:fantasy@localhost:5432/fantasy
+PYTHONPATH=src python3 -m fantasy_analytics.db.cli upgrade   # ensure schema
+PYTHONPATH=src python3 -m fantasy_analytics.api --host 127.0.0.1 --port 8000
+```
+
+Trigger an RPL refresh and poll its status:
+
+```bash
+# Returns 202 with a job id immediately; a second call while it runs returns 409.
+curl -X POST http://127.0.0.1:8000/admin/ingestion/rpl/refresh
+
+# Read the job back by the id from the response above.
+curl http://127.0.0.1:8000/admin/ingestion/runs/1
+```
+
+The optional JSON body selects a season (`{"season_name": "2025/2026"}`,
+`{"season_id": "59"}` or `{"current": true}`); the default is the latest
+completed season. A successful job records the import counts, the quality verdict
+and a `data_freshness` timestamp; a failed job records a bounded, credential-free
+error message. The worker can also be run directly for a queued job:
+`PYTHONPATH=src python3 -m fantasy_analytics.ingestion_worker <job_id>`.
+
 ## Tests
 
 Run the unit tests without Docker:
