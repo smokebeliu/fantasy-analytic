@@ -1,0 +1,285 @@
+"""Unit and integration tests for the analytical feature dataset (step 6).
+
+The unit tests exercise the pure, leakage-sensitive helpers (rolling windows,
+per-90 rates and club strength) in isolation. The integration tests import a
+small synthetic season into a real PostgreSQL database, publish it through the
+quality gate, inject a second (future) tour and then build the feature dataset
+to prove that features come only from matches before the cutoff, that a
+target-tour match can never leak into the history, and that every row is stamped
+with player, tour, cutoff and feature version. They are skipped automatically
+when no database is reachable.
+"""
+
+from __future__ import annotations
+
+import os
+import unittest
+from datetime import datetime, timezone
+
+from sqlalchemy import text
+
+from fantasy_analytics.db import (
+    create_db_engine,
+    create_session_factory,
+    migration,
+)
+from fantasy_analytics.features import (
+    FEATURE_VERSION,
+    UNAVAILABLE_STATUSES,
+    Appearance,
+    ClubMatch,
+    FeaturesError,
+    _club_strengths,
+    _venue_strength,
+    build_feature_dataset,
+    per90,
+    recent_before_cutoff,
+)
+from fantasy_analytics.ingestion import IngestionOptions, run_ingestion
+from fantasy_analytics.quality import run_quality_checks
+
+# Reuse the fake client and consistent fixture from the sibling test modules.
+from test_ingestion import FakeClient
+from test_quality import _consistent_fixture
+
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL") or os.environ.get(
+    "DATABASE_URL"
+)
+
+_CUTOFF = datetime(2025, 8, 1, tzinfo=timezone.utc)
+
+
+def _appearance(day: int, points: int, minutes: int = 80) -> Appearance:
+    return Appearance(
+        match_id=day,
+        scheduled_at=datetime(2025, 7, day, 12, 0, tzinfo=timezone.utc),
+        minutes=minutes,
+        points=points,
+        goals=0,
+        assists=0,
+    )
+
+
+def _database_available() -> bool:
+    if not TEST_DATABASE_URL:
+        return False
+    try:
+        engine = create_db_engine(TEST_DATABASE_URL)
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        engine.dispose()
+    except Exception:
+        return False
+    return True
+
+
+DATABASE_AVAILABLE = _database_available()
+requires_database = unittest.skipUnless(
+    DATABASE_AVAILABLE,
+    "PostgreSQL is not reachable via TEST_DATABASE_URL/DATABASE_URL",
+)
+
+
+class PureHelperTest(unittest.TestCase):
+    def test_recent_before_cutoff_excludes_future_and_sorts_desc(self) -> None:
+        appearances = [
+            _appearance(10, 5),
+            _appearance(20, 6),
+            _appearance(31, 9),  # 2025-07-31 -> before the 2025-08-01 cutoff
+        ]
+        future = Appearance(
+            match_id=99,
+            scheduled_at=datetime(2025, 8, 5, 12, 0, tzinfo=timezone.utc),
+            minutes=90,
+            points=15,
+            goals=1,
+            assists=1,
+        )
+        recent = recent_before_cutoff([*appearances, future], _CUTOFF)
+
+        self.assertEqual([31, 20, 10], [a.match_id for a in recent])
+        self.assertNotIn(99, [a.match_id for a in recent])
+
+    def test_recent_before_cutoff_excludes_target_tour_matches(self) -> None:
+        # A match before the cutoff that belongs to the target tour must still
+        # be dropped (second line of defence against a mis-dated deadline).
+        appearances = [_appearance(10, 5), _appearance(20, 6)]
+        recent = recent_before_cutoff(
+            appearances, _CUTOFF, exclude_match_ids=frozenset({20})
+        )
+        self.assertEqual([10], [a.match_id for a in recent])
+
+    def test_per90_zero_when_no_minutes(self) -> None:
+        self.assertEqual(0.0, per90(5, 0))
+        self.assertEqual(9.0, per90(9, 90))
+        self.assertEqual(4.5, per90(9, 180))
+
+    def test_club_strengths_and_venue_fallback(self) -> None:
+        club_matches = {
+            1: [
+                ClubMatch(1, datetime(2025, 7, 1, tzinfo=timezone.utc), True, 3, 0),
+                ClubMatch(2, datetime(2025, 7, 8, tzinfo=timezone.utc), False, 1, 2),
+            ],
+            2: [
+                ClubMatch(3, datetime(2025, 7, 1, tzinfo=timezone.utc), False, 0, 3),
+            ],
+        }
+        strengths, league = _club_strengths(club_matches)
+
+        self.assertEqual(3.0, strengths[1]["home_attack"])
+        self.assertEqual(0.0, strengths[1]["home_defense"])
+        self.assertEqual(1.0, strengths[1]["away_attack"])
+        self.assertEqual(2.0, strengths[1]["away_defense"])
+
+        # Club 2 has no home match: its home strength falls back to the league
+        # mean of home attack (only club 1 played home, scoring 3).
+        attack, defense = _venue_strength(2, True, strengths, league)
+        self.assertEqual(league["home_attack"], attack)
+        self.assertEqual(3.0, attack)
+
+        # An unknown club falls back entirely to the league averages.
+        attack, defense = _venue_strength(999, False, strengths, league)
+        self.assertEqual(league["away_attack"], attack)
+        self.assertEqual(league["away_defense"], defense)
+
+    def test_injury_is_an_unavailable_status(self) -> None:
+        self.assertIn("INJURY", UNAVAILABLE_STATUSES)
+        self.assertNotIn("FIERY", UNAVAILABLE_STATUSES)
+
+
+@requires_database
+class FeatureDatasetIntegrationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = create_db_engine(TEST_DATABASE_URL)
+        self.addCleanup(self.engine.dispose)
+        migration.downgrade(TEST_DATABASE_URL)
+        migration.upgrade(TEST_DATABASE_URL)
+        self.session_factory = create_session_factory(self.engine)
+        self.run_id = self._import_and_publish()
+
+    def _import_and_publish(self) -> int:
+        report = run_ingestion(
+            FakeClient(_consistent_fixture()),
+            self.session_factory,
+            IngestionOptions(history_workers=1),
+        )
+        run_quality_checks(self.session_factory, run_id=report["run_id"])
+        return report["run_id"]
+
+    def _exec(self, sql: str, **params):
+        with self.engine.begin() as connection:
+            return connection.execute(text(sql), params)
+
+    def _scalar(self, sql: str, **params):
+        with self.engine.connect() as connection:
+            return connection.execute(text(sql), params).scalar_one()
+
+    def _add_future_tour(self) -> None:
+        """Insert a second, not-yet-played tour with one club_a vs club_b match."""
+        season_id = self._scalar("SELECT id FROM seasons LIMIT 1")
+        club_a = self._scalar(
+            "SELECT club_id FROM season_clubs WHERE fantasy_team_id = '10'"
+        )
+        club_b = self._scalar(
+            "SELECT club_id FROM season_clubs WHERE fantasy_team_id = '20'"
+        )
+        tour_id = self._exec(
+            """
+            INSERT INTO fantasy_tours
+                (season_id, fantasy_tour_id, name, status, starts_at,
+                 transfers_deadline_at)
+            VALUES (:season, '1773', '2 тур', 'SCHEDULED',
+                    '2025-07-25T16:00:00Z', '2025-07-24T16:00:00Z')
+            RETURNING id
+            """,
+            season=season_id,
+        ).scalar_one()
+        self._exec(
+            """
+            INSERT INTO matches
+                (season_id, tour_id, stat_match_id, scheduled_at,
+                 home_club_id, away_club_id, home_score, away_score)
+            VALUES (:season, :tour, '900002', '2025-07-25T16:00:00Z',
+                    :home, :away, NULL, NULL)
+            """,
+            season=season_id,
+            tour=tour_id,
+            home=club_a,
+            away=club_b,
+        )
+
+    def _rows_by_player(self, report: dict) -> dict[str, dict]:
+        return {row["fantasy_player_id"]: row for row in report["rows"]}
+
+    def test_dataset_uses_only_pre_cutoff_history(self) -> None:
+        self._add_future_tour()
+
+        report = build_feature_dataset(self.session_factory, tour_ref="1773")
+
+        self.assertEqual(FEATURE_VERSION, report["feature_version"])
+        self.assertEqual("1773", report["tour"]["fantasy_tour_id"])
+        self.assertEqual("2025-07-24T16:00:00+00:00", report["cutoff"])
+        self.assertEqual(2, report["counts"]["rows"])
+
+        rows = self._rows_by_player(report)
+        home = rows["111"]
+        away = rows["222"]
+
+        # Row identity requirements: player, tour, cutoff and feature version.
+        for row in (home, away):
+            self.assertEqual(FEATURE_VERSION, row["feature_version"])
+            self.assertEqual(report["cutoff"], row["tour_cutoff"])
+            self.assertIn("player_season_id", row)
+
+        # Only the tour-1 match (before the cutoff) is used as history.
+        self.assertEqual(1, home["total_appearances"])
+        self.assertEqual(1, home["appearances_3"])
+        self.assertTrue(home["has_history"])
+        self.assertEqual(12.0, home["points_avg_3"])
+        self.assertEqual(78, home["total_minutes"])
+        self.assertEqual(round(12 / 78 * 90, 4), home["points_per90"])
+
+        # Fixture context: club_a hosts, club_b visits.
+        self.assertTrue(home["is_home"])
+        self.assertFalse(away["is_home"])
+        self.assertEqual(home["club_id"], away["opponent_club_id"])
+        # 2025-07-25 16:00 minus 2025-07-18 17:30 -> 6 whole days.
+        self.assertEqual(6, home["rest_days"])
+
+        # Availability and appearance modelling for a fit, ever-present player.
+        self.assertTrue(home["is_available"])
+        self.assertEqual(1.0, home["p_appearance"])
+        self.assertEqual(78.0, home["expected_minutes"])
+        self.assertEqual(1.0, home["appearance_share"])
+        self.assertEqual(1.0, home["start_share"])
+
+    def test_target_tour_match_never_leaks_into_history(self) -> None:
+        # Tour 1's deadline (17:50) is after its own kickoff (17:30) in the
+        # fixture, so only the explicit target-tour exclusion prevents leakage.
+        report = build_feature_dataset(self.session_factory, tour_ref="1772")
+
+        self.assertEqual("1772", report["tour"]["fantasy_tour_id"])
+        for row in report["rows"]:
+            self.assertEqual(0, row["total_appearances"])
+            self.assertFalse(row["has_history"])
+            self.assertEqual(0.0, row["points_avg_5"])
+
+    def test_default_selects_active_snapshot(self) -> None:
+        self._add_future_tour()
+
+        report = build_feature_dataset(self.session_factory, tour_ref="1773")
+
+        self.assertEqual(self.run_id, report["run_id"])
+
+    def test_unknown_tour_raises(self) -> None:
+        with self.assertRaises(FeaturesError):
+            build_feature_dataset(self.session_factory, tour_ref="does-not-exist")
+
+    def test_finished_season_without_tour_raises(self) -> None:
+        # Every imported tour is FINISHED, so an implicit "next tour" fails.
+        with self.assertRaises(FeaturesError):
+            build_feature_dataset(self.session_factory)
+
+
+if __name__ == "__main__":
+    unittest.main()

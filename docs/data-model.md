@@ -219,6 +219,36 @@ The job's `result` JSONB embeds the import report, the full quality report and
 the derived freshness/`snapshot_active` flags. `ingestion_run_id` links the job
 to the `IngestionRun` it produced once the worker starts the import.
 
+## Analytical features (step 6)
+
+`fantasy-features` builds a reproducible, leakage-free dataset for a target tour
+from the active snapshot. It reads only the domain tables of one ingestion run
+and never calls the Sports.ru API or writes to the database, so step 6 adds no
+schema. The full field list and missing-value strategy live in
+[`docs/feature-dictionary.md`](feature-dictionary.md); the design points that
+touch the data model are:
+
+- **Snapshot source.** Features read run-scoped facts (`player_match_stats`,
+  `club_match_stats`, `fantasy_player_snapshots`) filtered by the active run's
+  `ingestion_run_id`, joined to the shared catalog (`player_seasons`, `players`,
+  `season_clubs`, `matches`, `fantasy_tours`).
+- **Cutoff and leakage.** The cutoff is the target tour's
+  `transfers_deadline_at` (falling back to `starts_at`, then earliest fixture
+  kickoff). Only matches with `scheduled_at < cutoff` are used, and matches
+  belonging to the target tour are excluded from history explicitly as a second
+  guard against a mis-dated deadline.
+- **Appearances vs. starts.** `player_match_stats` rows approximate appearances
+  (history is imported only for players with minutes). There is no imported
+  lineup flag, so a "start" is approximated as `field_minutes >= 60`; both the
+  appearance and start shares are measured against the club's matches before the
+  cutoff.
+- **Club strength.** Home/away attack and defence are per-match goals for/against
+  derived from `club_match_stats` before the cutoff, with the league mean used as
+  the fallback when a club has no matches at a venue yet.
+- **Availability.** Point-in-time `availability_status` from the active snapshot
+  drives `is_available`; `INJURY`/`SUSPENDED`/etc. zero the appearance
+  probability and expected minutes.
+
 ## Questions left for the next discovery iteration
 
 - Which `statMatch` fields reliably expose shots, possession, xG and lineups for
