@@ -85,6 +85,7 @@ query DiscoverSeason($seasonID: ID!) {
         matches {
           id
           scheduledAt
+          matchStatus
           home {
             score
             team {

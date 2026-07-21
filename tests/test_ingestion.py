@@ -37,6 +37,7 @@ from fantasy_analytics.queries import (
     SEASON_QUERY,
     TOURNAMENT_QUERY,
 )
+from fantasy_analytics.quality import run_quality_checks
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL") or os.environ.get(
     "DATABASE_URL"
@@ -162,6 +163,7 @@ def _build_fixture() -> dict:
                                 {
                                     "id": "900001",
                                     "scheduledAt": "2025-07-18T17:30:00Z",
+                                    "matchStatus": "CLOSED",
                                     "home": {
                                         "score": 2,
                                         "team": {"id": "club_a", "name": "Клуб A"},
@@ -482,6 +484,72 @@ class IngestionIntegrationTest(unittest.TestCase):
                 {"id": report["run_id"]},
             ).scalar_one()
         self.assertEqual("succeeded", status)
+
+    def test_unplayed_season_stores_null_scores_and_passes_quality(self) -> None:
+        """A not-yet-started season returns 0:0 fixtures with matchStatus
+        NOT_STARTED; they must be stored without a score so they do not count as
+        played draws, and the quality gate must still publish the snapshot even
+        outside the 72h adjustment window."""
+        fixture = _build_fixture()
+        season = fixture["season"]["data"]["fantasyQueries"]["season"]
+        match = season["tours"][0]["matches"][0]
+        match["matchStatus"] = "NOT_STARTED"
+        match["scheduledAt"] = "2026-08-10T17:00:00Z"
+        match["home"]["score"] = 0
+        match["away"]["score"] = 0
+        # No player has minutes yet, so no match history is fetched.
+        for player in fixture["players"]["data"]["fantasyQueries"]["players"]["list"]:
+            player["gameStat"] = _game_stat(0, 0)
+            player["seasonScoreInfo"] = {
+                "place": None,
+                "score": 0,
+                "averageScore": 0,
+                "scoreForLastTour": 0,
+                "topPercent": None,
+            }
+        # The team season aggregate reports a not-started season (all zero).
+        for alias in ("team0", "team1"):
+            fixture["team_stats"]["data"]["stat_season"][0][alias] = {
+                "MatchesPlayed": 0,
+                "MatchesWon": 0,
+                "MatchesDrawn": 0,
+                "MatchesLost": 0,
+                "GoalsScored": 0,
+                "GoalsConceded": 0,
+                "YellowCards": 0,
+                "RedCards": 0,
+            }
+
+        report = run_ingestion(
+            FakeClient(fixture), self.session_factory, IngestionOptions()
+        )
+
+        self.assertEqual(0, report["counts"]["player_match_stats"])
+        self.assertEqual(2, report["counts"]["club_match_stats"])
+
+        with self.engine.connect() as connection:
+            home_score, away_score = connection.execute(
+                text("SELECT home_score, away_score FROM matches")
+            ).one()
+            self.assertIsNone(home_score)
+            self.assertIsNone(away_score)
+            goals = [
+                row[0]
+                for row in connection.execute(
+                    text("SELECT goals_scored FROM club_match_stats")
+                )
+            ]
+            self.assertTrue(all(value is None for value in goals))
+
+        # Evaluate well outside the 72h window to prove unplayed fixtures never
+        # produce a blocking reconciliation mismatch.
+        quality = run_quality_checks(
+            self.session_factory,
+            run_id=report["run_id"],
+            now=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        )
+        self.assertTrue(quality["passed"])
+        self.assertEqual(0, quality["counts"]["blocking"])
 
     def test_repeated_import_keeps_logical_entity_counts_stable(self) -> None:
         client = FakeClient(_build_fixture())
