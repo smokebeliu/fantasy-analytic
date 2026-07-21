@@ -8,13 +8,24 @@ version = "0.1.0"
 description = "Sports.ru Fantasy RPL data discovery prototype"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "SQLAlchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
 
 [project.scripts]
 fantasy-discover = "fantasy_analytics.cli:main"
+fantasy-migrate = "fantasy_analytics.db.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"fantasy_analytics.migrations" = ["*.mako"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
