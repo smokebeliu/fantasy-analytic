@@ -219,6 +219,32 @@ explain). Reconciliation compares club season aggregates against results derived
 from `club_match_stats` and each player's season fantasy total against the sum
 of their per-match stats.
 
+## Analytical features
+
+Once a snapshot is published, `fantasy-features` builds a reproducible,
+leakage-free dataset for a target tour from the *active* snapshot. Every feature
+is derived strictly from matches that kicked off before the tour's transfer
+deadline (the `cutoff`), so the dataset never sees the tour it predicts. It only
+reads the database — no Sports.ru API call.
+
+```bash
+export DATABASE_URL=postgresql+psycopg://fantasy:fantasy@localhost:5432/fantasy
+PYTHONPATH=src python3 -m fantasy_analytics.features_cli \
+  --tour 1786 \
+  --output data/features
+```
+
+Without `--tour` the next non-finished tour is chosen; a fully finished season
+requires an explicit tour (which is what backtesting in step 12 needs). Each row
+carries `player`, `tour`, `cutoff` and `feature_version` and includes rolling
+3/5/10-match metrics, per-90 rates, start and appearance shares, home/away club
+and opponent strength, rest days, availability, and separate appearance
+probability and expected-minutes estimates. Outputs are written to the chosen
+directory: `features.json` (metadata, feature dictionary and rows),
+`features.csv` and `feature-dictionary.json`. The committed feature dictionary
+and the missing-value strategy live in
+[`docs/feature-dictionary.md`](docs/feature-dictionary.md).
+
 ## Manual ingestion API
 
 `fantasy-api` serves a small FastAPI control plane that triggers a full refresh
@@ -273,6 +299,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 - [`docs/data-model.md`](docs/data-model.md) documents confirmed identifiers,
   grains, mappings and unresolved questions.
+- [`docs/feature-dictionary.md`](docs/feature-dictionary.md) documents the
+  analytical feature dataset, its leakage guarantees and missing-value strategy.
 - [`docs/development-plan.md`](docs/development-plan.md) is the agent-oriented
   execution roadmap and must be updated after every completed step.
 - [`src/fantasy_analytics/db/models.py`](src/fantasy_analytics/db/models.py) is
