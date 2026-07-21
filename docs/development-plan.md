@@ -1,7 +1,7 @@
 # План дальнейшей разработки Fantasy Analytics
 
 Обновлено: 2026-07-21  
-Текущий прогресс: 5 из 14 шагов завершён.
+Текущий прогресс: 6 из 14 шагов завершён.
 
 ## Цель
 
@@ -87,8 +87,8 @@ PYTHONPATH=src python3 -m fantasy_analytics.ingest_cli --season-name 2025/2026
 | 2 | Полный исторический импорт | 1 | `DONE` |
 | 3 | Исследование расширенной match-статистики | 0, 2 (данные) | `DONE` |
 | 4 | Контроль качества и reconciliation | 2, 3 | `DONE` |
-| 5 | Ручной ingestion job и backend-команда | 2, 4 | `READY` |
-| 6 | Аналитические признаки | 4 | `PLANNED` |
+| 5 | Ручной ingestion job и backend-команда | 2, 4 | `DONE` |
+| 6 | Аналитические признаки | 4 | `READY` |
 | 7 | Базовая модель прогноза | 6 | `PLANNED` |
 | 8 | Оптимизатор состава | 7 | `PLANNED` |
 | 9 | Пользовательский REST API | 5, 7, 8 | `PLANNED` |
@@ -465,7 +465,7 @@ PostgreSQL.
 
 ### Шаг 5. Ручной ingestion job и backend-команда
 
-Статус: `READY`
+Статус: `DONE`
 
 Цель: запускать полное обновление по запросу, без scheduler.
 
@@ -490,18 +490,81 @@ PostgreSQL.
 
 Не входит: кнопка во frontend и автоматический запуск.
 
+Фактический результат:
+
+- Добавлена таблица `ingestion_jobs` (модель `IngestionJob`, миграция `0003`):
+  статусы `pending/running/succeeded/failed`, ссылка `ingestion_run_id` на
+  порождённый импорт, `result` (JSONB) и `error_message`. Частичный уникальный
+  индекс `ingestion_jobs_active_tournament_idx` гарантирует не более одного
+  активного (`pending`/`running`) задания на турнир.
+- `IngestionJobRepository` (`db/job_repository.py`) идемпотентно ставит задание
+  в очередь (возвращает существующее активное вместо дубликата) и переводит его
+  по жизненному циклу; хелпер `advisory_lock_key` детерминированно отображает
+  слуг турнира в ключ advisory-lock.
+- Worker `fantasy-ingestion-worker` (`ingestion_worker.py`) исполняется
+  **отдельным процессом**: берёт session-level `pg_try_advisory_lock` по турниру,
+  помечает задание `running`, запускает импорт (шаг 2) и затем gate качества
+  (шаг 4), публикующий snapshot только при 0 blocking, и записывает объединённый
+  `result` (счётчики импорта, отчёт качества, `data_freshness`,
+  `snapshot_active`) либо безопасное сообщение об ошибке (редакция кредов).
+- FastAPI-приложение `fantasy-api` (`api.py`): `POST /admin/ingestion/rpl/refresh`
+  ставит задание в очередь, сразу возвращает `202` с id и запускает worker
+  отдельным `subprocess` (`start_new_session=True`); при активном задании
+  возвращает `409`. `GET /admin/ingestion/runs/{id}` читает задание из БД.
+  `GET /health` — проба готовности. Тело запроса позволяет выбрать сезон
+  (`season_id`/`season_name`/`current`), по умолчанию — последний завершённый.
+
+Критерии приёмки (выполнено):
+
+- API сразу возвращает `202` и ID задания — боевой POST вернул `202` за 0.03s.
+- Одновременно не более одного refresh турнира — второй POST во время импорта
+  вернул `409`; защита на двух уровнях (частичный unique-индекс + advisory lock,
+  проверено тестом на удержании чужого lock).
+- Статусы `pending/running/succeeded/failed` переживают перезапуск API —
+  после Ctrl-C и повторного старта `GET /runs/1` вернул `succeeded`.
+- Ошибка содержит безопасное диагностическое сообщение — креды в строке
+  подключения редактируются (`safe_error_message`, unit-тест).
+- Успешный запуск обновляет время актуальности — `result.data_freshness`
+  устанавливается в `finished_at` опубликованного run.
+
 Карточка выполнения:
 
-- Начат:
-- Завершён:
-- Агент/ветка:
-- Commit/PR:
+- Начат: 2026-07-21
+- Завершён: 2026-07-21
+- Агент/ветка: `cursor/step5-manual-ingestion-job-7eae`
+- Commit/PR: PR #7
 - Проверки:
+  - `python -m unittest discover -s tests` — 72 теста проходят (было 57),
+    1 live-skip; добавлены `tests/test_api.py` (9) и
+    `tests/test_ingestion_worker.py` (6): успех/сбой worker, mutual exclusion по
+    advisory lock, пропуск не-`pending` задания, `202`/`409`/`404`, персистентность
+    статуса после «перезапуска» API, e2e refresh с реальным импортом.
+  - Миграции: цепочка `0002 → 0003` создаёт `ingestion_jobs`,
+    `downgrade`/`upgrade` проходят, `compare_metadata` = 0 расхождений.
+  - Боевой e2e через `fantasy-api` + worker-subprocess на живом API Sports.ru:
+    `POST /admin/ingestion/rpl/refresh` → `202` (0.03s), задание прошло
+    `pending → running → succeeded` за ~46s, импортировано 16 клубов, 30 туров,
+    240 матчей, 590 игроков, 9578 player_match_stats; gate качества — 0 blocking,
+    0 warning, `ingestion_runs.is_active = true`, `data_freshness` заполнен.
+    Параллельный POST во время импорта → `409`; после Ctrl-C + рестарта API
+    `GET /runs/1` = `succeeded` (статус переживает перезапуск).
 - Решения и отклонения:
+  - Введена отдельная таблица `ingestion_jobs` (админ-уровень) поверх
+    `ingestion_runs` (внутренний импорт): задание ссылается на порождённый run
+    через `ingestion_run_id`. Путь `GET /admin/ingestion/runs/{id}` принимает id
+    задания (возвращаемый refresh-эндпоинтом): «run» здесь трактуется как
+    админ-уровневый refresh-run.
+  - Worker запускается как самостоятельный `subprocess` (не `multiprocessing`),
+    отвязанный через `start_new_session=True`, чтобы импорт переживал рестарт API.
+    Для тестируемости ядро вынесено в импортируемую `execute_job`, а запуск
+    worker'а в API инъектируется (`spawn_worker`).
+  - Redis не используется: взаимное исключение — частичный unique-индекс +
+    session-level advisory lock (`pg_try_advisory_lock`, AUTOCOMMIT-соединение,
+    освобождается в `finally`).
 
 ### Шаг 6. Аналитические признаки
 
-Статус: `PLANNED`
+Статус: `READY`
 
 Цель: построить воспроизводимый dataset для прогноза следующего тура.
 
@@ -807,3 +870,6 @@ PostgreSQL.
 | 2026-07-21 | 4 | `IN_PROGRESS → DONE` | PR по ветке `cursor/step4-data-quality-reconciliation-a55e` | Gate качества `fantasy-quality`, таблица `data_quality_issues`, активный snapshot, reconciliation с окном 72ч |
 | 2026-07-21 | Миграции | `0001` статичный baseline | — | Переписана начальная миграция под инкрементальные изменения (autogenerate), добавлена `0002` |
 | 2026-07-21 | 5 | `PLANNED → READY` | — | Разблокирован завершением шагов 2 и 4 |
+| 2026-07-21 | 5 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step5-manual-ingestion-job-7eae` |
+| 2026-07-21 | 5 | `IN_PROGRESS → DONE` | PR #7 | FastAPI `fantasy-api`, таблица `ingestion_jobs`, worker-процесс с advisory lock; refresh `202`/`409`, статус переживает рестарт, e2e-импорт опубликован |
+| 2026-07-21 | 6 | `PLANNED → READY` | — | Разблокирован завершением шага 4 |

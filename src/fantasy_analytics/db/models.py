@@ -113,6 +113,58 @@ class IngestionRun(Base):
     )
 
 
+class IngestionJob(Base):
+    """A manual refresh job (development-plan step 5).
+
+    The job is the admin-facing unit of work behind ``POST /admin/ingestion``:
+    it wraps a full import plus the quality gate and survives an API restart
+    because its state lives in PostgreSQL. A partial unique index guarantees at
+    most one *active* (``pending``/``running``) job per tournament, which is how
+    "no more than one refresh runs concurrently" is enforced at the data layer;
+    a session-level advisory lock in the worker is the second line of defence.
+    Once the worker creates the underlying import, ``ingestion_run_id`` links the
+    job to its :class:`IngestionRun`.
+    """
+
+    __tablename__ = "ingestion_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'succeeded', 'failed')",
+            name="ingestion_jobs_status_check",
+        ),
+        Index(
+            "ingestion_jobs_active_tournament_idx",
+            "tournament_slug",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'running')"),
+        ),
+    )
+
+    id: Mapped[int] = _identity_pk()
+    trigger_type: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'manual'")
+    )
+    tournament_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_season_id: Mapped[str | None] = mapped_column(Text)
+    requested_season_name: Mapped[str | None] = mapped_column(Text)
+    use_current_season: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'pending'")
+    )
+    ingestion_run_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("ingestion_runs.id", ondelete="SET NULL")
+    )
+    error_message: Mapped[str | None] = mapped_column(Text)
+    result: Mapped[Any | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class RawApiResponse(Base):
     __tablename__ = "raw_api_responses"
     __table_args__ = (
@@ -573,6 +625,7 @@ __all__ = [
     "FantasyPlayerSnapshot",
     "FantasyPointDetail",
     "FantasyTour",
+    "IngestionJob",
     "IngestionRun",
     "Match",
     "Player",

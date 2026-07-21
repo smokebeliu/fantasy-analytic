@@ -196,6 +196,29 @@ still revise those results. On the completed 2025/2026 season all 16 clubs and
 590 players reconcile exactly, so the checks do not false-positive on a
 well-formed snapshot.
 
+## Manual ingestion jobs (step 5)
+
+The admin API (`fantasy-api`) turns a refresh into a persisted job rather than a
+synchronous request. `POST /admin/ingestion/rpl/refresh` inserts a row into
+`ingestion_jobs` (status `pending`) and returns `202` with the job id
+immediately; a separate worker process (`fantasy-ingestion-worker`) runs the
+import plus the quality gate and drives the job through
+`running → succeeded`/`failed`. `GET /admin/ingestion/runs/{id}` reads a job
+back by that id, so its status survives an API restart. There is no Redis: a
+partial unique index and a session-level advisory lock replace it.
+
+| Concern | Mechanism |
+| --- | --- |
+| At most one active refresh per tournament | partial unique index `ingestion_jobs_active_tournament_idx` on `tournament_slug` where `status IN ('pending','running')` |
+| No overlapping imports even under a race | worker holds `pg_try_advisory_lock(key)` keyed by the tournament for the whole run |
+| Status persistence across restarts | job lifecycle and `result` live in `ingestion_jobs` |
+| Safe error surface | `error_message` stores a bounded, credential-redacted description |
+| Data freshness | `result.data_freshness` = the published run's `finished_at`, set only when the snapshot passes the quality gate |
+
+The job's `result` JSONB embeds the import report, the full quality report and
+the derived freshness/`snapshot_active` flags. `ingestion_run_id` links the job
+to the `IngestionRun` it produced once the worker starts the import.
+
 ## Questions left for the next discovery iteration
 
 - Which `statMatch` fields reliably expose shots, possession, xG and lineups for
