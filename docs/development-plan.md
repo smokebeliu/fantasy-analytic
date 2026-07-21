@@ -1,7 +1,7 @@
 # План дальнейшей разработки Fantasy Analytics
 
 Обновлено: 2026-07-21  
-Текущий прогресс: 4 из 14 шагов завершён.
+Текущий прогресс: 5 из 14 шагов завершён.
 
 ## Цель
 
@@ -86,8 +86,8 @@ PYTHONPATH=src python3 -m fantasy_analytics.ingest_cli --season-name 2025/2026
 | 1 | Persistence layer и миграции | 0 | `DONE` |
 | 2 | Полный исторический импорт | 1 | `DONE` |
 | 3 | Исследование расширенной match-статистики | 0, 2 (данные) | `DONE` |
-| 4 | Контроль качества и reconciliation | 2, 3 | `IN_PROGRESS` |
-| 5 | Ручной ingestion job и backend-команда | 2, 4 | `PLANNED` |
+| 4 | Контроль качества и reconciliation | 2, 3 | `DONE` |
+| 5 | Ручной ingestion job и backend-команда | 2, 4 | `READY` |
 | 6 | Аналитические признаки | 4 | `PLANNED` |
 | 7 | Базовая модель прогноза | 6 | `PLANNED` |
 | 8 | Оптимизатор состава | 7 | `PLANNED` |
@@ -372,7 +372,7 @@ PostgreSQL.
 
 ### Шаг 4. Контроль качества и reconciliation
 
-Статус: `IN_PROGRESS`
+Статус: `DONE`
 
 Цель: автоматически обнаруживать неполные или противоречивые данные до
 аналитических расчётов.
@@ -397,18 +397,75 @@ PostgreSQL.
 
 Не входит: исправление данных вручную через UI.
 
+Фактический результат:
+
+- Добавлена таблица `data_quality_issues` (severity `blocking`/`warning`,
+  `expected`/`actual`, `details`) и поля `season_id`, `is_active`,
+  `quality_checked_at` в `ingestion_runs`. Частичный уникальный индекс
+  `ingestion_runs_active_season_idx` гарантирует не более одного активного
+  run на сезон.
+- Модуль `src/fantasy_analytics/quality.py`: формализованный набор проверок
+  (`catalog_completeness`, `reference_integrity`, `duplicate_fixtures`,
+  `match_score_completeness`, `club_result_reconciliation`,
+  `player_points_reconciliation`). Reconciliation сверяет клубные сезонные
+  агрегаты с результатами из `club_match_stats` и сезонный fantasy-итог игрока
+  с суммой его матчевой статистики. Расхождения по матчам внутри 72-часового
+  окна корректировки понижаются с `blocking` до `warning`.
+- `QualityRepository` (`db/quality_repository.py`) идемпотентно перезаписывает
+  issues run'а и публикует snapshot: при отсутствии blocking — помечает run
+  активным и деактивирует прочие активные run'ы сезона; при наличии blocking —
+  оставляет неактивным, не вытесняя последний валидный snapshot.
+- CLI `fantasy-quality` (`quality_cli.py`) печатает JSON-отчёт с ожидаемым и
+  фактическим значением каждой проверки и возвращает код 1 при blocking.
+
+Критерии приёмки (выполнено):
+
+- Формализованный набор blocking/warning проверок — таблица в
+  `docs/data-model.md`, раздел «Data quality gate (step 4)».
+- Некорректный snapshot не становится активным: `is_active` выставляется только
+  при 0 blocking (подтверждено на реальных данных и integration-тестами).
+- Отчёт показывает ожидаемое и фактическое значение каждой проверки (поля
+  `expected`/`actual` в отчёте и в `data_quality_issues`).
+- Fixtures покрывают пропущенную страницу (игрок с минутами без истории →
+  blocking), дубль ID (повтор fixture → blocking) и изменение результата
+  (рассинхрон агрегата → blocking вне окна, warning внутри 72ч).
+
 Карточка выполнения:
 
 - Начат: 2026-07-21
-- Завершён:
+- Завершён: 2026-07-21
 - Агент/ветка: `cursor/step4-data-quality-reconciliation-a55e`
-- Commit/PR:
+- Commit/PR: PR по ветке `cursor/step4-data-quality-reconciliation-a55e`
 - Проверки:
+  - `python -m unittest discover -s tests` — 57 тестов проходят (было 45),
+    1 live-skip; добавлен `tests/test_quality.py` (12 тестов: unit + сценарии
+    missing page, duplicate id, result change и окно 72ч).
+  - Миграции: чистая цепочка `base → 0001 → 0002` создаёт 18 таблиц,
+    `compare_metadata(models, db)` = 0 расхождений; `downgrade`/`upgrade`
+    по ревизиям проходят.
+  - Боевой прогон на сезоне 2025/2026 (16/30/240, 590 игроков, 9578 match-stats):
+    `fantasy-quality` — PASSED, 0 blocking, 0 warning, snapshot активен;
+    `club_result_reconciliation` сверил 16 клубов (0 mismatch),
+    `player_points_reconciliation` — 590 игроков (0 missing_history, 0 mismatch).
+  - Негативный боевой прогон: внедрён дубликат матча → gate BLOCKED (exit 1),
+    issue записан (`expected=1`, `actual=2`), `is_active=false`; после удаления
+    дубликата повторный прогон — PASSED, snapshot снова активен, issues очищены.
 - Решения и отклонения:
+  - Начальная миграция `0001` переписана со «живого» `metadata.create_all`
+    на статичный явный baseline (снимок схемы после шага 2). Прежний подход
+    делал невозможной любую аддитивную миграцию: `create_all` уже создавал новую
+    таблицу/колонки, и `0002` падал с `DuplicateTable`. Модели по-прежнему —
+    единственный источник текущей схемы; последующие миграции используют
+    `alembic revision --autogenerate` (как и предписано в карточке шага 1).
+  - Reconciliation по-игрокам и по-клубам на завершённом сезоне сходится точно,
+    поэтому blocking-строгость безопасна (нет ложных срабатываний). Внутри окна
+    72ч рассинхроны понижаются до warning.
+  - `data_quality_issues` перезаписывается целиком на каждый прогон (delete+
+    insert), обеспечивая идемпотентность.
 
 ### Шаг 5. Ручной ingestion job и backend-команда
 
-Статус: `PLANNED`
+Статус: `READY`
 
 Цель: запускать полное обновление по запросу, без scheduler.
 
@@ -747,3 +804,6 @@ PostgreSQL.
 | 2026-07-21 | 3 | `IN_PROGRESS → DONE` | ветка `cursor/step3-match-stats-spike-e44d` | Разведка statMatch: CLI `fantasy-match-stats`, таблица покрытия 113 полей, контрактные тесты |
 | 2026-07-21 | 4 | `PLANNED → READY` | — | Разблокирован завершением шагов 2 и 3 |
 | 2026-07-21 | 4 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step4-data-quality-reconciliation-a55e` |
+| 2026-07-21 | 4 | `IN_PROGRESS → DONE` | PR по ветке `cursor/step4-data-quality-reconciliation-a55e` | Gate качества `fantasy-quality`, таблица `data_quality_issues`, активный snapshot, reconciliation с окном 72ч |
+| 2026-07-21 | Миграции | `0001` статичный baseline | — | Переписана начальная миграция под инкрементальные изменения (autogenerate), добавлена `0002` |
+| 2026-07-21 | 5 | `PLANNED → READY` | — | Разблокирован завершением шагов 2 и 4 |

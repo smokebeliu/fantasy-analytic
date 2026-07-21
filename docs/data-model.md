@@ -52,6 +52,8 @@ erDiagram
     MATCH ||--o{ CLUB_MATCH_STATS : produces
     SEASON_CLUB ||--o{ CLUB_SEASON_STATS : aggregates
     INGESTION_RUN ||--o{ RAW_API_RESPONSE : captures
+    INGESTION_RUN ||--o{ DATA_QUALITY_ISSUE : records
+    SEASON ||--o{ INGESTION_RUN : publishes
 ```
 
 ## Why the grains are separate
@@ -107,6 +109,7 @@ These values demonstrably vary by tour. Optimizer constraints must come from
 | `player.matches.statDetails` | `fantasy_point_details` |
 | `stat_season.stats(id)` | `club_season_stats` |
 | Derived match scores | `club_match_stats`, `club_season_stats` |
+| Quality-gate violations (step 4) | `data_quality_issues` |
 
 ## Extended match statistics
 
@@ -167,6 +170,31 @@ made yet; this spike is investigation only.
    to different namespaces.
 6. Sports.ru freezes fantasy statistics 72 hours after the final match of a
    tour, so recently completed tours can still change.
+
+## Data quality gate (step 4)
+
+`fantasy-quality` evaluates the snapshot of an ingestion run before analytics
+depend on it. Violations are stored in `data_quality_issues` (scoped to the run,
+with the `expected`/`actual` value behind each comparison), and the run is
+published by toggling `ingestion_runs.is_active`. A partial unique index
+guarantees at most one active run per season, and a run with any blocking issue
+never becomes active, so an invalid snapshot cannot supersede the last valid
+one.
+
+| Check | Severity | Expected vs actual |
+| --- | --- | --- |
+| `catalog_completeness` | blocking | season exposes clubs, tours, matches and players (each `> 0`) |
+| `reference_integrity` | blocking | every match/player references clubs registered in the season and home ≠ away |
+| `duplicate_fixtures` | blocking | each `(tour, home, away)` fixture appears once |
+| `match_score_completeness` | warning | matches older than the 72h window carry a final score |
+| `club_result_reconciliation` | blocking / warning | club season aggregate = results derived from `club_match_stats` |
+| `player_points_reconciliation` | blocking / warning | season fantasy total = sum of per-match stats; minutes without history is blocking |
+
+Reconciliation mismatches are downgraded from blocking to `warning` when they
+involve a match inside the 72-hour adjustment window, because Sports.ru can
+still revise those results. On the completed 2025/2026 season all 16 clubs and
+590 players reconcile exactly, so the checks do not false-positive on a
+well-formed snapshot.
 
 ## Questions left for the next discovery iteration
 

@@ -195,6 +195,30 @@ Outputs land in the chosen directory: `raw/match-*.json` (untouched payloads),
 table), `match-consistency.json` and `report.json`. A committed snapshot of the
 table lives in [`docs/match-stats-coverage.md`](docs/match-stats-coverage.md).
 
+## Data quality and reconciliation
+
+Before analytics run, `fantasy-quality` validates an imported snapshot. It
+evaluates the latest successful ingestion run (or `--run-id`), records every
+violation in `data_quality_issues` and publishes the snapshot (sets
+`ingestion_runs.is_active`) only when no blocking issue is found, so an invalid
+snapshot never supersedes the last valid one. At most one run per season is
+active at a time.
+
+```bash
+export DATABASE_URL=postgresql+psycopg://fantasy:fantasy@localhost:5432/fantasy
+PYTHONPATH=src python3 -m fantasy_analytics.quality_cli          # latest run
+PYTHONPATH=src python3 -m fantasy_analytics.quality_cli --run-id 1
+```
+
+The command prints a JSON report with the expected and actual value of every
+check and exits non-zero when a blocking issue is present. Checks are split into
+`blocking` (empty catalog, unresolved club references, duplicate fixtures, a
+player with minutes but no match history) and `warning` (result and points
+reconciliation gaps that the 72-hour Sports.ru adjustment window can still
+explain). Reconciliation compares club season aggregates against results derived
+from `club_match_stats` and each player's season fantasy total against the sum
+of their per-match stats.
+
 ## Tests
 
 Run the unit tests without Docker:
