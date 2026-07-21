@@ -26,6 +26,7 @@ fantasy-ingest = "fantasy_analytics.ingest_cli:main"
 fantasy-match-stats = "fantasy_analytics.match_stats_cli:main"
 fantasy-quality = "fantasy_analytics.quality_cli:main"
 fantasy-features = "fantasy_analytics.features_cli:main"
+fantasy-forecast = "fantasy_analytics.forecast_cli:main"
 fantasy-api = "fantasy_analytics.api:main"
 fantasy-ingestion-worker = "fantasy_analytics.ingestion_worker:main"
 
