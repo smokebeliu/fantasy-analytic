@@ -87,7 +87,7 @@ PYTHONPATH=src python3 -m fantasy_analytics.ingest_cli --season-name 2025/2026
 | 2 | Полный исторический импорт | 1 | `DONE` |
 | 3 | Исследование расширенной match-статистики | 0, 2 (данные) | `DONE` |
 | 4 | Контроль качества и reconciliation | 2, 3 | `DONE` |
-| 5 | Ручной ingestion job и backend-команда | 2, 4 | `READY` |
+| 5 | Ручной ingestion job и backend-команда | 2, 4 | `IN_PROGRESS` |
 | 6 | Аналитические признаки | 4 | `PLANNED` |
 | 7 | Базовая модель прогноза | 6 | `PLANNED` |
 | 8 | Оптимизатор состава | 7 | `PLANNED` |
@@ -465,7 +465,7 @@ PostgreSQL.
 
 ### Шаг 5. Ручной ingestion job и backend-команда
 
-Статус: `READY`
+Статус: `IN_PROGRESS`
 
 Цель: запускать полное обновление по запросу, без scheduler.
 
@@ -492,9 +492,9 @@ PostgreSQL.
 
 Карточка выполнения:
 
-- Начат:
+- Начат: 2026-07-21
 - Завершён:
-- Агент/ветка:
+- Агент/ветка: `cursor/step5-manual-ingestion-job-7eae`
 - Commit/PR:
 - Проверки:
 - Решения и отклонения:
@@ -807,3 +807,4 @@ PostgreSQL.
 | 2026-07-21 | 4 | `IN_PROGRESS → DONE` | PR по ветке `cursor/step4-data-quality-reconciliation-a55e` | Gate качества `fantasy-quality`, таблица `data_quality_issues`, активный snapshot, reconciliation с окном 72ч |
 | 2026-07-21 | Миграции | `0001` статичный baseline | — | Переписана начальная миграция под инкрементальные изменения (autogenerate), добавлена `0002` |
 | 2026-07-21 | 5 | `PLANNED → READY` | — | Разблокирован завершением шагов 2 и 4 |
+| 2026-07-21 | 5 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step5-manual-ingestion-job-7eae` |
