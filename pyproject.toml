@@ -30,6 +30,7 @@ fantasy-features = "fantasy_analytics.features_cli:main"
 fantasy-forecast = "fantasy_analytics.forecast_cli:main"
 fantasy-optimize = "fantasy_analytics.optimizer_cli:main"
 fantasy-api = "fantasy_analytics.api:main"
+fantasy-openapi = "fantasy_analytics.openapi_cli:main"
 fantasy-ingestion-worker = "fantasy_analytics.ingestion_worker:main"
 
 [tool.setuptools.packages.find]

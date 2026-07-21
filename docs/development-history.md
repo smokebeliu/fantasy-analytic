@@ -569,3 +569,4 @@
 | 2026-07-21 | 8 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step8-squad-optimizer-d3bf` |
 | 2026-07-21 | 8 | `IN_PROGRESS → DONE` | PR #11 | Оптимизатор `fantasy-optimize` на OR-Tools CP-SAT: 15 игроков, старт, капитан/вице, скамейка; лимиты из `season_rules`/`fantasy_tours`, режимы squad/transfers, независимый validator, детерминизм |
 | 2026-07-21 | 9 | `PLANNED → READY` | — | Разблокирован завершением шагов 5, 7 и 8 |
+| 2026-07-21 | 9 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step9-user-rest-api-6b12` |
