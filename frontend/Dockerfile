@@ -10,6 +10,13 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
+# next.config.mjs evaluates rewrites() at build time and bakes the /api/backend/*
+# proxy destination into the routes manifest, so BACKEND_URL must be set here (not
+# only in the runner stage) — otherwise it falls back to localhost and browser
+# calls to /api/backend/* 500. Defaults to the Compose service; override with
+# --build-arg BACKEND_URL=... if the API lives elsewhere.
+ARG BACKEND_URL=http://api:8000
+ENV BACKEND_URL=${BACKEND_URL}
 RUN npm run build
 
 FROM node:22-alpine AS runner
