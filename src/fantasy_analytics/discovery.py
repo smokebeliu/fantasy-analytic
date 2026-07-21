@@ -86,6 +86,18 @@ def _select_season(
     return _require_mapping(candidates[0], "tournament.seasons[]")
 
 
+def _is_match_finished(match_status: Any) -> bool:
+    """True only for a fully played match whose score is authoritative.
+
+    Sports.ru returns ``score: 0`` (not ``null``) for a not-yet-played match, so
+    the score alone cannot tell a real 0:0 from an unplayed fixture. The
+    ``matchStatus`` field disambiguates: only ``CLOSED`` matches carry a final
+    score. Anything else (``NOT_STARTED``, live, postponed, ...) must be treated
+    as having no score so unplayed fixtures never pollute results or team form.
+    """
+    return str(match_status or "").upper() == "CLOSED"
+
+
 def _flatten_matches(season: dict[str, Any]) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
     for tour in season.get("tours") or []:
@@ -97,6 +109,7 @@ def _flatten_matches(season: dict[str, Any]) -> list[dict[str, Any]]:
                     "tour_name": tour.get("name"),
                     "tour_status": tour.get("status"),
                     "scheduled_at": match.get("scheduledAt"),
+                    "match_status": match.get("matchStatus"),
                     "home": match.get("home"),
                     "away": match.get("away"),
                 }
@@ -136,6 +149,8 @@ def _derive_team_match_stats(
     }
 
     for match in matches:
+        if not _is_match_finished(match.get("match_status")):
+            continue
         home = match.get("home") or {}
         away = match.get("away") or {}
         if home.get("score") is None or away.get("score") is None:
