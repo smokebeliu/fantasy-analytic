@@ -538,6 +538,84 @@
     (максимизирует свободный бюджет) и делает решение уникальным; на боевом туре
     оптимум расходует весь бюджет, так как дорогие полузащитники дают больше очков.
 
+### Шаг 9. Пользовательский REST API
+
+Фактический результат:
+
+- Read-слой `src/fantasy_analytics/read_repository.py` (`ReadRepository`) читает
+  каталог, активный snapshot и persisted-прогнозы одним набором запросов и
+  возвращает JSON-совместимые dict'ы; ничего не пишет и не вызывает Sports.ru.
+- Контракты `src/fantasy_analytics/api_schemas.py`: Pydantic-модели запросов и
+  ответов, конверты пагинации (`PageMeta`), snapshot-метаданные (`SnapshotMeta`)
+  и единый формат ошибок (`ErrorResponse`). Верхний лимит страницы — 200.
+- `src/fantasy_analytics/api.py` расширен (приложение `Fantasy Analytics API`
+  `0.2.0`): read-эндпоинты `GET /seasons[/{id}]`, `/tours[/{id}]`,
+  `/matches[/{id}]`, `/players[/{id}]`, оптимизатор `POST /optimizer/squad` и
+  `/optimizer/transfers`; сохранены админ-эндпоинты шага 5. Добавлены
+  обработчики `StarletteHTTPException` и `RequestValidationError`, приводящие
+  все ошибки к `{"error": {type, message, details}}`.
+- Фильтры игроков (позиция, клуб, статус, диапазон цены), сортировка и
+  подключение projection+components по `tour_id`+`model`. В списках — время
+  snapshot (`data_freshness`), в projection — версии модели/признаков/начисления.
+- Экспорт OpenAPI без БД: `src/fantasy_analytics/openapi_cli.py`
+  (`fantasy-openapi`); схема зафиксирована в `docs/openapi.json`.
+
+Критерии приёмки (выполнено):
+
+- API покрыт unit- и integration-тестами — `tests/test_read_api.py` (26 тестов):
+  контракты запросов, конверт ошибок, оптимизатор (успех через мок и реальный
+  infeasible → `422`), OpenAPI, плюс интеграционные проверки всех read-эндпоинтов
+  на реальной БД (импорт+публикация через worker, персист прогнозов).
+- OpenAPI отражает реальные модели — `docs/openapi.json` содержит все 13 путей и
+  компоненты (`PlayerListResponse`, `TransfersRequest`, …), генерируется из
+  живого приложения.
+- Пагинация стабильна и ограничена сверху — `limit ≤ 200`, `offset ≥ 0`,
+  детерминированный порядок с tie-break по `player_season_id` (тест
+  `test_players_pagination_is_bounded_and_stable`).
+- В ответах есть время snapshot и версия модели — `snapshot.data_freshness` в
+  списках/деталях, `model_version`/`feature_version`/`scoring_version` в
+  projection.
+- GraphQL Sports.ru не вызывается из read-эндпоинтов — весь read-слой работает
+  только через SQLAlchemy-запросы к PostgreSQL.
+
+Карточка выполнения:
+
+- Начат: 2026-07-21
+- Завершён: 2026-07-21
+- Агент/ветка: `cursor/step9-user-rest-api-6b12`
+- Commit/PR: PR #14
+- Проверки:
+  - `python -m unittest discover -s tests` — 160 тестов проходят (было 134),
+    1 live-skip; добавлен `tests/test_read_api.py` (26), обновлён конверт `409`
+    в `tests/test_api.py`.
+  - `python -m compileall src` — синтаксис чист; OpenAPI генерируется офлайн
+    (`fantasy-openapi`, 13 путей).
+  - Боевой e2e на активном snapshot (run 1, сезон 2025/2026), тур 1786
+    (прогнозы персистированы `fantasy-forecast --tour 1786`, 590×3):
+    `GET /seasons` вернул сезон со `snapshot.data_freshness`;
+    `GET /players?role=MIDFIELDER&order=projection` — топ Батраков 7.85,
+    Сперцян 7.62, Глушенков 7.10 с компонентами, `total=244`, snapshot в ответе;
+    `GET /players/2` — карточка с 28 матчами истории и projection;
+    `POST /optimizer/squad {"tour":"1786"}` → OPTIMAL 4-5-1, EP 76.30,
+    капитан Батраков (совпадает с шагом 8);
+    `POST /optimizer/transfers` (max_transfers=2, уже оптимальный состав) →
+    0/2 трансфера, kept 15, EP 76.30; `GET /seasons/999` → `404`
+    `{"error":{"type":"not_found",…}}`; `limit=500` → `422` `validation_error`.
+- Решения и отклонения:
+  - Projections read-эндпоинтов берутся из персистентной `player_forecasts`
+    (а не пересчитываются на каждый запрос): read-путь остаётся дешёвым,
+    чисто-DB и отражает версионированную модель; для наполнения тура нужен
+    предварительный `fantasy-forecast --tour <id>`.
+  - Оптимизатор в API переиспользует `build_squad_optimization` (шаг 8), который
+    читает только БД через forecast-builder, поэтому «GraphQL не вызывается»
+    выполняется и для optimizer-эндпоинтов.
+  - Read-эндпоинты принимают внутренние id (`season_id`, `tour_id`) для
+    детерминизма; оптимизатор — «мягкие» ссылки (`season`/`tour` как fantasy
+    id/имя), как у CLI шага 8.
+  - Конверт ошибки `409` админ-refresh приведён к общему формату
+    (`error.details.job`), тест шага 5 обновлён соответствующе. Схема БД и
+    миграции не менялись.
+
 ## Журнал обновлений
 
 | Дата | Шаг | Изменение статуса | Commit/PR | Результат |
@@ -569,3 +647,6 @@
 | 2026-07-21 | 8 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step8-squad-optimizer-d3bf` |
 | 2026-07-21 | 8 | `IN_PROGRESS → DONE` | PR #11 | Оптимизатор `fantasy-optimize` на OR-Tools CP-SAT: 15 игроков, старт, капитан/вице, скамейка; лимиты из `season_rules`/`fantasy_tours`, режимы squad/transfers, независимый validator, детерминизм |
 | 2026-07-21 | 9 | `PLANNED → READY` | — | Разблокирован завершением шагов 5, 7 и 8 |
+| 2026-07-21 | 9 | `READY → IN_PROGRESS` | — | Закреплён за `cursor/step9-user-rest-api-6b12` |
+| 2026-07-21 | 9 | `IN_PROGRESS → DONE` | PR #14 | Read API (сезоны/туры/матчи/игроки с фильтрами, projections+компоненты), `POST /optimizer/squad` и `/optimizer/transfers`, Pydantic-контракты, пагинация, единый формат ошибок, OpenAPI `docs/openapi.json`; read-путь только из БД |
+| 2026-07-21 | 10 | `PLANNED → READY` | — | Разблокирован завершением шага 9 |

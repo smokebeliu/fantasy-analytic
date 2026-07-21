@@ -110,7 +110,9 @@ class ApiIntegrationTest(unittest.TestCase):
 
         self.assertEqual(202, first.status_code)
         self.assertEqual(409, second.status_code)
-        self.assertEqual(first.json()["id"], second.json()["job"]["id"])
+        conflict = second.json()["error"]
+        self.assertEqual("conflict", conflict["type"])
+        self.assertEqual(first.json()["id"], conflict["details"]["job"]["id"])
         # Only the first request may launch a worker.
         self.assertEqual([first.json()["id"]], spawned)
 

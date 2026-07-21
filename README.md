@@ -337,6 +337,55 @@ and a `data_freshness` timestamp; a failed job records a bounded, credential-fre
 error message. The worker can also be run directly for a queued job:
 `PYTHONPATH=src python3 -m fantasy_analytics.ingestion_worker <job_id>`.
 
+## User REST API
+
+`fantasy-api` also serves a read API for the frontend on top of the *active*
+snapshot published by the quality gate. Every read endpoint is answered
+exclusively from PostgreSQL — the Sports.ru GraphQL API is never called from a
+read path. Catalog data (seasons, tours, matches, players, clubs) is always
+available; per-player numbers (price, availability, ownership, season score)
+come from the active snapshot, and projections plus their explaining components
+come from the persisted `player_forecasts` rows.
+
+```bash
+export DATABASE_URL=postgresql+psycopg://fantasy:fantasy@localhost:5432/fantasy
+PYTHONPATH=src python3 -m fantasy_analytics.api --host 127.0.0.1 --port 8000
+```
+
+Read endpoints (all paginated with a bounded `limit` ≤ 200 and an `offset`):
+
+```bash
+curl "http://127.0.0.1:8000/seasons"
+curl "http://127.0.0.1:8000/seasons/1"
+curl "http://127.0.0.1:8000/tours?season_id=1&status=FINISHED"
+curl "http://127.0.0.1:8000/matches?season_id=1&club_id=7"
+# Filter by position/club/status/price and join a tour's projection + components.
+curl "http://127.0.0.1:8000/players?season_id=1&tour_id=15&model=poisson_events\
+&role=MIDFIELDER&min_price=8&order=projection&limit=20"
+curl "http://127.0.0.1:8000/players/2?tour_id=15"   # card with history + projection
+```
+
+Optimizer endpoints wrap the step-8 solver (database only, no GraphQL):
+
+```bash
+curl -X POST http://127.0.0.1:8000/optimizer/squad \
+  -H 'Content-Type: application/json' -d '{"tour": "1786"}'
+curl -X POST http://127.0.0.1:8000/optimizer/transfers \
+  -H 'Content-Type: application/json' \
+  -d '{"tour": "1786", "current_squad": ["54138", "..."], "max_transfers": 2}'
+```
+
+List responses carry the snapshot time (`data_freshness`); projections carry the
+model, feature and scoring versions. Every error uses one envelope,
+`{"error": {"type", "message", "details"}}`. Projections are read from
+`player_forecasts`, so run `fantasy-forecast --tour <id>` first to populate a
+tour's projections. The OpenAPI schema is committed at
+[`docs/openapi.json`](docs/openapi.json) and regenerated with:
+
+```bash
+PYTHONPATH=src python3 -m fantasy_analytics.openapi_cli --output docs/openapi.json
+```
+
 ## Tests
 
 Run the unit tests without Docker:

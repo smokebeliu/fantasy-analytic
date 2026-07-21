@@ -1,0 +1,308 @@
+"""Pydantic request/response contracts for the user REST API (step 9).
+
+These models give the endpoints typed, validated request bodies/queries and make
+the generated OpenAPI schema reflect the real payloads. Response models keep the
+top-level shape strict while allowing the dynamic, model-specific parts (forecast
+component breakdowns, optimizer explanations) to stay flexible.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field, model_validator
+
+# Pagination bounds shared by every list endpoint.
+DEFAULT_PAGE_LIMIT = 50
+MAX_PAGE_LIMIT = 200
+
+Role = Literal["GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD"]
+ForecastModel = Literal["poisson_events", "season_mean", "recent_form"]
+PlayerOrder = Literal["projection", "price", "name", "selected_by"]
+
+
+# ---------------------------------------------------------------------------
+# Envelopes: unified error format, pagination and snapshot metadata.
+# ---------------------------------------------------------------------------
+class ErrorDetail(BaseModel):
+    type: str = Field(description="Machine-readable error category")
+    message: str = Field(description="Human-readable error message")
+    details: Any | None = Field(
+        default=None, description="Optional structured error context"
+    )
+
+
+class ErrorResponse(BaseModel):
+    error: ErrorDetail
+
+
+class SnapshotMeta(BaseModel):
+    run_id: int
+    season_id: int | None = None
+    data_freshness: str | None = Field(
+        default=None, description="ISO time the active snapshot finished importing"
+    )
+    quality_checked_at: str | None = None
+
+
+class PageMeta(BaseModel):
+    limit: int
+    offset: int
+    total: int
+    count: int
+
+
+# ---------------------------------------------------------------------------
+# Seasons.
+# ---------------------------------------------------------------------------
+class SeasonRulesModel(BaseModel):
+    total_budget: float | None = None
+    total_players: int | None = None
+    starting_players: int | None = None
+    full_roster_constraints: Any | None = None
+    starting_roster_constraints: Any | None = None
+
+
+class SeasonModel(BaseModel):
+    season_id: int
+    fantasy_season_id: str
+    stat_season_id: str
+    name: str
+    competition_name: str | None = None
+    is_active: bool
+    starts_at: str | None = None
+    ends_at: str | None = None
+    snapshot: SnapshotMeta | None = None
+
+
+class SeasonDetailModel(SeasonModel):
+    rules: SeasonRulesModel | None = None
+
+
+class SeasonListResponse(BaseModel):
+    items: list[SeasonModel]
+    pagination: PageMeta
+
+
+# ---------------------------------------------------------------------------
+# Tours.
+# ---------------------------------------------------------------------------
+class TourModel(BaseModel):
+    tour_id: int
+    season_id: int
+    fantasy_tour_id: str
+    name: str
+    status: str
+    starts_at: str | None = None
+    finishes_at: str | None = None
+    transfers_start_at: str | None = None
+    transfers_deadline_at: str | None = None
+    total_transfers: int | None = None
+    max_same_team_players: int | None = None
+
+
+class TourListResponse(BaseModel):
+    items: list[TourModel]
+    pagination: PageMeta
+
+
+# ---------------------------------------------------------------------------
+# Matches.
+# ---------------------------------------------------------------------------
+class MatchModel(BaseModel):
+    match_id: int
+    season_id: int
+    tour_id: int | None = None
+    fantasy_tour_id: str | None = None
+    tour_name: str | None = None
+    tour_status: str | None = None
+    stat_match_id: str
+    scheduled_at: str | None = None
+    home_club_id: int
+    home_club_name: str | None = None
+    away_club_id: int
+    away_club_name: str | None = None
+    home_score: int | None = None
+    away_score: int | None = None
+
+
+class MatchListResponse(BaseModel):
+    items: list[MatchModel]
+    pagination: PageMeta
+
+
+# ---------------------------------------------------------------------------
+# Players and projections.
+# ---------------------------------------------------------------------------
+class ProjectionModel(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
+    model_name: str
+    model_version: str
+    feature_version: str | None = None
+    scoring_version: str | None = None
+    match_id: int | None = None
+    expected_points: float | None = None
+    uncertainty: float | None = None
+    p_appearance: float | None = None
+    expected_minutes: float | None = None
+    components: dict[str, float] | None = None
+
+
+class PlayerModel(BaseModel):
+    player_season_id: int
+    fantasy_player_id: str | None = None
+    player_name: str | None = None
+    role: str
+    club_id: int | None = None
+    club_name: str | None = None
+    price: float | None = None
+    availability_status: str | None = None
+    status_description: str | None = None
+    selected_by: float | None = None
+    form: int | None = None
+    season_score: int | None = None
+    average_score: float | None = None
+    last_tour_score: int | None = None
+    rank: int | None = None
+    projection: ProjectionModel | None = None
+
+
+class PlayerHistoryEntry(BaseModel):
+    match_id: int
+    tour_id: int | None = None
+    scheduled_at: str | None = None
+    minutes: int
+    points: int
+    goals: int
+    assists: int
+    saves: int
+    ball_recoveries: int
+    yellow_cards: int
+    red_cards: int
+    goals_conceded: int
+
+
+class PlayerDetailModel(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
+    player_season_id: int
+    fantasy_player_id: str | None = None
+    player_name: str | None = None
+    role: str
+    season_id: int
+    club_id: int | None = None
+    club_name: str | None = None
+    price: float | None = None
+    availability_status: str | None = None
+    status_description: str | None = None
+    selected_by: float | None = None
+    form: int | None = None
+    season_score: int | None = None
+    average_score: float | None = None
+    last_tour_score: int | None = None
+    rank: int | None = None
+    projection: ProjectionModel | None = None
+    history: list[PlayerHistoryEntry] = Field(default_factory=list)
+    snapshot: SnapshotMeta | None = None
+
+
+class PlayerListResponse(BaseModel):
+    items: list[PlayerModel]
+    pagination: PageMeta
+    snapshot: SnapshotMeta | None = None
+
+
+# ---------------------------------------------------------------------------
+# Optimizer requests and responses.
+# ---------------------------------------------------------------------------
+class SquadRequest(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
+    run_id: int | None = Field(default=None, description="Ingestion run to build from")
+    season: str | None = Field(
+        default=None, description="Season fantasy id, stat id or name"
+    )
+    tour: str | None = Field(
+        default=None, description="Target tour fantasy id or name"
+    )
+    model: ForecastModel = Field(
+        default="poisson_events", description="Forecast model to optimize on"
+    )
+
+
+class TransfersRequest(SquadRequest):
+    current_squad: list[str] = Field(
+        description="Fantasy player ids of the current squad (limited-transfers mode)",
+        min_length=1,
+    )
+    max_transfers: int | None = Field(
+        default=None,
+        ge=0,
+        description="Override the tour's transfer limit",
+    )
+
+
+class SquadPlayerModel(BaseModel):
+    player_season_id: int
+    fantasy_player_id: str | None = None
+    player_name: str | None = None
+    role: str
+    club_id: int
+    club_name: str | None = None
+    price: float
+    expected_points: float
+    opponent_name: str | None = None
+    is_home: bool | None = None
+    match_id: int | None = None
+    p_appearance: float | None = None
+    expected_minutes: float | None = None
+    is_starter: bool | None = None
+    is_captain: bool | None = None
+    is_vice_captain: bool | None = None
+    bench_order: int | None = None
+
+
+class OptimizerResponse(BaseModel):
+    """The optimizer report; nested explanation kept permissive on purpose."""
+
+    model_config = {"protected_namespaces": (), "extra": "allow"}
+
+    optimizer_version: str
+    model: str
+    mode: str
+    generated_at: str
+    run_id: int
+    season_id: int
+    season: dict[str, Any]
+    tour: dict[str, Any]
+    cutoff: str | None = None
+    rules: dict[str, Any]
+    counts: dict[str, Any]
+    solution: dict[str, Any]
+    valid: bool
+
+
+__all__ = [
+    "DEFAULT_PAGE_LIMIT",
+    "MAX_PAGE_LIMIT",
+    "ErrorDetail",
+    "ErrorResponse",
+    "SnapshotMeta",
+    "PageMeta",
+    "SeasonModel",
+    "SeasonDetailModel",
+    "SeasonListResponse",
+    "TourModel",
+    "TourListResponse",
+    "MatchModel",
+    "MatchListResponse",
+    "ProjectionModel",
+    "PlayerModel",
+    "PlayerDetailModel",
+    "PlayerListResponse",
+    "SquadRequest",
+    "TransfersRequest",
+    "SquadPlayerModel",
+    "OptimizerResponse",
+]
