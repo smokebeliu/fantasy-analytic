@@ -274,6 +274,167 @@ query DiscoverPlayerHistory(
 }
 """
 
+# Candidate team-level match stat fields exposed by `statTeamMatchStat`.
+# The discovery spike measures how reliably each one is populated for RPL.
+MATCH_TEAM_STAT_FIELDS = (
+    "shotsTotal",
+    "shotsOnTarget",
+    "shotsOffTarget",
+    "shotsBlocked",
+    "shotsSaved",
+    "ballPossession",
+    "cornerKicks",
+    "offsides",
+    "fouls",
+    "freeKicks",
+    "goalKicks",
+    "throwIns",
+    "yellowCards",
+    "yellowRedCards",
+    "totalRedCards",
+    "ownGoals",
+    "penaltyScored",
+    "penaltiesMissed",
+    "substitutions",
+    "injuries",
+)
+
+# Candidate per-player match stat fields exposed by `statPlayerMatchStat`.
+MATCH_PLAYER_STAT_FIELDS = (
+    "minutesPlayed",
+    "performanceScore",
+    "goalsScored",
+    "goalsByHead",
+    "goalsByPenalty",
+    "assists",
+    "fantasyAssists",
+    "ownGoals",
+    "shotsOnGoal",
+    "shotsOffGoal",
+    "shotsBlocked",
+    "goalAttempts",
+    "chancesCreated",
+    "crossesTotal",
+    "crossesSuccessful",
+    "passesShortTotal",
+    "passesShortSuccessful",
+    "passesMediumTotal",
+    "passesMediumSuccessful",
+    "passesLongTotal",
+    "passesLongSuccessful",
+    "passesForward",
+    "passesForwardAccurate",
+    "passesBack",
+    "passesBackAccurate",
+    "actions",
+    "actionSuccessful",
+    "actionSuccessPercent",
+    "duelsHeaderTotal",
+    "duelsHeaderSuccessful",
+    "duelsTackleTotal",
+    "duelsTackleSuccessful",
+    "duelsSprintTotal",
+    "duelsSprintSuccessful",
+    "interceptions",
+    "ballRecovery",
+    "goalLineClearances",
+    "foulsCommitted",
+    "wasFouled",
+    "offsides",
+    "yellowCards",
+    "yellowRedCards",
+    "redCards",
+    "goalsConceded",
+    "shotsFacedTotal",
+    "shotsFacedSaved",
+    "penaltiesFaced",
+    "penaltiesSaved",
+    "penaltiesMissed",
+    "penaltyWon",
+    "penaltyConceded",
+    "xG",
+    "xA",
+    "xGPS",
+    "possLostInOwnHalf",
+    "badBallControl",
+    "mistakes",
+    "goalMistakes",
+)
+
+
+def _indent(fields: tuple[str, ...], spaces: int) -> str:
+    pad = " " * spaces
+    return "\n".join(f"{pad}{field}" for field in fields)
+
+
+def build_match_stats_query() -> str:
+    """Build the extended match-statistics discovery query.
+
+    It resolves a single match through `statQueries.football.match` and
+    requests the availability flags, team-level stats, per-player lineup
+    stats and the event timeline so field coverage can be measured.
+    """
+    team_stat = _indent(MATCH_TEAM_STAT_FIELDS, 12)
+    player_stat = _indent(MATCH_PLAYER_STAT_FIELDS, 16)
+    side = f"""{{
+      team {{ id name abbreviation }}
+      score
+      xG
+      formation {{ code }}
+      manager {{ id name }}
+      stat {{
+{team_stat}
+      }}
+      lineup(skipPreview: false) {{
+        player {{ id name }}
+        jerseyNumber
+        position
+        lineupOrder
+        lineupStarting
+        lineupCurrent
+        isCaptain
+        type
+        mark
+        stat {{
+{player_stat}
+        }}
+      }}
+    }}"""
+    return f"""
+query DiscoverMatchStats($id: ID!, $source: statSourceList) {{
+  statQueries {{
+    football {{
+      match(id: $id, source: $source) {{
+        id
+        matchStatus
+        scheduledAt
+        attendance
+        hasDetailStat
+        hasLineups
+        hasEvents
+        hasPersonStat
+        hasXG
+        venue {{ id name }}
+        home {side}
+        away {side}
+        events {{
+          id
+          time
+          unix_time
+          type
+          outcome
+          team
+        }}
+      }}
+    }}
+  }}
+}}
+"""
+
+
+MATCH_STATS_QUERY = build_match_stats_query()
+
+
 TEAM_STAT_FIELDS = """
 MatchesPlayed
 MatchesWon

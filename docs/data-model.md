@@ -108,6 +108,51 @@ These values demonstrably vary by tour. Optimizer constraints must come from
 | `stat_season.stats(id)` | `club_season_stats` |
 | Derived match scores | `club_match_stats`, `club_season_stats` |
 
+## Extended match statistics
+
+Step 3 probed the `statQueries.football.match(id)` operation against a
+reproducible sample of 40 finished 2025/2026 matches (all 16 clubs, all 30
+tours). The full coverage table lives in
+[`docs/match-stats-coverage.md`](match-stats-coverage.md); the highlights are:
+
+- `statQueries.football.match(id: <stat_match_id>)` resolves a `statMatch`
+  without a `source` argument, so the `matches.stat_match_id` already imported is
+  a sufficient key.
+- Availability flags `hasDetailStat`, `hasLineups`, `hasEvents` and
+  `hasPersonStat` were true for all 40 matches; `hasXG` was true for only 10.
+- Team match stats (`statTeamMatchStat`) reliably expose shots (total, on/off
+  target, blocked, saved), `ballPossession`, `cornerKicks`, `fouls`,
+  `freeKicks`, `goalKicks`, `throwIns`, `substitutions` and `penaltyScored`.
+  Cards, `offsides` and `ownGoals` are partial; `injuries` is always null.
+- Per-player match stats (`statPlayerMatchStat`) are far sparser. Only
+  `goalsScored`, `ownGoals`, `yellowCards`, `yellowRedCards`, `redCards` and
+  `chancesCreated` are always present. Minutes, marks and ball recovery are
+  partial; passing splits, duel totals, `xG`/`xA`, `performanceScore` and most
+  advanced metrics are null and must be excluded.
+- Lineups always return 11 starters per side plus bench, with `player.id`,
+  `jerseyNumber`, `lineupStarting`, `lineupOrder`, `isCaptain` and `formation`.
+  `position` is only filled for starters.
+- The event timeline (`events`) is complete for id, time, type and outcome; the
+  attacking `team` qualifier (`HOME`/`AWAY`) is present for ~77% of events.
+- xG (`statTeamMatch.xG` and player `xG`/`xA`/`xGPS`) is unreliable for RPL and
+  must stay optional.
+
+### Fantasy ↔ stat identifiers
+
+The extended stats join back to the imported catalog through stat slugs:
+
+- `statMatch.home/away.team.id` is the stat team slug (`clubs.stat_team_id`).
+- `statMatch.home/away.lineup[].player.id` is the stat player slug
+  (`players.stat_player_id`).
+- The match itself is keyed by `matches.stat_match_id`.
+
+### Proposed model impact (not implemented in step 3)
+
+A future extended-stats table should store per-team and per-player rows keyed by
+the internal match surrogate, persisting only the reliably-populated fields
+above and keeping the raw payload for the sparse metrics. No schema change is
+made yet; this spike is investigation only.
+
 ## Data quality findings
 
 1. `statDetails` was empty in sampled completed matches. Exact point
@@ -126,9 +171,13 @@ These values demonstrably vary by tour. Optimizer constraints must come from
 ## Questions left for the next discovery iteration
 
 - Which `statMatch` fields reliably expose shots, possession, xG and lineups for
-  every RPL match?
+  every RPL match? — Answered in step 3, see "Extended match statistics" above:
+  shots, possession, corners, fouls and lineups are reliable; xG and most
+  advanced player metrics are not.
 - Can player match histories be fetched efficiently in batches without one
-  request per player?
+  request per player? — Partially: `statQueries.football.matches(ids: [ID!]!)`
+  and `statMatch.home/away.lineup[].stat` return every player in one match
+  request, so extended stats need one call per match rather than per player.
 - How frequently are player ownership and form updated?
 - Are stat player and team slugs preserved after renames or transfers?
 - Which event fields reproduce fantasy assists and ball recoveries?

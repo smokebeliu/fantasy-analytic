@@ -21,6 +21,7 @@ dev = ["pytest>=8.0"]
 fantasy-discover = "fantasy_analytics.cli:main"
 fantasy-migrate = "fantasy_analytics.db.cli:main"
 fantasy-ingest = "fantasy_analytics.ingest_cli:main"
+fantasy-match-stats = "fantasy_analytics.match_stats_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
