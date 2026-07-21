@@ -37,6 +37,7 @@ from .discovery import (
     DiscoveryError,
     _derive_team_match_stats,
     _flatten_matches,
+    _is_match_finished,
     _normalize_team_season_stats,
     _require_mapping,
     _select_season,
@@ -401,6 +402,10 @@ def _persist(
         away_stat = str((away.get("team") or {}).get("id"))
         if home_stat not in club_by_stat or away_stat not in club_by_stat:
             continue
+        # Only a CLOSED match has an authoritative score; unplayed fixtures come
+        # back as 0:0 and must be stored as null so they are not counted as
+        # played draws (which would corrupt results, form and team strength).
+        finished = _is_match_finished(match.get("match_status"))
         match_rows.append(
             {
                 "season_id": season_pk,
@@ -409,8 +414,8 @@ def _persist(
                 "scheduled_at": _parse_dt(match.get("scheduled_at")),
                 "home_club_id": club_by_stat[home_stat],
                 "away_club_id": club_by_stat[away_stat],
-                "home_score": _to_int(home.get("score")),
-                "away_score": _to_int(away.get("score")),
+                "home_score": _to_int(home.get("score")) if finished else None,
+                "away_score": _to_int(away.get("score")) if finished else None,
             }
         )
     match_by_stat = repo.upsert_matches(match_rows)
@@ -428,8 +433,9 @@ def _persist(
         away_stat = str((away.get("team") or {}).get("id"))
         if home_stat not in club_by_stat or away_stat not in club_by_stat:
             continue
-        home_score = _to_int(home.get("score"))
-        away_score = _to_int(away.get("score"))
+        finished = _is_match_finished(match.get("match_status"))
+        home_score = _to_int(home.get("score")) if finished else None
+        away_score = _to_int(away.get("score")) if finished else None
         club_match_rows.append(
             {
                 "match_id": match_pk,
