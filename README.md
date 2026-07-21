@@ -172,6 +172,29 @@ the database is written in a single transaction, so a failed page never
 publishes a partial snapshot. Re-running the import leaves the number of logical
 entities unchanged and only appends a new snapshot generation.
 
+## Extended match-statistics discovery
+
+After a season is imported, `fantasy-match-stats` probes the Sports.ru
+`statQueries.football.match` API to measure how reliably the extended football
+metrics (shots, possession, lineups, per-player stats, events and xG) are
+populated. It samples a reproducible subset of finished matches from the catalog
+(spread across the season, covering every club), stores the raw payloads and
+writes a field-coverage report. It needs `DATABASE_URL` and outbound access to
+the GraphQL API.
+
+```bash
+export DATABASE_URL=postgresql+psycopg://fantasy:fantasy@localhost:5432/fantasy
+PYTHONPATH=src python3 -m fantasy_analytics.match_stats_cli \
+  --season-name 2025/2026 \
+  --sample-size 40 \
+  --output data/match-stats
+```
+
+Outputs land in the chosen directory: `raw/match-*.json` (untouched payloads),
+`field-coverage.json`/`field-coverage.md` (the `path → type → fill → decision`
+table), `match-consistency.json` and `report.json`. A committed snapshot of the
+table lives in [`docs/match-stats-coverage.md`](docs/match-stats-coverage.md).
+
 ## Tests
 
 Run the unit tests without Docker:
