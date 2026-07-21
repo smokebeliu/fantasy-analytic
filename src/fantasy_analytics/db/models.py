@@ -67,6 +67,12 @@ class IngestionRun(Base):
             "status IN ('pending', 'running', 'succeeded', 'failed')",
             name="ingestion_runs_status_check",
         ),
+        Index(
+            "ingestion_runs_active_season_idx",
+            "season_id",
+            unique=True,
+            postgresql_where=text("is_active"),
+        ),
     )
 
     id: Mapped[int] = _identity_pk()
@@ -76,6 +82,20 @@ class IngestionRun(Base):
     tournament_slug: Mapped[str] = mapped_column(Text, nullable=False)
     requested_season_id: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False)
+    # Season resolved by the quality gate (step 4); a run only points at the
+    # season once its snapshot has been evaluated.
+    season_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("seasons.id", ondelete="SET NULL")
+    )
+    # A snapshot is only published (active) after passing the quality gate with
+    # no blocking issues. At most one run per season may be active at a time,
+    # enforced by the partial unique index above.
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    quality_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -84,6 +104,10 @@ class IngestionRun(Base):
     report: Mapped[Any | None] = mapped_column(JSONB)
 
     raw_responses: Mapped[list[RawApiResponse]] = relationship(
+        back_populates="ingestion_run",
+        cascade="all, delete-orphan",
+    )
+    quality_issues: Mapped[list[DataQualityIssue]] = relationship(
         back_populates="ingestion_run",
         cascade="all, delete-orphan",
     )
@@ -492,12 +516,60 @@ class ClubMatchStats(Base):
     )
 
 
+class DataQualityIssue(Base):
+    """One violation recorded by the quality gate (development-plan step 4).
+
+    Every issue is scoped to the ingestion run whose snapshot was evaluated.
+    ``severity`` is either ``blocking`` (prevents the snapshot from becoming
+    active) or ``warning`` (recorded but non-fatal, e.g. discrepancies that the
+    72-hour Sports.ru adjustment window can still explain). ``expected`` and
+    ``actual`` hold the human-readable values behind each check so the report
+    can show both sides of every comparison.
+    """
+
+    __tablename__ = "data_quality_issues"
+    __table_args__ = (
+        CheckConstraint(
+            "severity IN ('blocking', 'warning')",
+            name="data_quality_issues_severity_check",
+        ),
+        Index("data_quality_issues_run_idx", "ingestion_run_id"),
+        Index("data_quality_issues_run_severity_idx", "ingestion_run_id", "severity"),
+    )
+
+    id: Mapped[int] = _identity_pk()
+    ingestion_run_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("ingestion_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    season_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("seasons.id", ondelete="CASCADE")
+    )
+    check_name: Mapped[str] = mapped_column(Text, nullable=False)
+    severity: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_type: Mapped[str | None] = mapped_column(Text)
+    entity_ref: Mapped[str | None] = mapped_column(Text)
+    expected: Mapped[str | None] = mapped_column(Text)
+    actual: Mapped[str | None] = mapped_column(Text)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    details: Mapped[Any | None] = mapped_column(JSONB)
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    ingestion_run: Mapped[IngestionRun] = relationship(
+        back_populates="quality_issues"
+    )
+
+
 __all__ = [
     "Base",
     "Club",
     "ClubMatchStats",
     "ClubSeasonStats",
     "Competition",
+    "DataQualityIssue",
     "FantasyPlayerSnapshot",
     "FantasyPointDetail",
     "FantasyTour",
