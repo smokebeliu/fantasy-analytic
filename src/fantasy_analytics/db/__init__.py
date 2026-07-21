@@ -9,12 +9,14 @@ from .config import (
     get_database_url,
     session_scope,
 )
+from .import_repository import DomainImportRepository
 from .models import Base, IngestionRun, RawApiResponse
 from .repository import IngestionRepository
 
 __all__ = [
     "Base",
     "DEFAULT_DATABASE_URL",
+    "DomainImportRepository",
     "IngestionRepository",
     "IngestionRun",
     "RawApiResponse",
