@@ -143,6 +143,35 @@ PYTHONPATH=src python3 -m fantasy_analytics.db.cli downgrade  # drop schema
 
 The installed project also exposes a `fantasy-migrate` console command.
 
+## Full historical import
+
+After the schema is migrated, `fantasy-ingest` loads a complete season into
+PostgreSQL (season, rules, clubs, tours, matches, every player page with its
+fantasy snapshot and season aggregate, club season aggregates and each player's
+match history with minutes). Catalog rows are upserted idempotently by external
+identifier, while price/score/aggregate snapshots are versioned per ingestion
+run. It needs both `DATABASE_URL` and outbound access to the GraphQL API.
+
+```bash
+export DATABASE_URL=postgresql+psycopg://fantasy:fantasy@localhost:5432/fantasy
+PYTHONPATH=src python3 -m fantasy_analytics.db.cli upgrade      # ensure schema
+PYTHONPATH=src python3 -m fantasy_analytics.ingest_cli          # latest season
+```
+
+Import an exact season and tune concurrency of the per-player history requests:
+
+```bash
+PYTHONPATH=src python3 -m fantasy_analytics.ingest_cli \
+  --season-name 2025/2026 \
+  --history-workers 8
+```
+
+The command prints a JSON report with per-entity counts and the duration of
+each stage, and records the run in `ingestion_runs`. Fetching happens up front;
+the database is written in a single transaction, so a failed page never
+publishes a partial snapshot. Re-running the import leaves the number of logical
+entities unchanged and only appends a new snapshot generation.
+
 ## Tests
 
 Run the unit tests without Docker:
