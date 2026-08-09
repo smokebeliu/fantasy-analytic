@@ -433,6 +433,7 @@ def create_app(
         locked: list[str] | None = None,
         locked_starters: list[str] | None = None,
         formation: str | None = None,
+        fixture_conflict_weight: float | None = None,
     ) -> dict[str, Any]:
         try:
             return build_squad_optimization(
@@ -446,6 +447,7 @@ def create_app(
                 locked=locked,
                 locked_starters=locked_starters,
                 formation=formation,
+                fixture_conflict_weight=fixture_conflict_weight,
             )
         except OptimizerError as error:
             raise api_error(422, str(error), type_="optimizer_error") from error
@@ -465,6 +467,7 @@ def create_app(
             locked=body.locked,
             locked_starters=body.locked_starters,
             formation=body.formation,
+            fixture_conflict_weight=body.fixture_conflict_weight,
         )
 
     @app.post(
@@ -483,6 +486,7 @@ def create_app(
             locked=request.locked,
             locked_starters=request.locked_starters,
             formation=request.formation,
+            fixture_conflict_weight=request.fixture_conflict_weight,
         )
 
     # ------------------------------------------------------------------

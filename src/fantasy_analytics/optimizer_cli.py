@@ -9,8 +9,9 @@ is printed so the command composes in a pipeline.
 Pass ``--current-squad`` (a comma-separated list of fantasy player ids) to run
 in limited-transfers mode instead of building a fresh squad. ``--locked``,
 ``--locked-starters`` and ``--formation`` pin the user's own picks and shape, and
-the optimizer fills the rest. The database is never mutated and the Sports.ru API
-is never called.
+the optimizer fills the rest. ``--fixture-conflict-weight`` tunes how hard
+starters that meet each other in the tour are penalised. The database is never
+mutated and the Sports.ru API is never called.
 """
 
 from __future__ import annotations
@@ -23,7 +24,11 @@ from typing import Any, Sequence
 
 from .db import create_db_engine, create_session_factory
 from .forecast import MODEL_EVENT, MODEL_MEAN, MODEL_RECENT
-from .optimizer import OptimizerError, build_squad_optimization
+from .optimizer import (
+    DEFAULT_FIXTURE_CONFLICT_WEIGHT,
+    OptimizerError,
+    build_squad_optimization,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -90,6 +95,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--fixture-conflict-weight",
+        type=float,
+        help=(
+            "How hard starters that meet each other in the tour are penalised "
+            f"(default: {DEFAULT_FIXTURE_CONFLICT_WEIGHT}); 0 ignores the "
+            "schedule but still reports the clashes"
+        ),
+    )
+    parser.add_argument(
         "--output",
         default="data/optimizer",
         help="Directory for the optimizer artifacts (default: data/optimizer)",
@@ -134,6 +148,23 @@ def _summarize(report: dict[str, Any], paths: dict[str, str], stream) -> None:
         f"(unused {solution['unused_budget']})",
         file=stream,
     )
+    fixtures = solution.get("fixtures") or {}
+    print(
+        f"  fixtures: {len(fixtures.get('head_to_head') or [])} head-to-head "
+        f"fixture(s) in the eleven, {len(fixtures.get('clashes') or [])} clashing "
+        f"pair(s); penalty {solution.get('fixture_penalty')} at weight "
+        f"{fixtures.get('conflict_weight')} -> objective score "
+        f"{solution.get('objective_score')}",
+        file=stream,
+    )
+    for clash in fixtures.get("clashes") or []:
+        print(
+            f"    -{clash['penalty']:<6} {clash['role'][:3]} "
+            f"{clash['player_name']} ({clash['club_name']}) vs "
+            f"{clash['opponent_role'][:3]} {clash['opponent_player_name']} "
+            f"({clash['opponent_club_name']})",
+            file=stream,
+        )
     transfers = solution.get("transfers")
     if transfers is not None:
         print(
@@ -195,6 +226,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             locked=_parse_ids(args.locked),
             locked_starters=_parse_ids(args.locked_starters),
             formation=args.formation,
+            fixture_conflict_weight=args.fixture_conflict_weight,
         )
     except OptimizerError as error:
         print(f"Optimization failed: {error}", file=sys.stderr)

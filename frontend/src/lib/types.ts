@@ -177,9 +177,36 @@ export interface OptimizerTransfers {
   missing_from_pool: number[];
 }
 
+// Step 16: two starters that meet each other in the tour, and how much of their
+// expected points cancel out (one side's goals are the other side's clean sheet).
+export interface OptimizerClash {
+  match_id?: number | null;
+  player_season_id: number;
+  player_name?: string | null;
+  role: Role;
+  club_name?: string | null;
+  opponent_player_season_id: number;
+  opponent_player_name?: string | null;
+  opponent_role: Role;
+  opponent_club_name?: string | null;
+  cancellation: number;
+  penalty: number;
+}
+
+export interface OptimizerFixtures {
+  conflict_weight: number;
+  head_to_head: { match_id: number; clubs: { club_id: number; club_name?: string | null; starters: number }[] }[];
+  clashes: OptimizerClash[];
+  cancellation: number;
+}
+
 export interface OptimizerSolution {
   status: string;
   objective_expected_points: number;
+  // Expected points less the head-to-head penalty the objective paid (step 16).
+  objective_score?: number;
+  fixture_penalty?: number;
+  fixtures?: OptimizerFixtures | null;
   starting_expected_points: number;
   formation: string;
   total_price: number;

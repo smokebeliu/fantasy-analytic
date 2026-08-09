@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SquadBuilder } from "@/components/SquadBuilder";
 import { RPL_RULES, makePlayer } from "./fixtures";
-import type { OptimizerCandidate, TourModel } from "@/lib/types";
+import type { OptimizerCandidate, OptimizerResponse, TourModel } from "@/lib/types";
 
 const listPlayers = vi.fn();
 const optimizeSquad = vi.fn();
@@ -236,6 +236,70 @@ describe("SquadBuilder", () => {
     );
   });
 
+  it("explains the head-to-head clashes the optimizer had to pay for", async () => {
+    const ours = { ...makeCandidate("Защитник"), player_season_id: 11, role: "DEFENDER" as const };
+    const theirs = { ...makeCandidate("Форвард"), player_season_id: 22, club_name: "Соперник" };
+    const response = optimizerResponse([ours, theirs]);
+    response.solution.fixture_penalty = 0.55;
+    response.solution.objective_score = 69.55;
+    response.solution.fixtures = {
+      conflict_weight: 0.25,
+      head_to_head: [
+        {
+          match_id: 262,
+          clubs: [
+            { club_id: 1, club_name: "Клуб", starters: 1 },
+            { club_id: 2, club_name: "Соперник", starters: 1 },
+          ],
+        },
+      ],
+      cancellation: 2.2144,
+      clashes: [
+        {
+          match_id: 262,
+          player_season_id: 11,
+          player_name: "Защитник",
+          role: "DEFENDER",
+          club_name: "Клуб",
+          opponent_player_season_id: 22,
+          opponent_player_name: "Форвард",
+          opponent_role: "MIDFIELDER",
+          opponent_club_name: "Соперник",
+          cancellation: 2.2144,
+          penalty: 0.55,
+        },
+      ],
+    };
+    optimizeSquad.mockResolvedValue(response);
+
+    render(
+      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
+    );
+    await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
+
+    await userEvent.click(screen.getByRole("button", { name: /Автосостав/ }));
+
+    const clashes = await screen.findByTestId("optimizer-clashes");
+    expect(clashes).toHaveTextContent("Очные встречи в составе: 1");
+    expect(clashes).toHaveTextContent("Защитник");
+    expect(clashes).toHaveTextContent("Соперник");
+    expect(clashes).toHaveTextContent("0.55");
+  });
+
+  it("hides the clash panel when nothing cancels out", async () => {
+    optimizeSquad.mockResolvedValue(optimizerResponse([makeCandidate("Капитан")]));
+
+    render(
+      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
+    );
+    await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
+
+    await userEvent.click(screen.getByRole("button", { name: /Автосостав/ }));
+
+    await screen.findByTestId("optimizer-result");
+    expect(screen.queryByTestId("optimizer-clashes")).not.toBeInTheDocument();
+  });
+
   it("surfaces an incompatible set of pins as an error", async () => {
     optimizeSquad.mockRejectedValue(
       new Error("3 locked GK exceed the squad limit of 2 for this position"),
@@ -252,7 +316,7 @@ describe("SquadBuilder", () => {
   });
 });
 
-function optimizerResponse(squad: OptimizerCandidate[]) {
+function optimizerResponse(squad: OptimizerCandidate[]): OptimizerResponse {
   return {
     optimizer_version: "1.1.0",
     model: "poisson_events",

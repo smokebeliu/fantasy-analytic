@@ -347,6 +347,44 @@ a partially assembled squad instead of replacing it. No schema changes.
   `validate_squad` re-checks the pins and the formation independently, so a lock
   silently dropped by the model would surface as a validation failure.
 
+### Fixture-aware objective (step 16)
+
+The tour's own schedule is part of the objective, so a squad does not bet on both
+sides of the same match. No schema changes; the inputs are the `match_id` /
+`club_id` already carried by every forecast row plus two derived exposures.
+
+- **Exposures.** The event forecast reports `params.fixture.goal_upside` (the
+  points that only materialise when the player's own club scores: goals plus
+  assists) and `params.fixture.shutout_stake` (what the player forfeits per goal
+  their opponent scores: the clean-sheet component plus the concession slope
+  `-conceded_per_two / 2 * p_appearance`). Both come from the versioned scoring
+  table, so they follow the rules rather than a constant.
+- **Why the product is the covariance.** For two players on opposite sides of one
+  fixture, `goal_upside * shutout_stake` (summed both ways round) is exactly
+  `|Cov|` of their two forecasts under the Poisson goal model: the opponent's
+  goal mean cancels out of `Cov(1{G=0}, G) = -P(G=0) * lambda` and
+  `Var(G) = lambda`. Expected points are *not* changed by correlation — the
+  quantity measures how much of the pair's upside is self-defeating, which is why
+  the weight is a documented preference rather than a measurement.
+- **Objective.** `sum(expected_points * (start + captain)) - weight *
+  sum(cancellation)` over pairs of *starters* that meet each other (one reified
+  `clash` boolean per pair). The bench is never charged because it does not
+  score, and the captain's doubled points are deliberately not doubled in the
+  charge. `fixture_conflict_weight` defaults to
+  `DEFAULT_FIXTURE_CONFLICT_WEIGHT` and `0` restores the fixture-blind objective.
+- **Explanation.** `solution.fixtures` reports the weight, the fixtures both of
+  whose sides are in the eleven (`head_to_head`), the cancelling pairs with their
+  own penalty (`clashes`) and the total `cancellation`; `fixture_penalty` and
+  `objective_score` sit next to `objective_expected_points`, which keeps its
+  original meaning (pure expected points).
+- **Independent validation.** `validate_squad` recomputes the cancellation from
+  the produced eleven and rejects a mismatching `cancellation`,
+  `fixture_penalty` or `objective_score`, so a clash the model failed to price
+  surfaces as a validation failure instead of a silently worse squad.
+- **Not modelled.** Positive same-club correlation (stacking) and team-strength
+  coefficients stay out of scope (step 18). The two baselines do not decompose
+  their points into events, so they carry no exposure and never clash.
+
 ## Cross-season forecast (step 14)
 
 The forecast pipeline builds a squad for the **first tour of a new season** out

@@ -21,6 +21,11 @@ Design guarantees
 * **Objective matches the plan.** The solver maximises the expected points of
   the starting eleven *plus* the captain (whose points are counted twice),
   which is exactly the fantasy scoring of a lineup.
+* **Fixture-aware.** The tour's own schedule is part of the objective: when two
+  starters meet each other, the points one of them earns from scoring are the
+  points the other loses with the clean sheet, so such a pair is priced with the
+  magnitude of that cancellation and only survives when it still wins on
+  expected points (see :func:`cancellation`).
 * **Deterministic.** A single search worker and a fixed random seed, together
   with a deterministic candidate ordering and a strict spend tie-break, make the
   same inputs always produce the same squad.
@@ -48,7 +53,16 @@ from .forecast import MODEL_EVENT, ForecastError, build_forecast_dataset
 
 # Bumped whenever the optimizer model or its constraints change so squads built
 # by different code revisions never get silently compared.
-OPTIMIZER_VERSION = "1.1.0"
+OPTIMIZER_VERSION = "1.2.0"
+
+# How hard a head-to-head clash between two starters is priced (step 16). The
+# penalty is ``weight * cancellation`` where the cancellation is the covariance
+# magnitude of the two forecasts in points squared, so the weight has units of
+# 1/points and is a preference, not a measurement: expected points are unchanged
+# by correlation, but a squad whose picks cancel each other out cannot post a big
+# score. The default is calibrated on the live snapshot to be small enough that a
+# clash which is genuinely better on expected points is still selected.
+DEFAULT_FIXTURE_CONFLICT_WEIGHT = 0.25
 
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
 
@@ -87,10 +101,16 @@ class Candidate:
     club_name: str | None
     price: float
     expected_points: float
+    # The tour fixture the player is scored in. ``match_id`` and ``club_id``
+    # identify the two sides of a head-to-head clash; the two exposures say how
+    # much of the forecast rides on goals (see :func:`cancellation`).
+    match_id: int | None = None
+    opponent_club_id: int | None = None
+    goal_upside: float = 0.0
+    shutout_stake: float = 0.0
     # Purely descriptive fields carried into the explanation.
     opponent_name: str | None = None
     is_home: bool | None = None
-    match_id: int | None = None
     p_appearance: float | None = None
     expected_minutes: float | None = None
     stat_source: str | None = None
@@ -181,6 +201,91 @@ def parse_formation(formation: str, rules: SquadRules) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# Fixture awareness (step 16): pricing head-to-head clashes.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FixtureExposure:
+    """The fixture-linked part of one player's forecast.
+
+    ``goal_upside`` is the expected points that only materialise when the
+    player's own club scores (goals and assists). ``shutout_stake`` is what the
+    player forfeits per goal their opponent scores (the clean sheet plus the
+    concession penalty). Both come from the event forecast, which derives them
+    from the versioned scoring table.
+    """
+
+    match_id: int | None
+    club_id: int
+    goal_upside: float
+    shutout_stake: float
+
+
+def cancellation(left: FixtureExposure, right: FixtureExposure) -> float:
+    """How much two players' expected points cancel out, in points squared.
+
+    Zero unless the two play *against* each other in the same fixture. For a
+    head-to-head pair it is the magnitude of the covariance of their forecasts:
+    every goal one side scores is a goal the other side concedes, so one
+    player's ``goal_upside`` is precisely what the other's ``shutout_stake``
+    pays for. Being a covariance it leaves the *expected* total untouched — it
+    measures how much of the pair's upside is self-defeating.
+    """
+    if left.match_id is None or left.match_id != right.match_id:
+        return 0.0
+    if left.club_id == right.club_id:
+        return 0.0
+    return round(
+        left.goal_upside * right.shutout_stake
+        + right.goal_upside * left.shutout_stake,
+        6,
+    )
+
+
+def fixture_conflicts(
+    exposures: Sequence[FixtureExposure],
+) -> list[tuple[int, int, float]]:
+    """Every opposing pair that cancels out, as ``(left, right, amount)``.
+
+    Indices refer to ``exposures`` and are always ordered ``left < right``, so
+    the result is deterministic and each pair is reported once.
+    """
+    conflicts: list[tuple[int, int, float]] = []
+    by_match: dict[int, list[int]] = {}
+    for index, exposure in enumerate(exposures):
+        if exposure.match_id is not None:
+            by_match.setdefault(exposure.match_id, []).append(index)
+    for indices in by_match.values():
+        for position, left in enumerate(indices):
+            for right in indices[position + 1 :]:
+                amount = cancellation(exposures[left], exposures[right])
+                if amount > 0.0:
+                    conflicts.append((left, right, amount))
+    conflicts.sort(key=lambda item: (item[0], item[1]))
+    return conflicts
+
+
+def _exposure_from_candidate(candidate: Candidate) -> FixtureExposure:
+    return FixtureExposure(
+        match_id=candidate.match_id,
+        club_id=candidate.club_id,
+        goal_upside=candidate.goal_upside,
+        shutout_stake=candidate.shutout_stake,
+    )
+
+
+def _exposure_from_entry(entry: dict[str, Any]) -> FixtureExposure:
+    """Rebuild an exposure from a squad entry of a produced solution."""
+    return FixtureExposure(
+        match_id=entry.get("match_id"),
+        club_id=entry["club_id"],
+        goal_upside=float(entry.get("goal_upside") or 0.0),
+        shutout_stake=float(entry.get("shutout_stake") or 0.0),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Candidate assembly.
 # ---------------------------------------------------------------------------
 
@@ -192,7 +297,9 @@ def candidates_from_forecast(
 
     Only players with a known price and club (i.e. a real fixture and snapshot)
     can be selected; the rest are dropped so the budget and club-limit
-    constraints are always well defined.
+    constraints are always well defined. The fixture exposures come from the
+    event model's ``params.fixture``; the two baselines do not decompose their
+    points into events, so they carry no exposure and never clash.
     """
     candidates: list[Candidate] = []
     seen: set[int] = set()
@@ -208,6 +315,7 @@ def candidates_from_forecast(
         if psid in seen:
             continue
         seen.add(psid)
+        fixture = (row.get("params") or {}).get("fixture") or {}
         candidates.append(
             Candidate(
                 player_season_id=int(psid),
@@ -218,9 +326,12 @@ def candidates_from_forecast(
                 club_name=row.get("club_name"),
                 price=float(price),
                 expected_points=float(row.get("expected_points") or 0.0),
+                match_id=row.get("match_id"),
+                opponent_club_id=row.get("opponent_club_id"),
+                goal_upside=float(fixture.get("goal_upside") or 0.0),
+                shutout_stake=float(fixture.get("shutout_stake") or 0.0),
                 opponent_name=row.get("opponent_name"),
                 is_home=row.get("is_home"),
-                match_id=row.get("match_id"),
                 p_appearance=row.get("p_appearance"),
                 expected_minutes=row.get("expected_minutes"),
                 stat_source=row.get("stat_source"),
@@ -250,6 +361,9 @@ def _candidate_public(candidate: Candidate) -> dict[str, Any]:
         "opponent_name": candidate.opponent_name,
         "is_home": candidate.is_home,
         "match_id": candidate.match_id,
+        "opponent_club_id": candidate.opponent_club_id,
+        "goal_upside": round(candidate.goal_upside, 4),
+        "shutout_stake": round(candidate.shutout_stake, 4),
         "p_appearance": candidate.p_appearance,
         "expected_minutes": candidate.expected_minutes,
         "stat_source": candidate.stat_source,
@@ -374,6 +488,78 @@ def _check_locked_feasibility(
             )
 
 
+def _fixture_report(
+    candidates: Sequence[Candidate], starters_idx: Sequence[int], weight: float
+) -> dict[str, Any]:
+    """Explain the schedule's effect on the chosen starting eleven.
+
+    Lists the tour fixtures the starters share (``head_to_head``), the pairs
+    whose forecasts cancel each other out (``clashes``) and the resulting
+    ``penalty`` the objective paid. The caller pops ``penalty`` out and reports
+    it next to the expected points.
+    """
+    ordered = sorted(starters_idx)
+    exposures = [_exposure_from_candidate(candidates[i]) for i in ordered]
+
+    clashes: list[dict[str, Any]] = []
+    total = 0.0
+    for left, right, amount in fixture_conflicts(exposures):
+        first = candidates[ordered[left]]
+        second = candidates[ordered[right]]
+        total += amount
+        clashes.append(
+            {
+                "match_id": first.match_id,
+                "player_season_id": first.player_season_id,
+                "player_name": first.player_name,
+                "role": first.role,
+                "club_name": first.club_name,
+                "opponent_player_season_id": second.player_season_id,
+                "opponent_player_name": second.player_name,
+                "opponent_role": second.role,
+                "opponent_club_name": second.club_name,
+                "cancellation": round(amount, 4),
+                "penalty": round(weight * amount, 4),
+            }
+        )
+
+    # A fixture is "head to head" for this squad when starters from both sides
+    # of the same match were selected, whether or not their points cancel.
+    head_to_head: list[dict[str, Any]] = []
+    by_match: dict[int, dict[int, dict[str, Any]]] = {}
+    for index in ordered:
+        candidate = candidates[index]
+        if candidate.match_id is None:
+            continue
+        clubs = by_match.setdefault(candidate.match_id, {})
+        club = clubs.setdefault(
+            candidate.club_id,
+            {
+                "club_id": candidate.club_id,
+                "club_name": candidate.club_name,
+                "starters": 0,
+            },
+        )
+        club["starters"] += 1
+    for match_id in sorted(by_match):
+        clubs = by_match[match_id]
+        if len(clubs) > 1:
+            head_to_head.append(
+                {
+                    "match_id": match_id,
+                    "clubs": [clubs[club_id] for club_id in sorted(clubs)],
+                }
+            )
+
+    return {
+        "conflict_weight": round(weight, 6),
+        "head_to_head": head_to_head,
+        "clashes": clashes,
+        "cancellation": round(total, 4),
+        "penalty": round(weight * total, 4),
+    }
+
+
 def solve_squad(
     candidates: Sequence[Candidate],
     rules: SquadRules,
@@ -383,6 +569,7 @@ def solve_squad(
     locked_ids: Sequence[int] | None = None,
     locked_starter_ids: Sequence[int] | None = None,
     formation: str | None = None,
+    fixture_conflict_weight: float | None = None,
 ) -> dict[str, Any]:
     """Solve the squad-selection integer program and return an explanation.
 
@@ -395,11 +582,23 @@ def solve_squad(
     ``formation`` fixes the starting role counts. Every other rule still holds,
     so the remaining slots are filled optimally.
 
+    ``fixture_conflict_weight`` prices starters that meet each other in the tour
+    (defaulting to :data:`DEFAULT_FIXTURE_CONFLICT_WEIGHT`); ``0`` restores the
+    fixture-blind objective while still reporting the clashes.
+
     Raises :class:`OptimizerError` when the pool is too small or the constraints
     cannot be satisfied.
     """
     if not candidates:
         raise OptimizerError("No priced candidates available for the target tour")
+
+    weight = (
+        DEFAULT_FIXTURE_CONFLICT_WEIGHT
+        if fixture_conflict_weight is None
+        else float(fixture_conflict_weight)
+    )
+    if weight < 0:
+        raise OptimizerError("fixture_conflict_weight must be non-negative")
 
     formation_counts = (
         parse_formation(formation, rules) if formation is not None else None
@@ -489,11 +688,30 @@ def solve_squad(
             "missing": missing,
         }
 
-    # Objective: maximise starting + captain points, break ties by spending
-    # less (more unused budget). The headroom keeps spend strictly secondary.
+    # Fixture awareness (step 16): a pair of starters that meet each other in
+    # the tour is charged the priced magnitude of their cancellation, so such a
+    # pair is only chosen when it wins on expected points by more than the
+    # charge. Only starters can score, so the bench is never charged, and the
+    # captain's doubled points are deliberately not doubled in the charge.
+    exposures = [_exposure_from_candidate(candidate) for candidate in candidates]
+    clash_terms: list[tuple[cp_model.IntVar, int]] = []
+    if weight > 0:
+        for left, right, amount in fixture_conflicts(exposures):
+            charge = int(round(weight * amount * _POINTS_SCALE))
+            if charge <= 0:
+                continue
+            together = model.NewBoolVar(f"clash_{left}_{right}")
+            model.Add(together >= start[left] + start[right] - 1)
+            model.Add(together <= start[left])
+            model.Add(together <= start[right])
+            clash_terms.append((together, charge))
+
+    # Objective: maximise starting + captain points less the fixture charge,
+    # break ties by spending less (more unused budget). The headroom keeps spend
+    # strictly secondary.
     points_term = sum(
         candidates[i].points_scaled * (start[i] + captain[i]) for i in range(n)
-    )
+    ) - sum(charge * together for together, charge in clash_terms)
     spend_term = sum(candidates[i].price_cents * pick[i] for i in range(n))
     model.Maximize(points_term * _TIE_BREAK_HEADROOM - spend_term)
 
@@ -541,6 +759,14 @@ def solve_squad(
         starting_points + candidates[captain_idx].expected_points, 4
     )
 
+    # Explain the schedule's effect: which starters meet each other, how much
+    # their forecasts cancel and what that cost in the objective. The clashes
+    # are recomputed from the chosen eleven rather than read back from the
+    # solver, so the report stays truthful even at weight 0 (where the objective
+    # ignores them).
+    fixture_report = _fixture_report(candidates, starters_idx, weight)
+    fixture_penalty = fixture_report.pop("penalty")
+
     squad: list[dict[str, Any]] = []
     bench_rank = {idx: rank for rank, idx in enumerate(bench_ordered)}
     locked_set = set(locked_idx)
@@ -564,6 +790,9 @@ def solve_squad(
     result: dict[str, Any] = {
         "status": solver.StatusName(status),
         "objective_expected_points": objective_points,
+        "objective_score": round(objective_points - fixture_penalty, 4),
+        "fixture_penalty": fixture_penalty,
+        "fixtures": fixture_report,
         "starting_expected_points": starting_points,
         "formation": _formation(starters),
         "total_price": total_price,
@@ -631,7 +860,8 @@ def validate_squad(
     An empty list means the squad is valid. This is intentionally independent of
     the solver so a bug in the model surfaces as a validation failure. The
     optional pin/formation arguments are re-checked the same way, so a locked
-    player silently dropped by the model would be caught here.
+    player silently dropped by the model would be caught here, and the reported
+    fixture penalty is recomputed from the squad itself.
     """
     violations: list[str] = []
     squad = solution.get("squad", [])
@@ -736,6 +966,38 @@ def validate_squad(
                     f"formation {formation} needs {expected[role]} {role} in the "
                     f"starting eleven, found {start_counts[role]}"
                 )
+
+    # Fixture awareness: recompute the head-to-head cancellation from the
+    # starting eleven the solver returned, so a clash the objective failed to
+    # price (or a penalty reported without a clash) shows up here.
+    fixtures = solution.get("fixtures")
+    if fixtures is not None:
+        weight = float(fixtures.get("conflict_weight") or 0.0)
+        exposures = [_exposure_from_entry(player) for player in starters]
+        recomputed = round(
+            sum(amount for _, _, amount in fixture_conflicts(exposures)), 4
+        )
+        reported = round(float(fixtures.get("cancellation") or 0.0), 4)
+        if abs(recomputed - reported) > 1e-4:
+            violations.append(
+                f"fixture cancellation {reported} does not match the "
+                f"recomputed {recomputed}"
+            )
+        penalty = round(weight * recomputed, 4)
+        reported_penalty = round(float(solution.get("fixture_penalty") or 0.0), 4)
+        if abs(penalty - reported_penalty) > 1e-4:
+            violations.append(
+                f"fixture penalty {reported_penalty} does not match the "
+                f"recomputed {penalty}"
+            )
+        objective_points = float(solution.get("objective_expected_points") or 0.0)
+        score = round(objective_points - reported_penalty, 4)
+        reported_score = solution.get("objective_score")
+        if reported_score is not None and abs(score - float(reported_score)) > 1e-4:
+            violations.append(
+                f"objective score {reported_score} is not expected points minus "
+                f"the fixture penalty ({score})"
+            )
 
     return violations
 
@@ -850,12 +1112,14 @@ def build_squad_optimization(
     locked: Sequence[str | int] | None = None,
     locked_starters: Sequence[str | int] | None = None,
     formation: str | None = None,
+    fixture_conflict_weight: float | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build the optimal squad for a tour and return a JSON-serialisable report.
 
     The forecast is rebuilt in-process from the active snapshot (or ``run_id``),
-    so the result is reproducible from ``(run_id, tour, model, optimizer)``. When
+    so the result is reproducible from
+    ``(run_id, tour, model, optimizer, fixture_conflict_weight)``. When
     ``current_squad`` is given the optimizer runs in limited-transfers mode;
     ``locked``/``locked_starters``/``formation`` pin the user's own choices into
     either mode.
@@ -898,6 +1162,7 @@ def build_squad_optimization(
         locked_ids=locked_ids,
         locked_starter_ids=locked_starter_ids,
         formation=formation,
+        fixture_conflict_weight=fixture_conflict_weight,
     )
 
     violations = validate_squad(
@@ -937,6 +1202,8 @@ def build_squad_optimization(
             "candidates": len(candidates),
             "locked": len(set(locked_ids) | set(locked_starter_ids)),
             "locked_starters": len(set(locked_starter_ids)),
+            "head_to_head_fixtures": len(solution["fixtures"]["head_to_head"]),
+            "clashes": len(solution["fixtures"]["clashes"]),
         },
         "solution": solution,
         "valid": True,
@@ -944,11 +1211,15 @@ def build_squad_optimization(
 
 
 __all__ = [
+    "DEFAULT_FIXTURE_CONFLICT_WEIGHT",
     "OPTIMIZER_VERSION",
     "ROLES",
     "Candidate",
+    "FixtureExposure",
     "SquadRules",
     "OptimizerError",
+    "cancellation",
+    "fixture_conflicts",
     "parse_formation",
     "parse_role_limits",
     "candidates_from_forecast",

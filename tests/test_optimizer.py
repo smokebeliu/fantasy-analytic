@@ -4,7 +4,9 @@ The unit tests exercise the pure integer program and its independent validator
 in isolation: they build a fresh squad for a normal tour, a limited-transfers
 squad for a tour with a changed transfer limit, prove the objective equals the
 starting-eleven points plus the captain, that recomputing is deterministic and
-that an infeasible problem raises a clear error. The integration tests import a
+that an infeasible problem raises a clear error. A dedicated set covers the
+fixture-aware objective (step 16) on a constructed pair of clubs that meet each
+other in the target tour. The integration tests import a
 small synthetic season into a real PostgreSQL database, publish it through the
 quality gate, add a future tour and then run the whole database-backed pipeline
 (forecast -> rules -> solve -> validate). They are skipped automatically when no
@@ -27,11 +29,15 @@ from fantasy_analytics.db import (
 from fantasy_analytics.forecast import MODEL_EVENT
 from fantasy_analytics.ingestion import IngestionOptions, run_ingestion
 from fantasy_analytics.optimizer import (
+    DEFAULT_FIXTURE_CONFLICT_WEIGHT,
     Candidate,
+    FixtureExposure,
     OptimizerError,
     SquadRules,
     build_squad_optimization,
+    cancellation,
     candidates_from_forecast,
+    fixture_conflicts,
     parse_formation,
     parse_role_limits,
     solve_squad,
@@ -555,6 +561,305 @@ class LockedPlayersTest(unittest.TestCase):
         self.assertTrue(any("formation 3-4-3" in v for v in violations))
 
 
+class CancellationTest(unittest.TestCase):
+    """Step 16: the pure measure of two players cancelling each other out."""
+
+    def _exposure(self, **over) -> FixtureExposure:
+        base = dict(match_id=1, club_id=1, goal_upside=2.0, shutout_stake=1.5)
+        base.update(over)
+        return FixtureExposure(**base)
+
+    def test_opposing_pair_multiplies_upside_by_stake(self) -> None:
+        home = self._exposure(club_id=1, goal_upside=1.0, shutout_stake=2.0)
+        away = self._exposure(club_id=2, goal_upside=3.0, shutout_stake=0.5)
+        # 1.0 * 0.5 (their keeper's stake) + 3.0 * 2.0 (our defence's stake).
+        self.assertAlmostEqual(cancellation(home, away), 6.5, places=6)
+
+    def test_symmetric(self) -> None:
+        home = self._exposure(club_id=1)
+        away = self._exposure(club_id=2, goal_upside=1.0, shutout_stake=3.0)
+        self.assertEqual(cancellation(home, away), cancellation(away, home))
+
+    def test_teammates_do_not_cancel(self) -> None:
+        self.assertEqual(
+            cancellation(self._exposure(club_id=7), self._exposure(club_id=7)), 0.0
+        )
+
+    def test_different_fixtures_do_not_cancel(self) -> None:
+        self.assertEqual(
+            cancellation(
+                self._exposure(match_id=1, club_id=1),
+                self._exposure(match_id=2, club_id=2),
+            ),
+            0.0,
+        )
+
+    def test_player_without_a_fixture_does_not_cancel(self) -> None:
+        self.assertEqual(
+            cancellation(
+                self._exposure(match_id=None), self._exposure(match_id=None, club_id=2)
+            ),
+            0.0,
+        )
+
+    def test_pure_attackers_do_not_cancel(self) -> None:
+        # Neither side has anything staked on a shutout, so nothing cancels.
+        self.assertEqual(
+            cancellation(
+                self._exposure(club_id=1, shutout_stake=0.0),
+                self._exposure(club_id=2, shutout_stake=0.0),
+            ),
+            0.0,
+        )
+
+    def test_conflicts_are_ordered_and_reported_once(self) -> None:
+        exposures = [
+            FixtureExposure(match_id=1, club_id=1, goal_upside=0.0, shutout_stake=2.0),
+            FixtureExposure(match_id=1, club_id=2, goal_upside=3.0, shutout_stake=0.0),
+            FixtureExposure(match_id=1, club_id=2, goal_upside=1.0, shutout_stake=0.0),
+            FixtureExposure(match_id=2, club_id=3, goal_upside=1.0, shutout_stake=1.0),
+        ]
+        conflicts = fixture_conflicts(exposures)
+        self.assertEqual([(left, right) for left, right, _ in conflicts], [(0, 1), (0, 2)])
+        self.assertAlmostEqual(conflicts[0][2], 6.0, places=6)
+        self.assertAlmostEqual(conflicts[1][2], 2.0, places=6)
+
+
+# The two fixtures of a synthetic tour: club 1 hosts club 2, club 3 hosts club 4.
+_DUEL_MATCH = 501
+_OTHER_MATCH = 502
+
+
+def _duel_rules(**overrides) -> SquadRules:
+    """A two-man squad that must field exactly one defender and one forward."""
+    defaults = dict(
+        total_budget=100.0,
+        total_players=2,
+        starting_players=2,
+        full_limits={"DEFENDER": (1, 1), "FORWARD": (1, 1)},
+        starting_limits={"DEFENDER": (1, 1), "FORWARD": (1, 1)},
+        max_same_team=2,
+        total_transfers=1,
+    )
+    defaults.update(overrides)
+    return SquadRules(**defaults)
+
+
+def _duel_pool(rival_points: float) -> list[Candidate]:
+    """A defender and the two forwards competing for the other starting slot.
+
+    Forward ``2`` plays *against* the defender in ``_DUEL_MATCH``, so their
+    forecasts cancel out; forward ``3`` has an unrelated fixture and is worth
+    ``5.0``. ``rival_points`` decides whether the clashing forward is worth the
+    cancellation.
+    """
+    return [
+        Candidate(
+            player_season_id=1,
+            fantasy_player_id="1",
+            player_name="Defender",
+            role="DEFENDER",
+            club_id=1,
+            club_name="Club1",
+            price=5.0,
+            expected_points=5.0,
+            match_id=_DUEL_MATCH,
+            opponent_club_id=2,
+            goal_upside=0.0,
+            shutout_stake=1.5,
+        ),
+        Candidate(
+            player_season_id=2,
+            fantasy_player_id="2",
+            player_name="Rival striker",
+            role="FORWARD",
+            club_id=2,
+            club_name="Club2",
+            price=5.0,
+            expected_points=rival_points,
+            match_id=_DUEL_MATCH,
+            opponent_club_id=1,
+            goal_upside=2.0,
+            shutout_stake=0.0,
+        ),
+        Candidate(
+            player_season_id=3,
+            fantasy_player_id="3",
+            player_name="Neutral striker",
+            role="FORWARD",
+            club_id=3,
+            club_name="Club3",
+            price=5.0,
+            expected_points=5.0,
+            match_id=_OTHER_MATCH,
+            opponent_club_id=4,
+            goal_upside=2.0,
+            shutout_stake=0.0,
+        ),
+    ]
+
+
+class FixtureAwareOptimizerTest(unittest.TestCase):
+    """Step 16: the tour schedule is part of the objective."""
+
+    def setUp(self) -> None:
+        self.rules = _duel_rules()
+        # goal_upside(2.0) * shutout_stake(1.5) of the opposing pair.
+        self.expected_cancellation = 3.0
+        self.expected_penalty = round(
+            DEFAULT_FIXTURE_CONFLICT_WEIGHT * self.expected_cancellation, 4
+        )
+
+    def _ids(self, solution: dict) -> set[int]:
+        return {player["player_season_id"] for player in solution["squad"]}
+
+    def test_marginally_better_opponent_is_not_taken(self) -> None:
+        # The clashing striker is worth 0.1 more, far less than the 0.75 the
+        # cancellation costs, so the optimizer prefers the neutral fixture.
+        solution = solve_squad(_duel_pool(5.1), self.rules)
+        self.assertEqual(self._ids(solution), {1, 3})
+        self.assertEqual(solution["fixtures"]["clashes"], [])
+        self.assertEqual(solution["fixture_penalty"], 0.0)
+        self.assertEqual(
+            solution["objective_score"], solution["objective_expected_points"]
+        )
+        self.assertEqual(validate_squad(solution, self.rules), [])
+
+    def test_clearly_better_opponent_is_still_taken(self) -> None:
+        # Worth 2 points more than the alternative: the clash now pays for
+        # itself, so the schedule must not veto it.
+        solution = solve_squad(_duel_pool(7.0), self.rules)
+        self.assertEqual(self._ids(solution), {1, 2})
+        self.assertEqual(solution["fixture_penalty"], self.expected_penalty)
+        self.assertEqual(
+            solution["objective_score"],
+            round(solution["objective_expected_points"] - self.expected_penalty, 4),
+        )
+        self.assertEqual(validate_squad(solution, self.rules), [])
+
+    def test_clash_is_explained_in_the_report(self) -> None:
+        solution = solve_squad(_duel_pool(7.0), self.rules)
+        clash = solution["fixtures"]["clashes"][0]
+        self.assertEqual(clash["match_id"], _DUEL_MATCH)
+        self.assertEqual(
+            {clash["player_season_id"], clash["opponent_player_season_id"]}, {1, 2}
+        )
+        self.assertEqual(clash["cancellation"], self.expected_cancellation)
+        self.assertEqual(clash["penalty"], self.expected_penalty)
+        head_to_head = solution["fixtures"]["head_to_head"]
+        self.assertEqual(len(head_to_head), 1)
+        self.assertEqual(head_to_head[0]["match_id"], _DUEL_MATCH)
+        self.assertEqual(
+            [club["starters"] for club in head_to_head[0]["clubs"]], [1, 1]
+        )
+
+    def test_zero_weight_ignores_the_schedule_but_still_reports_it(self) -> None:
+        solution = solve_squad(
+            _duel_pool(5.1), self.rules, fixture_conflict_weight=0.0
+        )
+        self.assertEqual(self._ids(solution), {1, 2})
+        self.assertEqual(
+            solution["fixtures"]["cancellation"], self.expected_cancellation
+        )
+        self.assertEqual(solution["fixtures"]["clashes"][0]["penalty"], 0.0)
+        self.assertEqual(solution["fixture_penalty"], 0.0)
+        self.assertEqual(validate_squad(solution, self.rules), [])
+
+    def test_heavier_weight_forces_the_neutral_fixture(self) -> None:
+        clashing = solve_squad(
+            _duel_pool(7.0), self.rules, fixture_conflict_weight=0.0
+        )
+        # The clash is worth 4 points of objective (the striker also captains),
+        # so it only loses once the cancellation is priced above 4/3 per point².
+        avoided = solve_squad(
+            _duel_pool(7.0), self.rules, fixture_conflict_weight=2.0
+        )
+        self.assertEqual(self._ids(clashing), {1, 2})
+        self.assertEqual(self._ids(avoided), {1, 3})
+        self.assertLess(
+            avoided["objective_expected_points"],
+            clashing["objective_expected_points"],
+        )
+
+    def test_negative_weight_raises(self) -> None:
+        with self.assertRaises(OptimizerError):
+            solve_squad(_duel_pool(7.0), self.rules, fixture_conflict_weight=-0.5)
+
+    def test_deterministic_with_the_schedule_priced(self) -> None:
+        pool = _duel_pool(7.0)
+        self.assertEqual(solve_squad(pool, self.rules), solve_squad(pool, self.rules))
+
+    def test_pool_without_fixtures_is_unaffected(self) -> None:
+        solution = solve_squad(_pool(), _rpl_rules())
+        self.assertEqual(solution["fixtures"]["clashes"], [])
+        self.assertEqual(solution["fixtures"]["head_to_head"], [])
+        self.assertEqual(solution["fixture_penalty"], 0.0)
+
+    def test_locked_starters_may_force_a_priced_clash(self) -> None:
+        # The user gets what they asked for; the cost is reported, not hidden.
+        solution = solve_squad(
+            _duel_pool(5.1), self.rules, locked_starter_ids=[1, 2]
+        )
+        self.assertEqual(self._ids(solution), {1, 2})
+        self.assertEqual(solution["fixture_penalty"], self.expected_penalty)
+        self.assertEqual(
+            validate_squad(solution, self.rules, locked_starter_ids=[1, 2]), []
+        )
+
+    def test_validator_catches_an_unpriced_clash(self) -> None:
+        solution = solve_squad(_duel_pool(7.0), self.rules)
+        solution["fixture_penalty"] = 0.0
+        violations = validate_squad(solution, self.rules)
+        self.assertTrue(any("fixture penalty" in v for v in violations))
+
+    def test_validator_catches_a_misreported_cancellation(self) -> None:
+        solution = solve_squad(_duel_pool(7.0), self.rules)
+        solution["fixtures"]["cancellation"] = 0.0
+        violations = validate_squad(solution, self.rules)
+        self.assertTrue(any("fixture cancellation" in v for v in violations))
+
+    def test_validator_catches_a_wrong_objective_score(self) -> None:
+        solution = solve_squad(_duel_pool(7.0), self.rules)
+        solution["objective_score"] = solution["objective_expected_points"]
+        violations = validate_squad(solution, self.rules)
+        self.assertTrue(any("objective score" in v for v in violations))
+
+    def test_candidates_read_the_exposures_from_the_forecast(self) -> None:
+        rows = [
+            {
+                "model_name": MODEL_EVENT,
+                "player_season_id": 1,
+                "role": "DEFENDER",
+                "club_id": 1,
+                "price": 5.0,
+                "expected_points": 4.0,
+                "match_id": _DUEL_MATCH,
+                "opponent_club_id": 2,
+                "params": {
+                    "fixture": {"goal_upside": 0.4, "shutout_stake": 1.2},
+                },
+            },
+            {
+                "model_name": MODEL_EVENT,
+                "player_season_id": 2,
+                "role": "FORWARD",
+                "club_id": 2,
+                "price": 5.0,
+                "expected_points": 4.0,
+                "match_id": _DUEL_MATCH,
+                "opponent_club_id": 1,
+                "params": None,
+            },
+        ]
+        candidates = candidates_from_forecast(rows, MODEL_EVENT)
+        self.assertEqual(candidates[0].goal_upside, 0.4)
+        self.assertEqual(candidates[0].shutout_stake, 1.2)
+        self.assertEqual(candidates[0].opponent_club_id, 2)
+        # A model without a fixture breakdown simply has no exposure.
+        self.assertEqual(candidates[1].goal_upside, 0.0)
+        self.assertEqual(candidates[1].shutout_stake, 0.0)
+
+
 class ValidatorTest(unittest.TestCase):
     def _valid_solution(self) -> dict:
         return solve_squad(_pool(), _rpl_rules())
@@ -687,6 +992,43 @@ class OptimizerIntegrationTest(unittest.TestCase):
         roles = {p["role"] for p in solution["squad"]}
         self.assertEqual(roles, {"GOALKEEPER", "FORWARD"})
         self.assertEqual(validate_squad(solution, _rules_from_report(report)), [])
+
+    def test_end_to_end_reports_the_head_to_head_fixture(self) -> None:
+        # The fixture's only two players are a forward of club A and the
+        # goalkeeper of club B, and club A hosts club B in the target tour, so
+        # the forced two-man squad is itself a head-to-head pair.
+        report = build_squad_optimization(self.session_factory, tour_ref="1773")
+
+        fixtures = report["solution"]["fixtures"]
+        self.assertEqual(len(fixtures["head_to_head"]), 1)
+        self.assertEqual(
+            [club["starters"] for club in fixtures["head_to_head"][0]["clubs"]], [1, 1]
+        )
+        self.assertEqual(report["counts"]["head_to_head_fixtures"], 1)
+        self.assertEqual(
+            fixtures["conflict_weight"], DEFAULT_FIXTURE_CONFLICT_WEIGHT
+        )
+        self.assertGreaterEqual(report["solution"]["fixture_penalty"], 0.0)
+        self.assertEqual(
+            report["solution"]["objective_score"],
+            round(
+                report["solution"]["objective_expected_points"]
+                - report["solution"]["fixture_penalty"],
+                4,
+            ),
+        )
+        self.assertTrue(report["valid"])
+
+    def test_end_to_end_zero_weight_keeps_the_expected_points(self) -> None:
+        priced = build_squad_optimization(self.session_factory, tour_ref="1773")
+        blind = build_squad_optimization(
+            self.session_factory, tour_ref="1773", fixture_conflict_weight=0.0
+        )
+        self.assertEqual(blind["solution"]["fixture_penalty"], 0.0)
+        self.assertGreaterEqual(
+            blind["solution"]["objective_expected_points"],
+            priced["solution"]["objective_expected_points"],
+        )
 
     def test_end_to_end_deterministic(self) -> None:
         a = build_squad_optimization(self.session_factory, tour_ref="1773")
