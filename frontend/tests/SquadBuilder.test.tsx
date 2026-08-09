@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SquadBuilder } from "@/components/SquadBuilder";
 import { RPL_RULES, makePlayer } from "./fixtures";
-import type { TourModel } from "@/lib/types";
+import type { OptimizerCandidate, TourModel } from "@/lib/types";
 
 const listPlayers = vi.fn();
 const optimizeSquad = vi.fn();
@@ -180,11 +180,11 @@ describe("SquadBuilder", () => {
   });
 
   it("pins a player and asks the optimizer to fill the rest under a formation", async () => {
-    const pinned = {
+    const pinned: OptimizerCandidate = {
       ...makeCandidate("Вратарь А"),
       player_season_id: 1,
       fantasy_player_id: "f-gk",
-      role: "GOALKEEPER" as const,
+      role: "GOALKEEPER",
       is_locked: true,
     };
     optimizeSquad.mockResolvedValue(optimizerResponse([pinned]));
@@ -252,7 +252,7 @@ describe("SquadBuilder", () => {
   });
 });
 
-function optimizerResponse(squad: ReturnType<typeof makeCandidate>[]) {
+function optimizerResponse(squad: OptimizerCandidate[]) {
   return {
     optimizer_version: "1.1.0",
     model: "poisson_events",
@@ -294,12 +294,12 @@ function optimizerResponse(squad: ReturnType<typeof makeCandidate>[]) {
   };
 }
 
-function makeCandidate(name: string) {
+function makeCandidate(name: string): OptimizerCandidate {
   return {
     player_season_id: Math.floor(Math.random() * 1e6),
     fantasy_player_id: "f1",
     player_name: name,
-    role: "MIDFIELDER" as const,
+    role: "MIDFIELDER",
     club_id: 1,
     club_name: "Клуб",
     price: 9,
