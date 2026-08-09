@@ -3,6 +3,7 @@
 import type { PlayerModel, PlayerOrder } from "@/lib/types";
 import { RoleBadge, SourceBadge, StatusDot } from "./badges";
 import { formatPercent, formatPoints, formatPrice } from "@/lib/format";
+import { usePlayerHoverCard } from "./PlayerHoverCard";
 
 interface Column {
   key: string;
@@ -18,6 +19,9 @@ const COLUMNS: Column[] = [
   { key: "projection", label: "Прогноз", order: "projection", numeric: true },
   { key: "form", label: "Форма", numeric: true },
   { key: "season_score", label: "Очки", order: "season_score", numeric: true },
+  // Last season is the only real evidence about a player in the opening tours,
+  // when the current-season columns are still almost empty.
+  { key: "prior_points", label: "Прошлый сезон", numeric: true },
   { key: "selected_by", label: "Выбор", order: "selected_by", numeric: true },
   { key: "compare", label: "" },
 ];
@@ -39,6 +43,7 @@ export function PlayerTable({
   onToggleCompare: (player: PlayerModel) => void;
   canCompareMore: boolean;
 }) {
+  const hover = usePlayerHoverCard();
   return (
     <div className="table-wrap">
       <table className="players">
@@ -67,7 +72,7 @@ export function PlayerTable({
             const checked = compareIds.includes(p.player_season_id);
             return (
               <tr key={p.player_season_id} data-testid="player-row">
-                <td>
+                <td {...hover.bind(p)}>
                   <div className="player-name-cell">
                     <button
                       className="link-name"
@@ -103,6 +108,9 @@ export function PlayerTable({
                 </td>
                 <td className="num">{p.form ?? "—"}</td>
                 <td className="num">{p.season_score ?? "—"}</td>
+                <td className="num" data-testid="prior-points">
+                  {p.prior_season?.points ?? "—"}
+                </td>
                 <td className="num">{formatPercent(p.selected_by)}</td>
                 <td>
                   <input
@@ -118,6 +126,7 @@ export function PlayerTable({
           })}
         </tbody>
       </table>
+      {hover.overlay}
     </div>
   );
 }

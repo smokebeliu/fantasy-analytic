@@ -1,4 +1,9 @@
-import type { PlayerModel, Role, SeasonRulesModel } from "@/lib/types";
+import type {
+  PlayerModel,
+  PriorSeasonModel,
+  Role,
+  SeasonRulesModel,
+} from "@/lib/types";
 
 export const RPL_RULES: SeasonRulesModel = {
   total_budget: 100,
@@ -40,6 +45,32 @@ export function makePlayer(overrides: Partial<PlayerModel> = {}): PlayerModel {
       model_version: "1.0.0",
       expected_points: 4,
     },
+    ...overrides,
+  };
+}
+
+export function makePriorSeason(
+  overrides: Partial<PriorSeasonModel> = {},
+): PriorSeasonModel {
+  return {
+    season_id: 1,
+    season_name: "2025/2026",
+    player_season_id: 11,
+    role: "MIDFIELDER",
+    club_name: "Зенит",
+    points: 144,
+    average_points: 5.3,
+    rank: 11,
+    price: 9,
+    matches: 27,
+    minutes: 1984,
+    goals: 9,
+    assists: 10,
+    saves: 0,
+    ball_recoveries: 66,
+    yellow_cards: 5,
+    red_cards: 0,
+    goals_conceded: 11,
     ...overrides,
   };
 }

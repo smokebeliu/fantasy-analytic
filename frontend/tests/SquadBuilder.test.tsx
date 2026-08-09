@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SquadBuilder } from "@/components/SquadBuilder";
-import { RPL_RULES, makePlayer } from "./fixtures";
+import { RPL_RULES, makePlayer, makeValidSquad } from "./fixtures";
 import type { OptimizerCandidate, OptimizerResponse, TourModel } from "@/lib/types";
 
 const listPlayers = vi.fn();
@@ -70,26 +70,55 @@ describe("SquadBuilder", () => {
     expect(screen.getByText("Вратарь А")).toBeInTheDocument();
   });
 
-  it("filters the pool by position via the group buttons", async () => {
+  it("filters the pool by position without refetching", async () => {
     render(
       <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
     );
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
+    const requests = listPlayers.mock.calls.length;
 
     const filter = screen.getByTestId("role-filter");
     await userEvent.click(within(filter).getByRole("button", { name: "ЗАЩ" }));
 
-    await waitFor(() =>
-      expect(listPlayers).toHaveBeenLastCalledWith(
-        expect.objectContaining({ role: "DEFENDER" }),
-      ),
-    );
-    // "Все" resets the filter back to no role.
+    // The whole season is loaded once, so switching position is instant and the
+    // hover cards can still describe players outside the current filter.
+    await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(1));
+    expect(screen.getByText("Защитник Б")).toBeInTheDocument();
+    expect(listPlayers.mock.calls.length).toBe(requests);
+
     await userEvent.click(within(filter).getByRole("button", { name: "Все" }));
-    await waitFor(() =>
-      expect(listPlayers).toHaveBeenLastCalledWith(
-        expect.objectContaining({ role: undefined }),
-      ),
+    await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
+  });
+
+  it("loads every page of the player pool", async () => {
+    const first = Array.from({ length: 200 }, (_, i) =>
+      makePlayer({
+        player_season_id: 100 + i,
+        fantasy_player_id: `f-${i}`,
+        player_name: `Игрок ${i}`,
+        role: "MIDFIELDER",
+        club_id: 1,
+        price: 5,
+      }),
+    );
+    listPlayers.mockReset();
+    listPlayers
+      .mockResolvedValueOnce({
+        items: first,
+        pagination: { limit: 200, offset: 0, total: 202, count: 200 },
+      })
+      .mockResolvedValueOnce({
+        items: poolResponse().items,
+        pagination: { limit: 200, offset: 200, total: 202, count: 2 },
+      });
+
+    render(
+      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
+    );
+
+    await waitFor(() => expect(listPlayers).toHaveBeenCalledTimes(2));
+    expect(listPlayers).toHaveBeenLastCalledWith(
+      expect.objectContaining({ offset: 200 }),
     );
   });
 
@@ -171,7 +200,7 @@ describe("SquadBuilder", () => {
     );
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
 
-    await userEvent.click(screen.getByRole("button", { name: /Автосостав/ }));
+    await userEvent.click(screen.getByTestId("optimize-from-scratch"));
 
     const result = await screen.findByTestId("optimizer-result");
     expect(result).toHaveTextContent("4-5-1");
@@ -218,7 +247,7 @@ describe("SquadBuilder", () => {
     expect(screen.getByTestId("locked-note")).toHaveTextContent("Закреплено 1");
   });
 
-  it("omits the lock and formation keys when nothing is pinned", async () => {
+  it("omits the lock key when only a formation is chosen", async () => {
     optimizeSquad.mockResolvedValue(optimizerResponse([makeCandidate("Капитан")]));
 
     render(
@@ -226,14 +255,39 @@ describe("SquadBuilder", () => {
     );
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
 
+    await userEvent.selectOptions(screen.getByTestId("formation-select"), "4-4-2");
     await userEvent.click(screen.getByTestId("optimize-locked"));
 
     await waitFor(() =>
       expect(optimizeSquad).toHaveBeenCalledWith({
         tour: "1786",
         model: "poisson_events",
+        formation: "4-4-2",
       }),
     );
+  });
+
+  it("explains that the two build buttons differ in what they keep", async () => {
+    render(
+      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
+    );
+    await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
+
+    const help = screen.getByTestId("optimizer-help");
+    expect(help).toHaveTextContent("игнорирует всё, что вы выбрали");
+    expect(help).toHaveTextContent("сохраняет закреплённых");
+
+    // With nothing pinned and no formation the constrained run would return the
+    // same squad, so it is offered as unavailable with the reason attached.
+    const constrained = screen.getByTestId("optimize-locked");
+    expect(constrained).toBeDisabled();
+    expect(constrained).toHaveAttribute(
+      "title",
+      expect.stringContaining("совпадёт"),
+    );
+
+    await userEvent.selectOptions(screen.getByTestId("formation-select"), "4-4-2");
+    expect(screen.getByTestId("optimize-locked")).toBeEnabled();
   });
 
   it("explains the head-to-head clashes the optimizer had to pay for", async () => {
@@ -277,7 +331,7 @@ describe("SquadBuilder", () => {
     );
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
 
-    await userEvent.click(screen.getByRole("button", { name: /Автосостав/ }));
+    await userEvent.click(screen.getByTestId("optimize-from-scratch"));
 
     const clashes = await screen.findByTestId("optimizer-clashes");
     expect(clashes).toHaveTextContent("Очные встречи в составе: 1");
@@ -294,7 +348,7 @@ describe("SquadBuilder", () => {
     );
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
 
-    await userEvent.click(screen.getByRole("button", { name: /Автосостав/ }));
+    await userEvent.click(screen.getByTestId("optimize-from-scratch"));
 
     await screen.findByTestId("optimizer-result");
     expect(screen.queryByTestId("optimizer-clashes")).not.toBeInTheDocument();
@@ -310,11 +364,103 @@ describe("SquadBuilder", () => {
     );
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
 
+    const firstRow = screen.getAllByTestId("pool-row")[0];
+    await userEvent.click(within(firstRow).getByRole("button", { name: /Добавить/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Закрепить Вратарь А/ }));
     await userEvent.click(screen.getByTestId("optimize-locked"));
 
     expect(await screen.findByText(/Ошибка оптимизатора/)).toBeInTheDocument();
   });
+
+  it("asks for the tour's transfer allowance and keeps the user's squad", async () => {
+    const squad = makeValidSquad();
+    listPlayers.mockResolvedValue({
+      items: squad,
+      pagination: { limit: 200, offset: 0, total: squad.length, count: squad.length },
+    });
+    optimizeTransfers.mockResolvedValue(transfersResponse());
+
+    render(
+      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByTestId("pool-row").length).toBe(squad.length),
+    );
+
+    for (const row of screen.getAllByTestId("pool-row")) {
+      await userEvent.click(within(row).getByRole("button", { name: /Добавить/ }));
+    }
+    expect(await screen.findByTestId("valid-note")).toBeInTheDocument();
+
+    // The tour allows three transfers, which is what the button offers.
+    expect(screen.getByTestId("transfers-select")).toHaveValue("3");
+    await userEvent.click(screen.getByTestId("optimize-transfers"));
+
+    await waitFor(() =>
+      expect(optimizeTransfers).toHaveBeenCalledWith(
+        expect.objectContaining({ max_transfers: 3, tour: "1786" }),
+      ),
+    );
+
+    // The suggestion is shown next to the squad the user owns, not instead of it.
+    const plan = await screen.findByTestId("transfer-plan");
+    expect(plan).toHaveTextContent("Слабый");
+    expect(plan).toHaveTextContent("Сильный");
+    expect(screen.getAllByTestId("pitch-player").length).toBe(squad.length);
+  });
+
+  it("limits the suggestion to the number of transfers the user picks", async () => {
+    const squad = makeValidSquad();
+    listPlayers.mockResolvedValue({
+      items: squad,
+      pagination: { limit: 200, offset: 0, total: squad.length, count: squad.length },
+    });
+    optimizeTransfers.mockResolvedValue(transfersResponse());
+
+    render(
+      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByTestId("pool-row").length).toBe(squad.length),
+    );
+    for (const row of screen.getAllByTestId("pool-row")) {
+      await userEvent.click(within(row).getByRole("button", { name: /Добавить/ }));
+    }
+
+    await userEvent.selectOptions(screen.getByTestId("transfers-select"), "1");
+    await userEvent.click(screen.getByTestId("optimize-transfers"));
+
+    await waitFor(() =>
+      expect(optimizeTransfers).toHaveBeenCalledWith(
+        expect.objectContaining({ max_transfers: 1 }),
+      ),
+    );
+  });
 });
+
+function transfersResponse(): OptimizerResponse {
+  const leaving = { ...makeCandidate("Слабый"), player_season_id: 3, price: 4 };
+  const arriving = { ...makeCandidate("Сильный"), player_season_id: 900, price: 9 };
+  const response = optimizerResponse([arriving]);
+  response.mode = "transfers";
+  response.solution.transfers = {
+    allowed: 3,
+    made: 1,
+    kept: 14,
+    in: [arriving],
+    out: [leaving],
+    pairs: [
+      {
+        out: leaving,
+        in: arriving,
+        delta_expected_points: 4.2,
+        delta_price: 5,
+      },
+    ],
+    missing_from_pool: [],
+  };
+  return response;
+}
 
 function optimizerResponse(squad: OptimizerCandidate[]): OptimizerResponse {
   return {
