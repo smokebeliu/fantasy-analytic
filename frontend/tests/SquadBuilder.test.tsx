@@ -56,6 +56,48 @@ describe("SquadBuilder", () => {
     expect(screen.getByText("Вратарь А")).toBeInTheDocument();
   });
 
+  it("filters the pool by position via the group buttons", async () => {
+    render(
+      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
+    );
+    await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
+
+    const filter = screen.getByTestId("role-filter");
+    await userEvent.click(within(filter).getByRole("button", { name: "ЗАЩ" }));
+
+    await waitFor(() =>
+      expect(listPlayers).toHaveBeenLastCalledWith(
+        expect.objectContaining({ role: "DEFENDER" }),
+      ),
+    );
+    // "Все" resets the filter back to no role.
+    await userEvent.click(within(filter).getByRole("button", { name: "Все" }));
+    await waitFor(() =>
+      expect(listPlayers).toHaveBeenLastCalledWith(
+        expect.objectContaining({ role: undefined }),
+      ),
+    );
+  });
+
+  it("shows the pitch by default and switches to the list view", async () => {
+    render(
+      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
+    );
+    await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
+
+    // Pitch view is the default.
+    expect(screen.getByTestId("squad-pitch")).toBeInTheDocument();
+
+    // Add a player, then switch to the list view.
+    const firstRow = screen.getAllByTestId("pool-row")[0];
+    await userEvent.click(within(firstRow).getByRole("button", { name: /Добавить/ }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Список" }));
+    const list = screen.getByTestId("squad-list");
+    expect(list).toHaveTextContent("Вратарь А");
+    expect(screen.queryByTestId("squad-pitch")).not.toBeInTheDocument();
+  });
+
   it("keeps transfers disabled until the squad is valid and shows violations", async () => {
     render(
       <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
