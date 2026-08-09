@@ -164,17 +164,31 @@ test.describe("Squad builder", () => {
     await expect(pitch.getByTestId("pitch-player")).toHaveCount(15);
   });
 
-  test("shows a player's card on hover over the pitch", async ({ page }) => {
+  test("shows a player's card on hover over a generated squad", async ({ page }) => {
     await page.goto("/squad");
+    await expect(page.getByTestId("pool-row").first()).toBeVisible();
     await page.getByTestId("optimize-from-scratch").click();
     await expect(page.getByTestId("optimizer-result")).toBeVisible();
 
-    await page.getByTestId("squad-pitch").getByTestId("pitch-player").first().hover();
-
-    const card = page.getByTestId("player-hover-card");
-    await expect(card).toBeVisible();
-    await expect(card).toContainText("Очки за сезон");
-    await expect(card).toContainText("Прошлый сезон");
+    // At least one generated pick must carry a previous season: the solver only
+    // reports a price and a projection, so an unmatched squad would show a card
+    // with nothing but the name in it.
+    const pitchPlayers = page.getByTestId("squad-pitch").getByTestId("pitch-player");
+    const count = await pitchPlayers.count();
+    let seenPriorSeason = false;
+    for (let i = 0; i < count && !seenPriorSeason; i += 1) {
+      await pitchPlayers.nth(i).hover();
+      const card = page.getByTestId("player-hover-card");
+      await expect(card).toBeVisible();
+      await expect(card).toContainText("Очки за сезон");
+      await expect(card).toContainText("Прошлый сезон");
+      const prior = page.getByTestId("hover-card-prior");
+      if ((await prior.count()) > 0) {
+        await expect(prior).toContainText(/\d/);
+        seenPriorSeason = true;
+      }
+    }
+    expect(seenPriorSeason).toBe(true);
   });
 
   test("toggles the squad between pitch and list views", async ({ page }) => {

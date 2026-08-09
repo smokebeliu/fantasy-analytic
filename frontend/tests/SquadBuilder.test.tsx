@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SquadBuilder } from "@/components/SquadBuilder";
-import { RPL_RULES, makePlayer, makeValidSquad } from "./fixtures";
+import { RPL_RULES, makePlayer, makePriorSeason, makeValidSquad } from "./fixtures";
 import type { OptimizerCandidate, OptimizerResponse, TourModel } from "@/lib/types";
 
 const listPlayers = vi.fn();
@@ -206,6 +206,104 @@ describe("SquadBuilder", () => {
     expect(result).toHaveTextContent("4-5-1");
     expect(result).toHaveTextContent("76.3");
     expect(optimizeSquad).toHaveBeenCalledWith({ tour: "1786", model: "poisson_events" });
+  });
+
+  it("keeps the season history of a generated squad", async () => {
+    // The solver reports only a price and a projection, so a generated squad has
+    // to be matched back against the loaded players — otherwise the hover cards
+    // on the pitch come up empty for players the table describes in full.
+    const keeper = makePlayer({
+      player_season_id: 1,
+      fantasy_player_id: "f-gk",
+      player_name: "Вратарь А",
+      role: "GOALKEEPER",
+      club_id: 1,
+      price: 5,
+      season_score: 31,
+      average_score: 10.3,
+      prior_season: makePriorSeason({ points: 144, rank: 11 }),
+    });
+    listPlayers.mockResolvedValue({
+      items: [keeper],
+      pagination: { limit: 200, offset: 0, total: 1, count: 1 },
+    });
+    optimizeSquad.mockResolvedValue(
+      optimizerResponse([
+        {
+          ...makeCandidate("Вратарь А"),
+          player_season_id: 1,
+          fantasy_player_id: "f-gk",
+          role: "GOALKEEPER",
+        },
+      ]),
+    );
+
+    render(
+      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
+    );
+    await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(1));
+    await userEvent.click(screen.getByTestId("optimize-from-scratch"));
+    await screen.findByTestId("optimizer-result");
+
+    const pitchPlayer = within(screen.getByTestId("squad-pitch")).getByTestId(
+      "pitch-player",
+    );
+    await userEvent.hover(pitchPlayer);
+
+    const card = await screen.findByTestId("player-hover-card");
+    expect(card).toHaveTextContent("31");
+    expect(card).toHaveTextContent("10.3");
+    expect(await screen.findByTestId("hover-card-prior")).toHaveTextContent("144");
+  });
+
+  it("backfills the history when the pool arrives after the squad", async () => {
+    // Nothing stops the user from generating a squad while the pool is still
+    // loading; the pitch must catch up rather than stay historyless.
+    const keeper = makePlayer({
+      player_season_id: 1,
+      fantasy_player_id: "f-gk",
+      player_name: "Вратарь А",
+      role: "GOALKEEPER",
+      club_id: 1,
+      price: 5,
+      season_score: 31,
+      prior_season: makePriorSeason({ points: 144 }),
+    });
+    let releasePool: (value: unknown) => void = () => {};
+    const pending = new Promise((resolve) => {
+      releasePool = resolve;
+    });
+    listPlayers.mockImplementation(async () => {
+      await pending;
+      return {
+        items: [keeper],
+        pagination: { limit: 200, offset: 0, total: 1, count: 1 },
+      };
+    });
+    optimizeSquad.mockResolvedValue(
+      optimizerResponse([
+        {
+          ...makeCandidate("Вратарь А"),
+          player_season_id: 1,
+          fantasy_player_id: "f-gk",
+          role: "GOALKEEPER",
+        },
+      ]),
+    );
+
+    render(
+      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
+    );
+    await userEvent.click(screen.getByTestId("optimize-from-scratch"));
+    await screen.findByTestId("optimizer-result");
+
+    releasePool(undefined);
+    await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(1));
+
+    await userEvent.hover(
+      within(screen.getByTestId("squad-pitch")).getByTestId("pitch-player"),
+    );
+    expect(await screen.findByTestId("hover-card-prior")).toHaveTextContent("144");
   });
 
   it("pins a player and asks the optimizer to fill the rest under a formation", async () => {

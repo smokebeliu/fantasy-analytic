@@ -36,6 +36,11 @@ const FETCH_PAGE = 200;
 
 type SquadView = "pitch" | "list";
 
+// A solver candidate carries only what the objective needed: a price and a
+// projection, never the season history. Loading a suggested squad into the
+// builder therefore resolves each pick against the players already fetched, so
+// the pitch and its hover cards keep the same numbers as the pool. The synthetic
+// fallback only matters for a pick the pool does not contain.
 function candidateToPlayer(c: OptimizerCandidate): PlayerModel {
   return {
     player_season_id: c.player_season_id,
@@ -165,6 +170,20 @@ export function SquadBuilder({
     [pool],
   );
 
+  // The pool arrives asynchronously and reloads whenever the tour or the model
+  // changes. Re-resolving the squad against it keeps the pitch and its hover
+  // cards on the same numbers as the rest of the screen, instead of freezing
+  // whatever happened to be known when the squad was assembled — a squad
+  // generated before the pool finished loading would otherwise have no history at
+  // all.
+  useEffect(() => {
+    if (playerIndex.size === 0) return;
+    setSelected((prev) => {
+      const next = prev.map((p) => playerIndex.get(p.player_season_id) ?? p);
+      return next.some((p, i) => p !== prev[i]) ? next : prev;
+    });
+  }, [playerIndex]);
+
   const visiblePool = useMemo(() => {
     const q = search.trim().toLowerCase();
     return pool.filter(
@@ -196,11 +215,17 @@ export function SquadBuilder({
       return next;
     });
 
+  const asPlayers = (squad: OptimizerCandidate[]) =>
+    squad.map(
+      (candidate) =>
+        playerIndex.get(candidate.player_season_id) ?? candidateToPlayer(candidate),
+    );
+
   // Keep the optimizer result loaded into the builder, preserving the pins that
   // survived (locked players always do) so the user can iterate.
   const applySolution = (res: OptimizerResponse) => {
     setResult(res);
-    const players = res.solution.squad.map(candidateToPlayer);
+    const players = asPlayers(res.solution.squad);
     setSelected(players);
     const stillPresent = new Set(players.map((p) => p.player_season_id));
     setLocked((prev) => new Set([...prev].filter((id) => stillPresent.has(id))));
@@ -218,7 +243,7 @@ export function SquadBuilder({
       });
       setResult(res);
       // Load the optimal roster into the builder so the summary stays in sync.
-      setSelected(res.solution.squad.map(candidateToPlayer));
+      setSelected(asPlayers(res.solution.squad));
       setLocked(new Set());
     } catch (err) {
       setOptimizerError(err instanceof ApiError ? err.message : "Ошибка оптимизатора");
