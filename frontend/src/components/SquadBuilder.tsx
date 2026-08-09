@@ -22,9 +22,12 @@ import {
 import { formatPoints, formatPrice } from "@/lib/format";
 import { RoleBadge } from "./badges";
 import { OptimizerPitch } from "./OptimizerPitch";
+import { SquadPitch } from "./SquadPitch";
 import { EmptyState, ErrorState, TableSkeleton } from "./StateBlocks";
 
 const MODELS: ForecastModel[] = ["poisson_events", "season_mean", "recent_form"];
+
+type SquadView = "pitch" | "list";
 
 function candidateToPlayer(c: OptimizerCandidate): PlayerModel {
   return {
@@ -54,6 +57,7 @@ export function SquadBuilder({
   const [model, setModel] = useState<ForecastModel>("poisson_events");
   const [roleFilter, setRoleFilter] = useState<Role | "">("");
   const [search, setSearch] = useState("");
+  const [view, setView] = useState<SquadView>("pitch");
 
   const [pool, setPool] = useState<PlayerModel[]>([]);
   const [poolLoading, setPoolLoading] = useState(true);
@@ -212,135 +216,102 @@ export function SquadBuilder({
       </div>
 
       <div className="squad-layout">
-        <div>
-          <div className="panel toolbar" style={{ marginBottom: 12 }}>
-            <div className="field">
-              <label htmlFor="sq-role">Позиция</label>
-              <select
-                id="sq-role"
-                value={roleFilter}
-                onChange={(e) => setRoleFilter(e.target.value as Role | "")}
-              >
-                <option value="">Все</option>
-                {ROLES.map((r) => (
-                  <option key={r} value={r}>
-                    {ROLE_LABELS[r]}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="field" style={{ flex: 1 }}>
-              <label htmlFor="sq-search">Поиск</label>
-              <input
-                id="sq-search"
-                type="text"
-                placeholder="Имя игрока…"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="panel">
-            {poolLoading && <TableSkeleton rows={6} />}
-            {!poolLoading && poolError && (
-              <ErrorState message={poolError} onRetry={() => setReloadKey((k) => k + 1)} />
-            )}
-            {!poolLoading && !poolError && visiblePool.length === 0 && (
-              <EmptyState title="Игроки не найдены" hint="Измените фильтр или поиск." />
-            )}
-            {!poolLoading && !poolError && visiblePool.length > 0 && (
-              <div className="table-wrap">
-                <table className="players">
-                  <thead>
-                    <tr>
-                      <th>Игрок</th>
-                      <th>Поз</th>
-                      <th className="num">Цена</th>
-                      <th className="num">Прогноз</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visiblePool.slice(0, 80).map((p) => {
-                      const check = canAddPlayer(p, selected, limits);
-                      return (
-                        <tr key={p.player_season_id} data-testid="pool-row">
-                          <td>
-                            <div className="player-name-cell">
-                              <strong>{p.player_name ?? `#${p.player_season_id}`}</strong>
-                              <span className="club">{p.club_name ?? "—"}</span>
-                            </div>
-                          </td>
-                          <td>
-                            <RoleBadge role={p.role} />
-                          </td>
-                          <td className="num">{formatPrice(p.price)}</td>
-                          <td className="num">
-                            <span className="proj-value">
-                              {formatPoints(p.projection?.expected_points, 1)}
-                            </span>
-                          </td>
-                          <td>
-                            <button
-                              className="add-btn"
-                              onClick={() => addPlayer(p)}
-                              disabled={!check.allowed}
-                              title={check.reason ?? "Добавить"}
-                              aria-label={`Добавить ${p.player_name ?? ""}`}
-                            >
-                              +
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="squad-summary">
+        {/* Left column: the current squad as an editable pitch / list. */}
+        <div className="squad-current">
           <div className="panel panel--pad">
-            <div className="summary-metrics">
-              <div className="metric">
-                <div className="k">Игроков</div>
-                <div
-                  className={`v ${
-                    selected.length === limits.totalPlayers ? "" : "over"
-                  }`}
-                >
-                  {selected.length}/{limits.totalPlayers}
+            <div className="squad-head">
+              <div className="summary-metrics">
+                <div className="metric">
+                  <div className="k">Игроков</div>
+                  <div
+                    className={`v ${
+                      selected.length === limits.totalPlayers ? "" : "over"
+                    }`}
+                  >
+                    {selected.length}/{limits.totalPlayers}
+                  </div>
+                </div>
+                <div className="metric">
+                  <div className="k">Бюджет</div>
+                  <div className={`v ${validation.overBudget ? "over" : ""}`}>
+                    {formatPrice(validation.totalPrice)}/{formatPrice(limits.totalBudget)}
+                  </div>
                 </div>
               </div>
-              <div className="metric">
-                <div className="k">Бюджет</div>
-                <div className={`v ${validation.overBudget ? "over" : ""}`}>
-                  {formatPrice(validation.totalPrice)}/{formatPrice(limits.totalBudget)}
-                </div>
+
+              <div
+                className="role-group view-toggle"
+                role="group"
+                aria-label="Вид состава"
+              >
+                <button
+                  className={view === "pitch" ? "active" : ""}
+                  aria-pressed={view === "pitch"}
+                  onClick={() => setView("pitch")}
+                >
+                  Схема
+                </button>
+                <button
+                  className={view === "list" ? "active" : ""}
+                  aria-pressed={view === "list"}
+                  onClick={() => setView("list")}
+                >
+                  Список
+                </button>
               </div>
             </div>
 
-            {ROLES.map((role) => {
-              const { min, max } = limits.roleLimits[role];
-              const count = validation.roleCounts[role];
-              const bad = count > max;
-              return (
-                <div
-                  key={role}
-                  className={`role-counter ${bad ? "bad" : "ok"}`}
-                >
-                  <span>
-                    {ROLE_SHORT[role]} · {ROLE_LABELS[role]}
-                  </span>
-                  <span>
-                    {count} <span className="inline-note">({min}–{max})</span>
-                  </span>
-                </div>
-              );
-            })}
+            {view === "pitch" ? (
+              <SquadPitch
+                selected={selected}
+                limits={limits}
+                onRemove={removePlayer}
+                onEmptySlot={(role) => setRoleFilter(role)}
+              />
+            ) : selected.length > 0 ? (
+              <div className="selected-list selected-list--full" data-testid="squad-list">
+                {selected.map((p) => (
+                  <div className="selected-item" key={p.player_season_id}>
+                    <RoleBadge role={p.role} />
+                    <span className="grow">
+                      {p.player_name ?? `#${p.player_season_id}`}
+                    </span>
+                    <span className="inline-note">{formatPrice(p.price)}</span>
+                    <button
+                      className="icon-btn"
+                      style={{ width: 24, height: 24, fontSize: 14 }}
+                      onClick={() => removePlayer(p.player_season_id)}
+                      aria-label="Убрать игрока"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState
+                title="Состав пуст"
+                hint="Добавьте игроков из списка справа или соберите автосостав."
+              />
+            )}
+
+            <div className="role-counters">
+              {ROLES.map((role) => {
+                const { min, max } = limits.roleLimits[role];
+                const count = validation.roleCounts[role];
+                const bad = count > max;
+                return (
+                  <div key={role} className={`role-counter ${bad ? "bad" : "ok"}`}>
+                    <span>
+                      {ROLE_SHORT[role]} · {ROLE_LABELS[role]}
+                    </span>
+                    <span>
+                      {count} <span className="inline-note">({min}–{max})</span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
 
             {validation.violations.length > 0 ? (
               <ul className="violations" data-testid="violations">
@@ -352,11 +323,7 @@ export function SquadBuilder({
               <div className="valid-note" data-testid="valid-note">
                 Состав корректен — можно оптимизировать трансферы.
               </div>
-            ) : (
-              <p className="inline-note" style={{ marginTop: 12 }}>
-                Добавьте игроков из списка слева или соберите автосостав.
-              </p>
-            )}
+            ) : null}
 
             <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
               <button
@@ -376,26 +343,86 @@ export function SquadBuilder({
                 </button>
               )}
             </div>
+          </div>
+        </div>
 
-            {selected.length > 0 && (
-              <div className="selected-list">
-                {selected.map((p) => (
-                  <div className="selected-item" key={p.player_season_id}>
-                    <RoleBadge role={p.role} />
-                    <span className="grow">
-                      {p.player_name ?? `#${p.player_season_id}`}
-                    </span>
-                    <span className="inline-note">{formatPrice(p.price)}</span>
-                    <button
-                      className="icon-btn"
-                      style={{ width: 24, height: 24, fontSize: 14 }}
-                      onClick={() => removePlayer(p.player_season_id)}
-                      aria-label="Убрать игрока"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
+        {/* Right column: search + full list of all players. */}
+        <div className="squad-pool">
+          <div className="panel panel--pad squad-pool__filters">
+            <div
+              className="role-group"
+              role="group"
+              aria-label="Фильтр по позиции"
+              data-testid="role-filter"
+            >
+              <button
+                className={roleFilter === "" ? "active" : ""}
+                aria-pressed={roleFilter === ""}
+                onClick={() => setRoleFilter("")}
+              >
+                Все
+              </button>
+              {ROLES.map((r) => (
+                <button
+                  key={r}
+                  className={roleFilter === r ? "active" : ""}
+                  aria-pressed={roleFilter === r}
+                  title={ROLE_LABELS[r]}
+                  onClick={() => setRoleFilter(r)}
+                >
+                  {ROLE_SHORT[r]}
+                </button>
+              ))}
+            </div>
+            <div className="field squad-pool__search">
+              <label htmlFor="sq-search">Поиск</label>
+              <input
+                id="sq-search"
+                type="text"
+                placeholder="Имя игрока…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="panel panel--pad">
+            {poolLoading && <TableSkeleton rows={6} />}
+            {!poolLoading && poolError && (
+              <ErrorState message={poolError} onRetry={() => setReloadKey((k) => k + 1)} />
+            )}
+            {!poolLoading && !poolError && visiblePool.length === 0 && (
+              <EmptyState title="Игроки не найдены" hint="Измените фильтр или поиск." />
+            )}
+            {!poolLoading && !poolError && visiblePool.length > 0 && (
+              <div className="pool-list">
+                {visiblePool.slice(0, 80).map((p) => {
+                  const check = canAddPlayer(p, selected, limits);
+                  return (
+                    <div key={p.player_season_id} className="pool-item" data-testid="pool-row">
+                      <RoleBadge role={p.role} />
+                      <div className="pool-item__main">
+                        <span className="pool-item__name">
+                          {p.player_name ?? `#${p.player_season_id}`}
+                        </span>
+                        <span className="pool-item__club">{p.club_name ?? "—"}</span>
+                      </div>
+                      <span className="pool-item__price">{formatPrice(p.price)}</span>
+                      <span className="pool-item__proj">
+                        {formatPoints(p.projection?.expected_points, 1)}
+                      </span>
+                      <button
+                        className="add-btn"
+                        onClick={() => addPlayer(p)}
+                        disabled={!check.allowed}
+                        title={check.reason ?? "Добавить"}
+                        aria-label={`Добавить ${p.player_name ?? ""}`}
+                      >
+                        +
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
