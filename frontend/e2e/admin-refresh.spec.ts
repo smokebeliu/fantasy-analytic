@@ -68,8 +68,12 @@ function statusPayload(
 }
 
 /**
- * Serve a scripted sequence of statuses to the panel's polling requests and
- * count how many it made, so a test can assert that polling stopped.
+ * Serve a scripted sequence of statuses to the panel's status requests and count
+ * how many it made, so a test can assert that polling stopped.
+ *
+ * The panel revalidates once on mount, before anything is clicked, so the
+ * sequence is prefixed with an idle status; the scripted entries then answer the
+ * polls that follow the refresh. The last entry is repeated indefinitely.
  */
 async function mockJobFlow(
   page: Page,
@@ -85,6 +89,7 @@ async function mockJobFlow(
     refreshBody?: unknown;
   },
 ): Promise<{ statusCalls: () => number }> {
+  const script = [statusPayload({}), ...sequence];
   let index = 0;
   let calls = 0;
 
@@ -99,7 +104,7 @@ async function mockJobFlow(
       return;
     }
     calls += 1;
-    const payload = sequence[Math.min(index, sequence.length - 1)];
+    const payload = script[Math.min(index, script.length - 1)];
     index += 1;
     await route.fulfill({
       status: 200,
@@ -149,6 +154,9 @@ test.describe("Manual refresh screen", () => {
     const flow = await mockJobFlow(page, {
       queued: job({ status: "pending" }),
       sequence: [
+        // Three polls report the same running job, so the stage is observable
+        // before the job reaches its terminal status.
+        statusPayload({ is_refreshing: true, active_job: running }),
         statusPayload({ is_refreshing: true, active_job: running }),
         statusPayload({ is_refreshing: true, active_job: running }),
         statusPayload({

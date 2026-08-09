@@ -60,6 +60,7 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^Selected season\b", re.I), "fetch_season"),
     (re.compile(r"^Fetched player page\b", re.I), "fetch_players"),
     (re.compile(r"^Fetching match history\b", re.I), "fetch_history"),
+    (re.compile(r"^Fetched history \d+/\d+", re.I), "fetch_history"),
     (re.compile(r"^Fetch stage finished\b", re.I), "persist"),
     (re.compile(r"^Saved \d+ raw responses\b", re.I), "persist"),
     (re.compile(r"^Upserted\b", re.I), "persist"),

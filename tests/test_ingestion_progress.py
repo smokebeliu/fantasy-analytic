@@ -28,6 +28,7 @@ PIPELINE_MESSAGES = (
     ("Selected season 59", "fetch_season"),
     ("Fetched player page 1 (100 players)", "fetch_players"),
     ("Fetching match history for 423 players with 8 workers", "fetch_history"),
+    ("Fetched history 400/423", "fetch_history"),
     ("Fetch stage finished in 31.4s", "persist"),
     ("Saved 432 raw responses", "persist"),
     ("Upserted 16 clubs", "persist"),
