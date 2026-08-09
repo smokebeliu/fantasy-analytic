@@ -13,6 +13,9 @@ The worker:
   ``ingestion_jobs`` partial unique index);
 * marks the job ``running``, executes the full import and then the quality gate,
   which publishes the snapshot only when no blocking issue is found;
+* mirrors the pipeline's progress messages onto the job row as a coarse stage
+  (see :mod:`fantasy_analytics.ingestion_progress`) so the admin refresh UI
+  (step 17) can show *what* is happening while it polls;
 * records a combined result (import counts, quality verdict and the resulting
   data-freshness timestamp) or a **safe** error message, and always releases the
   lock.
@@ -43,6 +46,11 @@ from .db import (
 )
 from .db.models import IngestionRun
 from .ingestion import IngestionOptions, ProgressCallback, run_ingestion
+from .ingestion_progress import (
+    STAGE_FINISHED,
+    ProgressTracker,
+    percent_for,
+)
 from .quality import run_quality_checks
 
 # Redact any embedded connection credentials before persisting an error so the
@@ -62,6 +70,32 @@ def safe_error_message(error: BaseException) -> str:
     if len(message) > _MAX_ERROR_LENGTH:
         message = message[: _MAX_ERROR_LENGTH - 1] + "…"
     return message
+
+
+def _store_progress(
+    session_factory: sessionmaker,
+    job_id: int,
+    *,
+    stage: str,
+    percent: int,
+    message: str | None = None,
+) -> None:
+    """Write one progress update, tolerating a failure.
+
+    Progress is advisory: it exists so the admin UI can render a stage while the
+    import runs. A failed update must never abort the import, which reports its
+    own errors through the job status.
+    """
+    try:
+        with session_scope(session_factory) as session:
+            repo = IngestionJobRepository(session)
+            job = repo.get(job_id)
+            if job is not None:
+                repo.record_progress(
+                    job, stage=stage, percent=percent, message=message
+                )
+    except Exception:  # noqa: BLE001 - a lost progress note is not an error
+        return
 
 
 def _build_options(job: Any) -> IngestionOptions:
@@ -131,6 +165,29 @@ def execute_job(
         tournament_slug = job.tournament_slug
         options = _build_options(job)
 
+    # Every progress message is forwarded to the caller and mirrored onto the
+    # job row as a coarse, monotonic stage the admin UI can poll.
+    tracker = ProgressTracker()
+
+    def report(message: str) -> None:
+        on_progress(message)
+        stage, percent, note = tracker.observe(message)
+        _store_progress(
+            session_factory, job_id, stage=stage, percent=percent, message=note
+        )
+
+    def enter_stage(stage: str, message: str) -> None:
+        on_progress(message)
+        resolved, percent = tracker.advance_to(stage)
+        tracker.message = message
+        _store_progress(
+            session_factory,
+            job_id,
+            stage=resolved,
+            percent=percent,
+            message=message,
+        )
+
     lock_key = advisory_lock_key(tournament_slug)
     lock_connection = engine.connect().execution_options(
         isolation_level="AUTOCOMMIT"
@@ -153,16 +210,17 @@ def execute_job(
             with session_scope(session_factory) as session:
                 repo = IngestionJobRepository(session)
                 repo.mark_running(repo.get(job_id))
-            on_progress(f"Job {job_id} started")
+            report(f"Job {job_id} started")
 
             ingestion_report = run_ingestion_fn(
-                client, session_factory, options, on_progress
+                client, session_factory, options, report
             )
             run_id = ingestion_report["run_id"]
             with session_scope(session_factory) as session:
                 repo = IngestionJobRepository(session)
                 repo.link_run(repo.get(job_id), run_id)
 
+            enter_stage("quality_gate", f"Running quality checks for run {run_id}")
             quality_report = run_quality_fn(session_factory, run_id=run_id)
             result = _build_result(
                 session_factory,
@@ -172,14 +230,24 @@ def execute_job(
             with session_scope(session_factory) as session:
                 repo = IngestionJobRepository(session)
                 repo.mark_succeeded(repo.get(job_id), result)
-            on_progress(
+            enter_stage(
+                STAGE_FINISHED,
                 f"Job {job_id} succeeded "
-                f"(snapshot_active={result['snapshot_active']})"
+                f"(snapshot_active={result['snapshot_active']})",
             )
             return "succeeded"
         except Exception as error:  # noqa: BLE001 - record and report cleanly
             message = safe_error_message(error)
             on_progress(f"Job {job_id} failed: {message}")
+            # Keep the stage the job died in; only the message changes, so the
+            # UI can tell the user *where* the refresh broke.
+            _store_progress(
+                session_factory,
+                job_id,
+                stage=tracker.stage,
+                percent=percent_for(tracker.stage),
+                message=message,
+            )
             with session_scope(session_factory) as session:
                 repo = IngestionJobRepository(session)
                 repo.mark_failed(repo.get(job_id), message)

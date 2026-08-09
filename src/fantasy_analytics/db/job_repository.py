@@ -6,8 +6,11 @@ The repository owns three concerns, all inside the caller's transaction:
 * enqueuing a job while guaranteeing at most one *active* job per tournament
   (the ``ingestion_jobs_active_tournament_idx`` partial unique index);
 * transitioning its lifecycle (``pending`` → ``running`` → ``succeeded``/
-  ``failed``) and linking it to the :class:`IngestionRun` it produced;
-* reading a job back for the status endpoint.
+  ``failed``), recording its coarse progress and linking it to the
+  :class:`IngestionRun` it produced;
+* reading a job back for the status endpoint (by id, or the latest / latest
+  successful one for a tournament, which is what the admin UI needs after a page
+  reload).
 
 The repository never commits on its own; the caller owns the transaction
 boundary (typically :func:`fantasy_analytics.db.session_scope`).
@@ -101,6 +104,49 @@ class IngestionJobRepository:
 
     def get(self, job_id: int) -> IngestionJob | None:
         return self._session.get(IngestionJob, job_id)
+
+    def latest_job(self, tournament_slug: str) -> IngestionJob | None:
+        """Return the most recently created job for a tournament, if any."""
+        return self._session.execute(
+            select(IngestionJob)
+            .where(IngestionJob.tournament_slug == tournament_slug)
+            .order_by(IngestionJob.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+    def latest_successful_job(self, tournament_slug: str) -> IngestionJob | None:
+        """Return the most recent job that finished successfully, if any."""
+        return self._session.execute(
+            select(IngestionJob)
+            .where(
+                IngestionJob.tournament_slug == tournament_slug,
+                IngestionJob.status == "succeeded",
+            )
+            .order_by(IngestionJob.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+    def record_progress(
+        self,
+        job: IngestionJob,
+        *,
+        stage: str,
+        percent: int,
+        message: str | None = None,
+    ) -> IngestionJob:
+        """Store the job's coarse progress for the admin UI to poll.
+
+        The stage vocabulary and the monotonicity of the sequence are owned by
+        :mod:`fantasy_analytics.ingestion_progress`; the repository only writes
+        what it is given.
+        """
+        job.progress_stage = stage
+        job.progress_percent = percent
+        if message is not None:
+            job.progress_message = message
+        job.progress_updated_at = datetime.now(UTC)
+        self._session.flush()
+        return job
 
     def _set_status(
         self,

@@ -2,10 +2,13 @@
 
 The application serves two concerns behind one app:
 
-* **Admin ingestion (step 5).** ``POST /admin/ingestion/rpl/refresh`` enqueues a
-  refresh job and returns immediately; the import runs in a separate worker
-  process (:mod:`fantasy_analytics.ingestion_worker`). ``GET
-  /admin/ingestion/runs/{job_id}`` reports a job's status.
+* **Admin ingestion (steps 5 and 17).** ``POST /admin/ingestion/rpl/refresh``
+  enqueues a refresh job and returns immediately; the import runs in a separate
+  worker process (:mod:`fantasy_analytics.ingestion_worker`). ``GET
+  /admin/ingestion/runs/{job_id}`` reports a job's status, and ``GET
+  /admin/ingestion/rpl/status`` answers "is a refresh running, and what does the
+  published snapshot look like" *without* a job id, so the admin screen recovers
+  its state after a page reload.
 * **User read API (step 9).** Read endpoints for seasons, tours, matches and
   players (with filters, projections and explaining components) plus the
   ``POST /optimizer/squad`` and ``POST /optimizer/transfers`` endpoints. Every
@@ -37,6 +40,8 @@ from .api_schemas import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
     ForecastModel,
+    IngestionJobModel,
+    IngestionStatusResponse,
     MatchListResponse,
     MatchModel,
     OptimizerResponse,
@@ -58,7 +63,9 @@ from .db import (
     create_session_factory,
     session_scope,
 )
+from .db.job_repository import ACTIVE_STATUSES
 from .db.models import IngestionJob
+from .ingestion_progress import STAGES
 from .optimizer import OptimizerError, build_squad_optimization
 from .read_repository import ReadRepository
 
@@ -104,6 +111,47 @@ def _iso(value: Any) -> str | None:
     return value.isoformat() if value is not None else None
 
 
+def _job_progress(job: IngestionJob) -> dict[str, Any] | None:
+    """Expose the job's coarse progress; ``None`` before the worker reports."""
+    if job.progress_stage is None:
+        return None
+    return {
+        "stage": job.progress_stage,
+        "percent": int(job.progress_percent or 0),
+        "message": job.progress_message,
+        "updated_at": _iso(job.progress_updated_at),
+    }
+
+
+def _job_summary(job: IngestionJob) -> dict[str, Any]:
+    """A polling-friendly job view: everything but the verbose reports.
+
+    A finished job's ``result`` embeds the whole import and quality report, which
+    is far too large to re-send on every poll. The status endpoint therefore
+    keeps only the headline numbers; the full report stays available on
+    ``GET /admin/ingestion/runs/{job_id}``.
+    """
+    payload = _job_to_dict(job)
+    result = payload.pop("result") or {}
+    ingestion = result.get("ingestion") or {}
+    quality = result.get("quality") or {}
+    payload["result"] = (
+        {
+            "snapshot_active": result.get("snapshot_active"),
+            "data_freshness": result.get("data_freshness"),
+            "completed_at": result.get("completed_at"),
+            "counts": ingestion.get("counts"),
+            "quality": {
+                "passed": quality.get("passed"),
+                "counts": quality.get("counts"),
+            },
+        }
+        if result
+        else None
+    )
+    return payload
+
+
 def _job_to_dict(job: IngestionJob) -> dict[str, Any]:
     result = job.result or None
     return {
@@ -120,6 +168,7 @@ def _job_to_dict(job: IngestionJob) -> dict[str, Any]:
         "started_at": _iso(job.started_at),
         "finished_at": _iso(job.finished_at),
         "data_freshness": (result or {}).get("data_freshness"),
+        "progress": _job_progress(job),
         "result": result,
     }
 
@@ -520,13 +569,75 @@ def create_app(
         app.state.spawn_worker(payload["id"])
         return JSONResponse(status_code=202, content=jsonable_encoder(payload))
 
-    @app.get("/admin/ingestion/runs/{job_id}", tags=["admin"])
+    @app.get(
+        "/admin/ingestion/runs/{job_id}",
+        response_model=IngestionJobModel,
+        tags=["admin"],
+    )
     def get_run(job_id: int) -> dict[str, Any]:
         with session_scope(app.state.session_factory) as session:
             job = IngestionJobRepository(session).get(job_id)
             if job is None:
                 raise api_error(404, f"Ingestion job {job_id} not found")
             return _job_to_dict(job)
+
+    @app.get(
+        "/admin/ingestion/rpl/status",
+        response_model=IngestionStatusResponse,
+        tags=["admin"],
+    )
+    def ingestion_status() -> dict[str, Any]:
+        """Report refresh state plus the snapshot and tour the UI should show.
+
+        The admin screen calls this on load (and while polling), so it never has
+        to remember a job id: an in-flight refresh is discovered from the
+        database, which is also what makes a second browser tab consistent.
+        """
+        with session_scope(app.state.session_factory) as session:
+            jobs = IngestionJobRepository(session)
+            active = jobs.active_job(RPL_TOURNAMENT_SLUG)
+            latest = jobs.latest_job(RPL_TOURNAMENT_SLUG)
+            successful = jobs.latest_successful_job(RPL_TOURNAMENT_SLUG)
+            payload = {
+                "tournament_slug": RPL_TOURNAMENT_SLUG,
+                "is_refreshing": active is not None
+                and active.status in ACTIVE_STATUSES,
+                "active_job": _job_summary(active) if active else None,
+                "latest_job": _job_summary(latest) if latest else None,
+                "latest_successful_job": (
+                    _job_summary(successful) if successful else None
+                ),
+                "stages": [
+                    {"stage": stage, "percent": percent} for stage, percent in STAGES
+                ],
+            }
+
+            # Show the season the read API serves: the most recent one with a
+            # published snapshot, falling back to the most recent import.
+            repo = ReadRepository(session)
+            seasons = repo.list_seasons()
+            season = next(
+                (item for item in seasons if item.get("snapshot")),
+                seasons[0] if seasons else None,
+            )
+            payload["season"] = season
+            payload["snapshot"] = season.get("snapshot") if season else None
+
+            target_tour = None
+            if season is not None:
+                _, tours = repo.list_tours(
+                    season_id=season["season_id"], limit=MAX_PAGE_LIMIT, offset=0
+                )
+                target_tour = next(
+                    (
+                        tour
+                        for tour in tours
+                        if (tour.get("status") or "").upper() != "FINISHED"
+                    ),
+                    tours[-1] if tours else None,
+                )
+            payload["target_tour"] = target_tour
+        return payload
 
     return app
 

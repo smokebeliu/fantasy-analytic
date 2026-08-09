@@ -328,6 +328,69 @@ class OptimizerResponse(BaseModel):
     valid: bool
 
 
+# ---------------------------------------------------------------------------
+# Admin ingestion (steps 5 and 17).
+# ---------------------------------------------------------------------------
+class IngestionProgressModel(BaseModel):
+    """Coarse progress of a running refresh (see ingestion_progress.STAGES)."""
+
+    stage: str = Field(description="Machine-readable stage key")
+    percent: int = Field(ge=0, le=100, description="Rough completion percentage")
+    message: str | None = Field(
+        default=None, description="Latest progress note from the pipeline"
+    )
+    updated_at: str | None = None
+
+
+class IngestionJobModel(BaseModel):
+    """A manual refresh job as the admin UI sees it."""
+
+    id: int
+    status: Literal["pending", "running", "succeeded", "failed"]
+    tournament_slug: str
+    trigger_type: str | None = None
+    requested_season_id: str | None = None
+    requested_season_name: str | None = None
+    use_current_season: bool | None = None
+    ingestion_run_id: int | None = None
+    error_message: str | None = None
+    created_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    data_freshness: str | None = Field(
+        default=None, description="Snapshot time published by a successful job"
+    )
+    progress: IngestionProgressModel | None = None
+    result: dict[str, Any] | None = None
+
+
+class IngestionStatusResponse(BaseModel):
+    """Everything the admin refresh screen needs in a single request.
+
+    It is deliberately answerable without knowing a job id, so a page reload
+    (or a second browser tab) recovers the state of an in-flight refresh.
+    """
+
+    tournament_slug: str
+    is_refreshing: bool = Field(
+        description="True while a pending/running job exists for the tournament"
+    )
+    active_job: IngestionJobModel | None = None
+    latest_job: IngestionJobModel | None = None
+    latest_successful_job: IngestionJobModel | None = None
+    snapshot: SnapshotMeta | None = Field(
+        default=None, description="Active snapshot of the season shown in the UI"
+    )
+    season: SeasonModel | None = None
+    target_tour: TourModel | None = Field(
+        default=None, description="Next non-finished tour, else the last one"
+    )
+    stages: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Ordered stage vocabulary with completion percentages",
+    )
+
+
 __all__ = [
     "DEFAULT_PAGE_LIMIT",
     "FORMATION_PATTERN",
@@ -351,4 +414,7 @@ __all__ = [
     "TransfersRequest",
     "SquadPlayerModel",
     "OptimizerResponse",
+    "IngestionJobModel",
+    "IngestionProgressModel",
+    "IngestionStatusResponse",
 ]
