@@ -13,7 +13,9 @@ Design guarantees
   the target ``fantasy_tours`` row. Nothing is hard-coded (the values
   demonstrably vary by season and tour).
 * **Two modes.** ``squad`` builds a fresh roster from scratch; ``transfers``
-  keeps an existing roster and changes at most ``total_transfers`` players.
+  keeps an existing roster and changes at most ``total_transfers`` players. The
+  transfers report names both sides of every swap and pairs them, so the answer
+  is "sell this player, buy that one" rather than two unrelated lists.
 * **User-pinned players and formations.** ``locked_ids`` forces players into the
   roster and ``locked_starter_ids`` forces them into the starting eleven, while
   ``formation`` (``"4-4-2"``) fixes the starting role counts. Everything else is
@@ -53,7 +55,19 @@ from .forecast import MODEL_EVENT, ForecastError, build_forecast_dataset
 
 # Bumped whenever the optimizer model or its constraints change so squads built
 # by different code revisions never get silently compared.
-OPTIMIZER_VERSION = "1.2.0"
+OPTIMIZER_VERSION = "1.3.0"
+
+# Search configuration. Eight workers is not about wall-clock parallelism (the
+# box may well have fewer cores): the worker count selects CP-SAT's strategy
+# portfolio, and the extra strategies are what crack the transfers model. With a
+# single worker, keeping twelve near-worthless players from a real user squad is
+# an instance the solver can find the optimum of but not *prove*, so it searches
+# without end. The budget below is expressed in deterministic time — a
+# machine-independent measure of work — so the same request keeps returning the
+# same squad on any hardware, and a hard instance degrades into "best found so
+# far" (status ``FEASIBLE``) instead of hanging the request.
+_SEARCH_WORKERS = 8
+DEFAULT_SOLVE_LIMIT = 8.0
 
 # How hard a head-to-head clash between two starters is priced (step 16). The
 # penalty is ``weight * cancellation`` where the cancellation is the covariance
@@ -371,6 +385,78 @@ def _candidate_public(candidate: Candidate) -> dict[str, Any]:
     }
 
 
+def _unknown_player_public(player_season_id: int) -> dict[str, Any]:
+    """Stand-in entry for a squad member that has no candidate row.
+
+    A player the user owns can drop out of the pool — he left the league, is
+    injured out of the tour or his club has no fixture — and the solver is then
+    forced to sell him. He still has to appear in the transfer list, so he is
+    reported with his id and nothing else rather than being silently dropped.
+    """
+    return {
+        "player_season_id": player_season_id,
+        "fantasy_player_id": None,
+        "player_name": None,
+        "role": None,
+        "club_id": None,
+        "club_name": None,
+        "price": None,
+        "expected_points": None,
+        "unavailable": True,
+    }
+
+
+def _pair_transfers(
+    out_players: Sequence[dict[str, Any]], in_players: Sequence[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Say which incoming player replaces which outgoing one.
+
+    Knowing *who* leaves and *who* arrives is not enough to act on a transfer
+    plan; a manager needs the swap itself. Role limits on the full roster are
+    normally exact, so a transfer trades like for like and the pairing inside a
+    role is the only sensible reading. Within a role the two sides are matched
+    by price rank, which keeps each pair roughly budget-neutral: the expensive
+    player being sold funds the expensive player being bought. Leftovers, which
+    only occur when the role limits are ranges, are paired across roles by the
+    same price rank so no transfer is left unexplained.
+    """
+    def _price(entry: dict[str, Any]) -> float:
+        return entry.get("price") or 0.0
+
+    def _points(entry: dict[str, Any]) -> float:
+        return entry.get("expected_points") or 0.0
+
+    by_price = sorted(out_players, key=_price, reverse=True)
+    incoming_by_price = sorted(in_players, key=_price, reverse=True)
+
+    matched: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    paired_out: set[int] = set()
+    paired_in: set[int] = set()
+    for role in ROLES:
+        outs = [e for e in by_price if e.get("role") == role]
+        ins = [e for e in incoming_by_price if e.get("role") == role]
+        for leaving, arriving in zip(outs, ins):
+            matched.append((leaving, arriving))
+            paired_out.add(leaving["player_season_id"])
+            paired_in.add(arriving["player_season_id"])
+
+    leftover_out = [e for e in by_price if e["player_season_id"] not in paired_out]
+    leftover_in = [
+        e for e in incoming_by_price if e["player_season_id"] not in paired_in
+    ]
+    matched.extend(zip(leftover_out, leftover_in))
+
+    return [
+        {
+            "out": leaving,
+            "in": arriving,
+            "delta_expected_points": round(_points(arriving) - _points(leaving), 4),
+            "delta_price": round(_price(arriving) - _price(leaving), 2),
+        }
+        for leaving, arriving in matched
+    ]
+
+
 def _formation(starters: Sequence[Candidate]) -> str:
     counts = {role: 0 for role in ROLES}
     for candidate in starters:
@@ -570,12 +656,16 @@ def solve_squad(
     locked_starter_ids: Sequence[int] | None = None,
     formation: str | None = None,
     fixture_conflict_weight: float | None = None,
+    solve_limit: float | None = None,
 ) -> dict[str, Any]:
     """Solve the squad-selection integer program and return an explanation.
 
     With ``current_ids`` the solver runs in *limited-transfers* mode: at most
     ``max_transfers`` (defaulting to the tour's ``total_transfers``) of the
-    current players may be replaced. Otherwise it builds a fresh squad.
+    current players may be replaced. Otherwise it builds a fresh squad. In that
+    mode ``solution["transfers"]`` describes both sides of every swap — ``out``
+    and ``in`` carry full player entries and ``pairs`` matches them up with the
+    points and price each swap costs or gains.
 
     ``locked_ids`` pins players into the roster and ``locked_starter_ids`` pins
     them into the starting eleven (which also pins them into the roster);
@@ -585,6 +675,10 @@ def solve_squad(
     ``fixture_conflict_weight`` prices starters that meet each other in the tour
     (defaulting to :data:`DEFAULT_FIXTURE_CONFLICT_WEIGHT`); ``0`` restores the
     fixture-blind objective while still reporting the clashes.
+
+    ``solve_limit`` caps the search in deterministic time (default
+    :data:`DEFAULT_SOLVE_LIMIT`). Exhausting it yields the best squad found so
+    far, reported as ``proven_optimal: false``, rather than no answer at all.
 
     Raises :class:`OptimizerError` when the pool is too small or the constraints
     cannot be satisfied.
@@ -716,8 +810,11 @@ def solve_squad(
     model.Maximize(points_term * _TIE_BREAK_HEADROOM - spend_term)
 
     solver = cp_model.CpSolver()
-    solver.parameters.num_search_workers = 1
+    solver.parameters.num_search_workers = _SEARCH_WORKERS
     solver.parameters.random_seed = 0
+    solver.parameters.max_deterministic_time = (
+        DEFAULT_SOLVE_LIMIT if solve_limit is None else solve_limit
+    )
     status = solver.Solve(model)
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -789,6 +886,9 @@ def solve_squad(
 
     result: dict[str, Any] = {
         "status": solver.StatusName(status),
+        # False means the search budget ran out first: the squad is valid and the
+        # best one found, but a better one may exist.
+        "proven_optimal": status == cp_model.OPTIMAL,
         "objective_expected_points": objective_points,
         "objective_score": round(objective_points - fixture_penalty, 4),
         "fixture_penalty": fixture_penalty,
@@ -827,13 +927,20 @@ def solve_squad(
             for i in picked
             if candidates[i].player_season_id not in current_set
         ]
-        transferred_out = sorted(current_set - set(kept))
+        by_id = {c.player_season_id: c for c in candidates}
+        transferred_out = [
+            _candidate_public(by_id[pid])
+            if pid in by_id
+            else _unknown_player_public(pid)
+            for pid in sorted(current_set - set(kept))
+        ]
         result["transfers"] = {
             "allowed": transfers_meta["allowed"],
             "made": len(brought_in),
             "kept": len(kept),
             "in": brought_in,
             "out": transferred_out,
+            "pairs": _pair_transfers(transferred_out, brought_in),
             "missing_from_pool": transfers_meta["missing"],
         }
     else:
@@ -1113,14 +1220,15 @@ def build_squad_optimization(
     locked_starters: Sequence[str | int] | None = None,
     formation: str | None = None,
     fixture_conflict_weight: float | None = None,
+    solve_limit: float | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build the optimal squad for a tour and return a JSON-serialisable report.
 
     The forecast is rebuilt in-process from the active snapshot (or ``run_id``),
     so the result is reproducible from
-    ``(run_id, tour, model, optimizer, fixture_conflict_weight)``. When
-    ``current_squad`` is given the optimizer runs in limited-transfers mode;
+    ``(run_id, tour, model, optimizer, fixture_conflict_weight, solve_limit)``.
+    When ``current_squad`` is given the optimizer runs in limited-transfers mode;
     ``locked``/``locked_starters``/``formation`` pin the user's own choices into
     either mode.
     """
@@ -1163,6 +1271,7 @@ def build_squad_optimization(
         locked_starter_ids=locked_starter_ids,
         formation=formation,
         fixture_conflict_weight=fixture_conflict_weight,
+        solve_limit=solve_limit,
     )
 
     violations = validate_squad(
@@ -1212,6 +1321,7 @@ def build_squad_optimization(
 
 __all__ = [
     "DEFAULT_FIXTURE_CONFLICT_WEIGHT",
+    "DEFAULT_SOLVE_LIMIT",
     "OPTIMIZER_VERSION",
     "ROLES",
     "Candidate",
