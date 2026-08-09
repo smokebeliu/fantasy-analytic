@@ -6,7 +6,12 @@ export type Role = "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD";
 
 export type ForecastModel = "poisson_events" | "season_mean" | "recent_form";
 
-export type PlayerOrder = "projection" | "price" | "name" | "selected_by";
+export type PlayerOrder =
+  | "projection"
+  | "price"
+  | "name"
+  | "selected_by"
+  | "season_score";
 
 export interface PageMeta {
   limit: number;

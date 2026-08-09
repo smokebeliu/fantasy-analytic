@@ -35,6 +35,12 @@ describe("PlayerTable", () => {
     expect(props.onOrderChange).toHaveBeenCalledWith("price");
   });
 
+  it("sorts by season points when the Очки header is clicked", async () => {
+    const props = setup();
+    await userEvent.click(screen.getByText(/Очки/));
+    expect(props.onOrderChange).toHaveBeenCalledWith("season_score");
+  });
+
   it("opens the player card on name click", async () => {
     const props = setup();
     await userEvent.click(screen.getByText("Сперцян"));
