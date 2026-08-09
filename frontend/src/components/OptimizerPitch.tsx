@@ -104,10 +104,7 @@ export function OptimizerPitch({ result }: { result: OptimizerResponse }) {
       </div>
       <div className="bench-strip">
         {solution.bench.map((p) => (
-          <div className="pitch-player" key={p.player_season_id}>
-            <div className="nm">{p.player_name ?? `#${p.player_season_id}`}</div>
-            <div className="pts">{formatPoints(p.expected_points, 1)}</div>
-          </div>
+          <PitchPlayer key={p.player_season_id} player={p} />
         ))}
       </div>
       <p className="inline-note" style={{ marginTop: 12 }}>
