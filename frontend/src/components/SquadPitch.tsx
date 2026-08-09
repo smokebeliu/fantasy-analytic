@@ -7,17 +7,22 @@ import { formatPoints, formatPrice } from "@/lib/format";
 
 // Editable formation view of the manually assembled squad. Players are laid out
 // on the pitch by role (GK -> DEF -> MID -> FWD); empty role slots act as
-// shortcuts that focus the pool on the missing position.
+// shortcuts that focus the pool on the missing position. Pinning a player marks
+// them as locked so the optimizer has to keep them.
 export function SquadPitch({
   selected,
   limits,
   onRemove,
   onEmptySlot,
+  locked,
+  onToggleLock,
 }: {
   selected: PlayerModel[];
   limits: SquadLimits;
   onRemove: (id: number) => void;
   onEmptySlot?: (role: Role) => void;
+  locked?: ReadonlySet<number>;
+  onToggleLock?: (id: number) => void;
 }) {
   const byRole: Record<Role, PlayerModel[]> = {
     GOALKEEPER: [],
@@ -42,24 +47,47 @@ export function SquadPitch({
           : 0;
         return (
           <div className="pitch-row" key={role}>
-            {players.map((p) => (
-              <div
-                className="pitch-player"
-                key={p.player_season_id}
-                title={p.club_name ?? ""}
-              >
-                <button
-                  className="pitch-player__remove"
-                  onClick={() => onRemove(p.player_season_id)}
-                  aria-label={`Убрать ${p.player_name ?? ""}`}
+            {players.map((p) => {
+              const isLocked = locked?.has(p.player_season_id) ?? false;
+              return (
+                <div
+                  className={`pitch-player${isLocked ? " pitch-player--locked" : ""}`}
+                  key={p.player_season_id}
+                  title={p.club_name ?? ""}
+                  data-testid="pitch-player"
                 >
-                  ×
-                </button>
-                <div className="nm">{p.player_name ?? `#${p.player_season_id}`}</div>
-                <div className="pts">{formatPoints(p.projection?.expected_points, 1)}</div>
-                <div className="pitch-player__price">{formatPrice(p.price)}</div>
-              </div>
-            ))}
+                  {onToggleLock && (
+                    <button
+                      className={`pitch-player__pin${isLocked ? " is-locked" : ""}`}
+                      onClick={() => onToggleLock(p.player_season_id)}
+                      aria-pressed={isLocked}
+                      aria-label={`${isLocked ? "Открепить" : "Закрепить"} ${
+                        p.player_name ?? ""
+                      }`}
+                      title={
+                        isLocked
+                          ? "Игрок закреплён: оптимизатор обязан его оставить"
+                          : "Закрепить игрока в составе"
+                      }
+                    >
+                      📌
+                    </button>
+                  )}
+                  <button
+                    className="pitch-player__remove"
+                    onClick={() => onRemove(p.player_season_id)}
+                    aria-label={`Убрать ${p.player_name ?? ""}`}
+                  >
+                    ×
+                  </button>
+                  <div className="nm">{p.player_name ?? `#${p.player_season_id}`}</div>
+                  <div className="pts">
+                    {formatPoints(p.projection?.expected_points, 1)}
+                  </div>
+                  <div className="pitch-player__price">{formatPrice(p.price)}</div>
+                </div>
+              );
+            })}
             {Array.from({ length: emptyCount }).map((_, i) => (
               <button
                 key={`empty-${role}-${i}`}

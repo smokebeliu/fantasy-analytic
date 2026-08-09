@@ -20,6 +20,11 @@ Role = Literal["GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD"]
 ForecastModel = Literal["poisson_events", "season_mean", "recent_form"]
 PlayerOrder = Literal["projection", "price", "name", "selected_by", "season_score"]
 
+# Formations are given as defenders-midfielders-forwards ("4-4-2"); the number of
+# goalkeepers follows from the starting-eleven size, so it is not part of the
+# string. Semantic checks against the season rules happen in the optimizer.
+FORMATION_PATTERN = r"^\d{1,2}-\d{1,2}-\d{1,2}$"
+
 
 # ---------------------------------------------------------------------------
 # Envelopes: unified error format, pagination and snapshot metadata.
@@ -236,6 +241,25 @@ class SquadRequest(BaseModel):
     model: ForecastModel = Field(
         default="poisson_events", description="Forecast model to optimize on"
     )
+    locked: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Fantasy (or internal) player ids forced into the squad; the "
+            "remaining slots are filled optimally"
+        ),
+    )
+    locked_starters: list[str] = Field(
+        default_factory=list,
+        description="Player ids forced into the starting eleven (implies locked)",
+    )
+    formation: str | None = Field(
+        default=None,
+        pattern=FORMATION_PATTERN,
+        description=(
+            "Starting formation as defenders-midfielders-forwards, e.g. '4-4-2'; "
+            "goalkeepers fill the remaining starting slots"
+        ),
+    )
 
 
 class TransfersRequest(SquadRequest):
@@ -269,6 +293,7 @@ class SquadPlayerModel(BaseModel):
     is_starter: bool | None = None
     is_captain: bool | None = None
     is_vice_captain: bool | None = None
+    is_locked: bool | None = None
     bench_order: int | None = None
 
 
@@ -294,6 +319,7 @@ class OptimizerResponse(BaseModel):
 
 __all__ = [
     "DEFAULT_PAGE_LIMIT",
+    "FORMATION_PATTERN",
     "MAX_PAGE_LIMIT",
     "ErrorDetail",
     "ErrorResponse",

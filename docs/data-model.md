@@ -321,6 +321,32 @@ touch the data model are:
   validation failure rather than an invalid squad, and an infeasible problem
   raises a clear `OptimizerError`.
 
+### Pinned players and formations (step 15)
+
+The same program also accepts the user's own choices, so the optimizer completes
+a partially assembled squad instead of replacing it. No schema changes.
+
+- **Pins.** `locked_ids` adds `pick[i] == 1` and `locked_starter_ids` adds
+  `start[i] == 1` (which implies `pick`), so the two sets are merged before the
+  model is built. Every other constraint is untouched, so the remaining slots are
+  still filled optimally; pinning players the free optimum already picked
+  reproduces the free optimum exactly.
+- **Formations.** `formation` is given as defenders-midfielders-forwards
+  (`"4-4-2"`); the goalkeepers are whatever is left of the starting eleven.
+  `parse_formation` rejects a shape the season's `starting_roster_constraints`
+  cannot play, and the per-role starting bounds are replaced by equalities.
+- **Conflicts are named, not just "infeasible".** Pin sets are validated against
+  the rules *before* solving, so exceeding a positional or club limit, spending
+  the budget on the pins alone, pinning more players than the roster holds or
+  pinning starters a requested formation cannot field each raise an
+  `OptimizerError` naming the conflicting constraint. Pins that reference a
+  player outside the candidate pool are an error too (unlike `current_squad`,
+  where an unknown id is simply a forced transfer out).
+- **Provenance.** Each squad entry carries `is_locked`, the solution carries a
+  `constraints` block (`locked`, `locked_starters`, `formation`), and
+  `validate_squad` re-checks the pins and the formation independently, so a lock
+  silently dropped by the model would surface as a validation failure.
+
 ## Cross-season forecast (step 14)
 
 The forecast pipeline builds a squad for the **first tour of a new season** out

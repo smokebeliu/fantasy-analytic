@@ -157,7 +157,15 @@ export interface OptimizerCandidate {
   is_starter?: boolean;
   is_captain?: boolean;
   is_vice_captain?: boolean;
+  // Step 15: the player was pinned by the user, not chosen by the solver.
+  is_locked?: boolean;
   bench_order?: number | null;
+}
+
+export interface OptimizerConstraints {
+  locked: number[];
+  locked_starters: number[];
+  formation?: string | null;
 }
 
 export interface OptimizerTransfers {
@@ -182,6 +190,7 @@ export interface OptimizerSolution {
   starting: OptimizerCandidate[];
   bench: OptimizerCandidate[];
   transfers?: OptimizerTransfers | null;
+  constraints?: OptimizerConstraints | null;
 }
 
 export interface OptimizerRules {

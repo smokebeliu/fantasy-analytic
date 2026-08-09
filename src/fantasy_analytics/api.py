@@ -430,6 +430,9 @@ def create_app(
         model: str,
         current_squad: list[str] | None,
         max_transfers: int | None,
+        locked: list[str] | None = None,
+        locked_starters: list[str] | None = None,
+        formation: str | None = None,
     ) -> dict[str, Any]:
         try:
             return build_squad_optimization(
@@ -440,6 +443,9 @@ def create_app(
                 model=model,
                 current_squad=current_squad,
                 max_transfers=max_transfers,
+                locked=locked,
+                locked_starters=locked_starters,
+                formation=formation,
             )
         except OptimizerError as error:
             raise api_error(422, str(error), type_="optimizer_error") from error
@@ -456,6 +462,9 @@ def create_app(
             model=body.model,
             current_squad=None,
             max_transfers=None,
+            locked=body.locked,
+            locked_starters=body.locked_starters,
+            formation=body.formation,
         )
 
     @app.post(
@@ -471,6 +480,9 @@ def create_app(
             model=request.model,
             current_squad=request.current_squad,
             max_transfers=request.max_transfers,
+            locked=request.locked,
+            locked_starters=request.locked_starters,
+            formation=request.formation,
         )
 
     # ------------------------------------------------------------------

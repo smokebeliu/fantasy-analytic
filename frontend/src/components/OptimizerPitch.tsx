@@ -6,7 +6,15 @@ import { ROLES } from "@/lib/squad";
 
 function PitchPlayer({ player }: { player: OptimizerCandidate }) {
   return (
-    <div className="pitch-player" title={`${player.club_name ?? ""}`}>
+    <div
+      className={`pitch-player${player.is_locked ? " pitch-player--locked" : ""}`}
+      title={`${player.club_name ?? ""}`}
+    >
+      {player.is_locked && (
+        <span className="pitch-player__pin is-locked" title="Закреплён пользователем">
+          📌
+        </span>
+      )}
       <div className="nm">{player.player_name ?? `#${player.player_season_id}`}</div>
       <div className="pts">{formatPoints(player.expected_points, 1)}</div>
       {player.is_captain && <span className="badge-c">К</span>}

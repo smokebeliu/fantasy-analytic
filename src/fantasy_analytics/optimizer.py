@@ -14,6 +14,10 @@ Design guarantees
   demonstrably vary by season and tour).
 * **Two modes.** ``squad`` builds a fresh roster from scratch; ``transfers``
   keeps an existing roster and changes at most ``total_transfers`` players.
+* **User-pinned players and formations.** ``locked_ids`` forces players into the
+  roster and ``locked_starter_ids`` forces them into the starting eleven, while
+  ``formation`` (``"4-4-2"``) fixes the starting role counts. Everything else is
+  still filled optimally under the same rules.
 * **Objective matches the plan.** The solver maximises the expected points of
   the starting eleven *plus* the captain (whose points are counted twice),
   which is exactly the fantasy scoring of a lineup.
@@ -44,7 +48,7 @@ from .forecast import MODEL_EVENT, ForecastError, build_forecast_dataset
 
 # Bumped whenever the optimizer model or its constraints change so squads built
 # by different code revisions never get silently compared.
-OPTIMIZER_VERSION = "1.0.0"
+OPTIMIZER_VERSION = "1.1.0"
 
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
 
@@ -140,6 +144,42 @@ def parse_role_limits(
     return limits
 
 
+def parse_formation(formation: str, rules: SquadRules) -> dict[str, int]:
+    """Turn a ``"4-4-2"`` formation into required starting counts per role.
+
+    The three numbers are defenders, midfielders and forwards; the goalkeepers
+    are whatever is left of the starting eleven. The formation is rejected when
+    it cannot be played under the season's starting-roster limits.
+    """
+    parts = [part.strip() for part in str(formation).split("-")]
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise OptimizerError(
+            f"Formation {formation!r} must look like '4-4-2' "
+            "(defenders-midfielders-forwards)"
+        )
+    counts = {
+        "DEFENDER": int(parts[0]),
+        "MIDFIELDER": int(parts[1]),
+        "FORWARD": int(parts[2]),
+    }
+    keepers = rules.starting_players - sum(counts.values())
+    if keepers < 0:
+        raise OptimizerError(
+            f"Formation {formation!r} uses {sum(counts.values())} outfield "
+            f"players but only {rules.starting_players} may start"
+        )
+    counts["GOALKEEPER"] = keepers
+    for role in ROLES:
+        low, high = rules.starting_limits.get(role, (0, rules.starting_players))
+        if not low <= counts[role] <= high:
+            raise OptimizerError(
+                f"Formation {formation!r} needs {counts[role]} "
+                f"{ROLE_SHORT[role]} in the starting eleven; the rules allow "
+                f"{low}..{high}"
+            )
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # Candidate assembly.
 # ---------------------------------------------------------------------------
@@ -226,12 +266,123 @@ def _formation(starters: Sequence[Candidate]) -> str:
     )
 
 
+def _locked_indices(
+    candidates: Sequence[Candidate], locked_ids: Sequence[int], label: str
+) -> list[int]:
+    """Map locked ``player_season_id``s to candidate indices, rejecting unknowns.
+
+    A pinned player who is not in the pool can never be satisfied, so this is an
+    error rather than a silently dropped constraint.
+    """
+    index_by_id = {c.player_season_id: i for i, c in enumerate(candidates)}
+    resolved: list[int] = []
+    unknown: list[int] = []
+    for player_id in dict.fromkeys(locked_ids):
+        index = index_by_id.get(int(player_id))
+        if index is None:
+            unknown.append(int(player_id))
+        else:
+            resolved.append(index)
+    if unknown:
+        listed = ", ".join(str(pid) for pid in sorted(unknown))
+        raise OptimizerError(
+            f"{label} player(s) {listed} are not selectable for this tour "
+            "(no forecast row, price or club in the candidate pool)"
+        )
+    return sorted(resolved)
+
+
+def _check_locked_feasibility(
+    candidates: Sequence[Candidate],
+    rules: SquadRules,
+    locked: Sequence[int],
+    locked_starters: Sequence[int],
+    formation_counts: dict[str, int] | None,
+) -> None:
+    """Reject pin sets that provably break a rule, naming the conflict.
+
+    The solver would otherwise just report a generic INFEASIBLE status, which
+    tells the user nothing about *which* pin is impossible.
+    """
+    if len(locked) > rules.total_players:
+        raise OptimizerError(
+            f"{len(locked)} players are locked but the squad holds only "
+            f"{rules.total_players}"
+        )
+    if len(locked_starters) > rules.starting_players:
+        raise OptimizerError(
+            f"{len(locked_starters)} players are locked into the starting "
+            f"eleven but only {rules.starting_players} may start"
+        )
+
+    role_counts: dict[str, int] = {role: 0 for role in ROLES}
+    club_counts: dict[int, int] = {}
+    spend = 0
+    for index in locked:
+        candidate = candidates[index]
+        role_counts[candidate.role] += 1
+        club_counts[candidate.club_id] = club_counts.get(candidate.club_id, 0) + 1
+        spend += candidate.price_cents
+
+    for role in ROLES:
+        _, full_max = rules.full_limits.get(role, (0, rules.total_players))
+        if role_counts[role] > full_max:
+            raise OptimizerError(
+                f"{role_counts[role]} locked {ROLE_SHORT[role]} exceed the squad "
+                f"limit of {full_max} for this position"
+            )
+
+    for club_id, count in sorted(club_counts.items()):
+        if count > rules.max_same_team:
+            name = next(
+                (
+                    candidates[i].club_name
+                    for i in locked
+                    if candidates[i].club_id == club_id
+                ),
+                None,
+            )
+            label = name or f"#{club_id}"
+            raise OptimizerError(
+                f"{count} locked players come from club {label}; at most "
+                f"{rules.max_same_team} players may share a club"
+            )
+
+    if spend > rules.budget_cents:
+        raise OptimizerError(
+            f"Locked players alone cost {spend / _PRICE_SCALE:.2f}, which "
+            f"exceeds the budget of {rules.total_budget:.2f}"
+        )
+
+    starter_role_counts: dict[str, int] = {role: 0 for role in ROLES}
+    for index in locked_starters:
+        starter_role_counts[candidates[index].role] += 1
+    for role in ROLES:
+        if formation_counts is not None:
+            allowed = formation_counts[role]
+            if starter_role_counts[role] > allowed:
+                raise OptimizerError(
+                    f"{starter_role_counts[role]} locked {ROLE_SHORT[role]} must "
+                    f"start, but the requested formation plays only {allowed}"
+                )
+            continue
+        _, start_max = rules.starting_limits.get(role, (0, rules.starting_players))
+        if starter_role_counts[role] > start_max:
+            raise OptimizerError(
+                f"{starter_role_counts[role]} locked {ROLE_SHORT[role]} must "
+                f"start, but at most {start_max} may start at this position"
+            )
+
+
 def solve_squad(
     candidates: Sequence[Candidate],
     rules: SquadRules,
     *,
     current_ids: Sequence[int] | None = None,
     max_transfers: int | None = None,
+    locked_ids: Sequence[int] | None = None,
+    locked_starter_ids: Sequence[int] | None = None,
+    formation: str | None = None,
 ) -> dict[str, Any]:
     """Solve the squad-selection integer program and return an explanation.
 
@@ -239,11 +390,31 @@ def solve_squad(
     ``max_transfers`` (defaulting to the tour's ``total_transfers``) of the
     current players may be replaced. Otherwise it builds a fresh squad.
 
+    ``locked_ids`` pins players into the roster and ``locked_starter_ids`` pins
+    them into the starting eleven (which also pins them into the roster);
+    ``formation`` fixes the starting role counts. Every other rule still holds,
+    so the remaining slots are filled optimally.
+
     Raises :class:`OptimizerError` when the pool is too small or the constraints
     cannot be satisfied.
     """
     if not candidates:
         raise OptimizerError("No priced candidates available for the target tour")
+
+    formation_counts = (
+        parse_formation(formation, rules) if formation is not None else None
+    )
+    locked_start_idx = _locked_indices(
+        candidates, locked_starter_ids or (), "Locked starting"
+    )
+    # Starting a player necessarily selects them, so the two pin sets merge.
+    locked_idx = sorted(
+        set(_locked_indices(candidates, locked_ids or (), "Locked"))
+        | set(locked_start_idx)
+    )
+    _check_locked_feasibility(
+        candidates, rules, locked_idx, locked_start_idx, formation_counts
+    )
 
     model = cp_model.CpModel()
     n = len(candidates)
@@ -271,8 +442,17 @@ def solve_squad(
         )
         model.Add(sum(pick[i] for i in idx) >= full_min)
         model.Add(sum(pick[i] for i in idx) <= full_max)
-        model.Add(sum(start[i] for i in idx) >= start_min)
-        model.Add(sum(start[i] for i in idx) <= start_max)
+        if formation_counts is not None:
+            model.Add(sum(start[i] for i in idx) == formation_counts[role])
+        else:
+            model.Add(sum(start[i] for i in idx) >= start_min)
+            model.Add(sum(start[i] for i in idx) <= start_max)
+
+    # User-pinned players.
+    for i in locked_idx:
+        model.Add(pick[i] == 1)
+    for i in locked_start_idx:
+        model.Add(start[i] == 1)
 
     # Budget.
     model.Add(
@@ -323,9 +503,15 @@ def solve_squad(
     status = solver.Solve(model)
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        extra = []
+        if locked_idx:
+            extra.append(f"{len(locked_idx)} locked player(s)")
+        if formation is not None:
+            extra.append(f"formation {formation}")
+        qualifier = f" together with {' and '.join(extra)}" if extra else ""
         raise OptimizerError(
-            "No valid squad satisfies the budget, roster and club constraints "
-            f"(solver status: {solver.StatusName(status)})"
+            "No valid squad satisfies the budget, roster and club constraints"
+            f"{qualifier} (solver status: {solver.StatusName(status)})"
         )
 
     picked = [i for i in range(n) if solver.Value(pick[i]) == 1]
@@ -357,12 +543,14 @@ def solve_squad(
 
     squad: list[dict[str, Any]] = []
     bench_rank = {idx: rank for rank, idx in enumerate(bench_ordered)}
+    locked_set = set(locked_idx)
     for i in picked:
         entry = _candidate_public(candidates[i])
         entry["is_starter"] = i in set(starters_idx)
         entry["is_captain"] = i == captain_idx
         entry["is_vice_captain"] = i == vice_idx
         entry["bench_order"] = bench_rank.get(i)
+        entry["is_locked"] = i in locked_set
         squad.append(entry)
     squad.sort(
         key=lambda e: (
@@ -385,9 +573,17 @@ def solve_squad(
         "squad": squad,
         "starting": [e for e in squad if e["is_starter"]],
         "bench": [
-            _candidate_public(candidates[i]) | {"bench_order": bench_rank[i]}
+            _candidate_public(candidates[i])
+            | {"bench_order": bench_rank[i], "is_locked": i in locked_set}
             for i in bench_ordered
         ],
+        "constraints": {
+            "locked": [candidates[i].player_season_id for i in locked_idx],
+            "locked_starters": [
+                candidates[i].player_season_id for i in locked_start_idx
+            ],
+            "formation": formation,
+        },
     }
 
     if transfers_meta is not None:
@@ -422,11 +618,20 @@ def solve_squad(
 # ---------------------------------------------------------------------------
 
 
-def validate_squad(solution: dict[str, Any], rules: SquadRules) -> list[str]:
+def validate_squad(
+    solution: dict[str, Any],
+    rules: SquadRules,
+    *,
+    locked_ids: Sequence[int] | None = None,
+    locked_starter_ids: Sequence[int] | None = None,
+    formation: str | None = None,
+) -> list[str]:
     """Re-check every rule on a produced squad; return a list of violations.
 
     An empty list means the squad is valid. This is intentionally independent of
-    the solver so a bug in the model surfaces as a validation failure.
+    the solver so a bug in the model surfaces as a validation failure. The
+    optional pin/formation arguments are re-checked the same way, so a locked
+    player silently dropped by the model would be caught here.
     """
     violations: list[str] = []
     squad = solution.get("squad", [])
@@ -512,6 +717,26 @@ def validate_squad(solution: dict[str, Any], rules: SquadRules) -> list[str]:
             f"made {transfers['made']} transfers; limit {transfers['allowed']}"
         )
 
+    # User pins and the requested formation.
+    squad_ids = set(ids)
+    starter_ids = {p["player_season_id"] for p in starters}
+    for player_id in sorted(set(locked_ids or ())):
+        if player_id not in squad_ids:
+            violations.append(f"locked player {player_id} is missing from the squad")
+    for player_id in sorted(set(locked_starter_ids or ())):
+        if player_id not in starter_ids:
+            violations.append(
+                f"locked player {player_id} is not in the starting eleven"
+            )
+    if formation is not None:
+        expected = parse_formation(formation, rules)
+        for role in ROLES:
+            if start_counts[role] != expected[role]:
+                violations.append(
+                    f"formation {formation} needs {expected[role]} {role} in the "
+                    f"starting eleven, found {start_counts[role]}"
+                )
+
     return violations
 
 
@@ -576,6 +801,43 @@ def _resolve_current_ids(
     return resolved
 
 
+def _resolve_locked_refs(
+    refs: Sequence[str | int] | None,
+    candidates: Sequence[Candidate],
+    label: str,
+) -> list[int]:
+    """Map pinned references (fantasy ids or season ids) to season ids.
+
+    Unlike the current squad, an unknown pin is an error: the caller explicitly
+    demanded that player, so silently ignoring them would be misleading.
+    """
+    if not refs:
+        return []
+    by_fantasy = {
+        c.fantasy_player_id: c.player_season_id
+        for c in candidates
+        if c.fantasy_player_id is not None
+    }
+    known_season = {c.player_season_id for c in candidates}
+    resolved: list[int] = []
+    unknown: list[str] = []
+    for ref in refs:
+        ref_str = str(ref)
+        if ref_str in by_fantasy:
+            resolved.append(by_fantasy[ref_str])
+        elif ref_str.isdigit() and int(ref_str) in known_season:
+            resolved.append(int(ref_str))
+        else:
+            unknown.append(ref_str)
+    if unknown:
+        listed = ", ".join(sorted(unknown))
+        raise OptimizerError(
+            f"{label} player(s) {listed} are not selectable for this tour "
+            "(unknown id, or no price/fixture in the candidate pool)"
+        )
+    return resolved
+
+
 def build_squad_optimization(
     session_factory: sessionmaker,
     *,
@@ -585,13 +847,18 @@ def build_squad_optimization(
     model: str = MODEL_EVENT,
     current_squad: Sequence[str | int] | None = None,
     max_transfers: int | None = None,
+    locked: Sequence[str | int] | None = None,
+    locked_starters: Sequence[str | int] | None = None,
+    formation: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build the optimal squad for a tour and return a JSON-serialisable report.
 
     The forecast is rebuilt in-process from the active snapshot (or ``run_id``),
     so the result is reproducible from ``(run_id, tour, model, optimizer)``. When
-    ``current_squad`` is given the optimizer runs in limited-transfers mode.
+    ``current_squad`` is given the optimizer runs in limited-transfers mode;
+    ``locked``/``locked_starters``/``formation`` pin the user's own choices into
+    either mode.
     """
     generated_at = now or datetime.now(UTC)
     try:
@@ -618,15 +885,28 @@ def build_squad_optimization(
 
     mode = "transfers" if current_squad is not None else "squad"
     current_ids = _resolve_current_ids(current_squad, candidates)
+    locked_ids = _resolve_locked_refs(locked, candidates, "Locked")
+    locked_starter_ids = _resolve_locked_refs(
+        locked_starters, candidates, "Locked starting"
+    )
 
     solution = solve_squad(
         candidates,
         rules,
         current_ids=current_ids,
         max_transfers=max_transfers,
+        locked_ids=locked_ids,
+        locked_starter_ids=locked_starter_ids,
+        formation=formation,
     )
 
-    violations = validate_squad(solution, rules)
+    violations = validate_squad(
+        solution,
+        rules,
+        locked_ids=locked_ids,
+        locked_starter_ids=locked_starter_ids,
+        formation=formation,
+    )
     if violations:
         raise OptimizerError(
             "Optimizer produced an invalid squad: " + "; ".join(violations)
@@ -655,6 +935,8 @@ def build_squad_optimization(
         },
         "counts": {
             "candidates": len(candidates),
+            "locked": len(set(locked_ids) | set(locked_starter_ids)),
+            "locked_starters": len(set(locked_starter_ids)),
         },
         "solution": solution,
         "valid": True,
@@ -667,6 +949,7 @@ __all__ = [
     "Candidate",
     "SquadRules",
     "OptimizerError",
+    "parse_formation",
     "parse_role_limits",
     "candidates_from_forecast",
     "solve_squad",

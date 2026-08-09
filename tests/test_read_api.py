@@ -88,6 +88,25 @@ class RequestContractTest(unittest.TestCase):
         with self.assertRaises(pydantic.ValidationError):
             SquadRequest(model="not-a-model")
 
+    def test_lock_and_formation_default_to_unconstrained(self) -> None:
+        request = SquadRequest()
+        self.assertEqual([], request.locked)
+        self.assertEqual([], request.locked_starters)
+        self.assertIsNone(request.formation)
+
+    def test_formation_must_look_like_a_formation(self) -> None:
+        self.assertEqual("4-4-2", SquadRequest(formation="4-4-2").formation)
+        for bad in ("442", "4-4", "4-4-2-1", "four-4-2"):
+            with self.assertRaises(pydantic.ValidationError):
+                SquadRequest(formation=bad)
+
+    def test_transfers_request_inherits_locks(self) -> None:
+        request = TransfersRequest(
+            current_squad=["111"], locked=["222"], formation="3-5-2"
+        )
+        self.assertEqual(["222"], request.locked)
+        self.assertEqual("3-5-2", request.formation)
+
 
 class ErrorHelperTest(unittest.TestCase):
     def test_api_error_wraps_detail(self) -> None:
@@ -145,6 +164,46 @@ class OfflineAppTest(unittest.TestCase):
         self.assertEqual(76.3, response.json()["solution"]["objective_expected_points"])
         # current_squad must be None in squad mode.
         self.assertIsNone(builder.call_args.kwargs["current_squad"])
+
+    def test_optimizer_squad_forwards_locks_and_formation(self) -> None:
+        with mock.patch(
+            "fantasy_analytics.api.build_squad_optimization",
+            return_value={
+                "optimizer_version": "1.1.0",
+                "model": "poisson_events",
+                "mode": "squad",
+                "generated_at": "2026-08-09T00:00:00+00:00",
+                "run_id": 1,
+                "season_id": 1,
+                "season": {},
+                "tour": {},
+                "rules": {},
+                "counts": {"locked": 2},
+                "solution": {"status": "OPTIMAL"},
+                "valid": True,
+            },
+        ) as builder:
+            response = self._client().post(
+                "/optimizer/squad",
+                json={
+                    "tour": "1786",
+                    "locked": ["111", "222"],
+                    "locked_starters": ["111"],
+                    "formation": "3-5-2",
+                },
+            )
+        self.assertEqual(200, response.status_code)
+        kwargs = builder.call_args.kwargs
+        self.assertEqual(["111", "222"], kwargs["locked"])
+        self.assertEqual(["111"], kwargs["locked_starters"])
+        self.assertEqual("3-5-2", kwargs["formation"])
+
+    def test_optimizer_rejects_malformed_formation(self) -> None:
+        response = self._client().post(
+            "/optimizer/squad", json={"tour": "1786", "formation": "4x4x2"}
+        )
+        self.assertEqual(422, response.status_code)
+        self.assertEqual("validation_error", response.json()["error"]["type"])
 
     def test_optimizer_error_maps_to_422(self) -> None:
         with mock.patch(

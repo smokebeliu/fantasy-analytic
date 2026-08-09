@@ -16,6 +16,7 @@ import {
   ROLE_SHORT,
   ROLES,
   canAddPlayer,
+  formationOptions,
   resolveSquadLimits,
   validateSquad,
 } from "@/lib/squad";
@@ -58,6 +59,8 @@ export function SquadBuilder({
   const [roleFilter, setRoleFilter] = useState<Role | "">("");
   const [search, setSearch] = useState("");
   const [view, setView] = useState<SquadView>("pitch");
+  const [formation, setFormation] = useState("");
+  const [locked, setLocked] = useState<Set<number>>(new Set());
 
   const [pool, setPool] = useState<PlayerModel[]>([]);
   const [poolLoading, setPoolLoading] = useState(true);
@@ -83,6 +86,17 @@ export function SquadBuilder({
   const validation = useMemo(
     () => validateSquad(selected, limits),
     [selected, limits],
+  );
+
+  const formations = useMemo(() => formationOptions(limits), [limits]);
+
+  // The optimizer takes fantasy ids when they exist and internal ids otherwise.
+  const lockedRefs = useMemo(
+    () =>
+      selected
+        .filter((p) => locked.has(p.player_season_id))
+        .map((p) => p.fantasy_player_id ?? String(p.player_season_id)),
+    [selected, locked],
   );
 
   useEffect(() => {
@@ -125,8 +139,32 @@ export function SquadBuilder({
     if (!check.allowed) return;
     setSelected((prev) => [...prev, player]);
   };
-  const removePlayer = (id: number) =>
+  const removePlayer = (id: number) => {
     setSelected((prev) => prev.filter((p) => p.player_season_id !== id));
+    setLocked((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  };
+  const toggleLock = (id: number) =>
+    setLocked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  // Keep the optimizer result loaded into the builder, preserving the pins that
+  // survived (locked players always do) so the user can iterate.
+  const applySolution = (res: OptimizerResponse) => {
+    setResult(res);
+    const players = res.solution.squad.map(candidateToPlayer);
+    setSelected(players);
+    const stillPresent = new Set(players.map((p) => p.player_season_id));
+    setLocked((prev) => new Set([...prev].filter((id) => stillPresent.has(id))));
+  };
 
   const runAutoSquad = async () => {
     if (!selectedTour) return;
@@ -141,6 +179,29 @@ export function SquadBuilder({
       setResult(res);
       // Load the optimal roster into the builder so the summary stays in sync.
       setSelected(res.solution.squad.map(candidateToPlayer));
+      setLocked(new Set());
+    } catch (err) {
+      setOptimizerError(err instanceof ApiError ? err.message : "Ошибка оптимизатора");
+    } finally {
+      setOptimizing(false);
+    }
+  };
+
+  // Step 15: keep the pinned players, fill the rest optimally and (optionally)
+  // force the user's own formation.
+  const runFillAroundLocked = async () => {
+    if (!selectedTour) return;
+    setOptimizing(true);
+    setOptimizerError(null);
+    setResult(null);
+    try {
+      const res = await api.optimizeSquad({
+        tour: selectedTour.fantasy_tour_id,
+        model,
+        ...(lockedRefs.length > 0 ? { locked: lockedRefs } : {}),
+        ...(formation ? { formation } : {}),
+      });
+      applySolution(res);
     } catch (err) {
       setOptimizerError(err instanceof ApiError ? err.message : "Ошибка оптимизатора");
     } finally {
@@ -165,9 +226,10 @@ export function SquadBuilder({
         current_squad: currentSquad,
         tour: selectedTour.fantasy_tour_id,
         model,
+        ...(lockedRefs.length > 0 ? { locked: lockedRefs } : {}),
+        ...(formation ? { formation } : {}),
       });
-      setResult(res);
-      setSelected(res.solution.squad.map(candidateToPlayer));
+      applySolution(res);
     } catch (err) {
       setOptimizerError(err instanceof ApiError ? err.message : "Ошибка оптимизатора");
     } finally {
@@ -206,12 +268,37 @@ export function SquadBuilder({
             ))}
           </select>
         </div>
+        <div className="field">
+          <label htmlFor="sq-formation">Схема</label>
+          <select
+            id="sq-formation"
+            value={formation}
+            onChange={(e) => setFormation(e.target.value)}
+            data-testid="formation-select"
+          >
+            <option value="">Любая</option>
+            {formations.map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+          </select>
+        </div>
         <button
           className="btn btn--primary"
           onClick={runAutoSquad}
           disabled={optimizing || !selectedTour}
         >
           {optimizing ? "Оптимизация…" : "Автосостав (оптимизатор)"}
+        </button>
+        <button
+          className="btn btn--primary"
+          onClick={runFillAroundLocked}
+          disabled={optimizing || !selectedTour}
+          data-testid="optimize-locked"
+          title="Оставить закреплённых игроков и добрать остальных оптимально"
+        >
+          Подобрать под мою схему
         </button>
       </div>
 
@@ -267,26 +354,41 @@ export function SquadBuilder({
                 limits={limits}
                 onRemove={removePlayer}
                 onEmptySlot={(role) => setRoleFilter(role)}
+                locked={locked}
+                onToggleLock={toggleLock}
               />
             ) : selected.length > 0 ? (
               <div className="selected-list selected-list--full" data-testid="squad-list">
-                {selected.map((p) => (
-                  <div className="selected-item" key={p.player_season_id}>
-                    <RoleBadge role={p.role} />
-                    <span className="grow">
-                      {p.player_name ?? `#${p.player_season_id}`}
-                    </span>
-                    <span className="inline-note">{formatPrice(p.price)}</span>
-                    <button
-                      className="icon-btn"
-                      style={{ width: 24, height: 24, fontSize: 14 }}
-                      onClick={() => removePlayer(p.player_season_id)}
-                      aria-label="Убрать игрока"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
+                {selected.map((p) => {
+                  const isLocked = locked.has(p.player_season_id);
+                  return (
+                    <div className="selected-item" key={p.player_season_id}>
+                      <RoleBadge role={p.role} />
+                      <span className="grow">
+                        {p.player_name ?? `#${p.player_season_id}`}
+                      </span>
+                      <span className="inline-note">{formatPrice(p.price)}</span>
+                      <button
+                        className={`pin-btn${isLocked ? " is-locked" : ""}`}
+                        onClick={() => toggleLock(p.player_season_id)}
+                        aria-pressed={isLocked}
+                        aria-label={`${isLocked ? "Открепить" : "Закрепить"} ${
+                          p.player_name ?? ""
+                        }`}
+                      >
+                        📌
+                      </button>
+                      <button
+                        className="icon-btn"
+                        style={{ width: 24, height: 24, fontSize: 14 }}
+                        onClick={() => removePlayer(p.player_season_id)}
+                        aria-label="Убрать игрока"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <EmptyState
@@ -311,6 +413,12 @@ export function SquadBuilder({
                   </div>
                 );
               })}
+            </div>
+
+            <div className="locked-note" data-testid="locked-note">
+              {locked.size > 0
+                ? `Закреплено ${locked.size} из ${limits.totalPlayers} — «Подобрать под мою схему» оставит их и добёрет остальных.`
+                : "Закрепите игроков «пином», чтобы оптимизатор оставил их и подобрал остальных."}
             </div>
 
             {validation.violations.length > 0 ? (

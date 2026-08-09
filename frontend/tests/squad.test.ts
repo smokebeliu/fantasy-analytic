@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canAddPlayer,
+  formationOptions,
   parseRoleLimits,
   resolveSquadLimits,
   validateSquad,
@@ -18,6 +19,29 @@ describe("parseRoleLimits", () => {
   it("defaults to unconstrained when the list is missing", () => {
     const limits = parseRoleLimits(null, 15);
     expect(limits.MIDFIELDER).toEqual({ min: 0, max: 15 });
+  });
+});
+
+describe("formationOptions", () => {
+  const limits = resolveSquadLimits(RPL_RULES, 3);
+
+  it("lists only formations playable under the starting limits", () => {
+    const options = formationOptions(limits);
+    expect(options).toContain("4-4-2");
+    expect(options).toContain("3-5-2");
+    expect(options).toContain("5-4-1");
+    // 2 defenders is below the minimum of 3, and 4 forwards above the max of 3.
+    expect(options).not.toContain("2-5-3");
+    expect(options).not.toContain("3-4-4");
+  });
+
+  it("always leaves room for exactly one goalkeeper", () => {
+    for (const option of formationOptions(limits)) {
+      const outfield = option
+        .split("-")
+        .reduce((sum, part) => sum + Number(part), 0);
+      expect(limits.startingPlayers - outfield).toBe(1);
+    }
   });
 });
 

@@ -49,6 +49,40 @@ describe("SquadPitch", () => {
     expect(onEmptySlot).toHaveBeenCalledWith("GOALKEEPER");
   });
 
+  it("pins and unpins a player", async () => {
+    const onToggleLock = vi.fn();
+    const selected = [
+      makePlayer({ player_season_id: 9, player_name: "Форвард", role: "FORWARD" }),
+    ];
+    const { rerender } = render(
+      <SquadPitch
+        selected={selected}
+        limits={limits}
+        onRemove={() => {}}
+        locked={new Set()}
+        onToggleLock={onToggleLock}
+      />,
+    );
+
+    const pin = screen.getByRole("button", { name: /Закрепить Форвард/ });
+    expect(pin).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(pin);
+    expect(onToggleLock).toHaveBeenCalledWith(9);
+
+    rerender(
+      <SquadPitch
+        selected={selected}
+        limits={limits}
+        onRemove={() => {}}
+        locked={new Set([9])}
+        onToggleLock={onToggleLock}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Открепить Форвард/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
   it("skips placeholder slots when role maxima do not sum to the roster size", () => {
     // No roster constraints -> each role max defaults to the roster size, which
     // would draw a nonsensical number of slots; the component suppresses them.
