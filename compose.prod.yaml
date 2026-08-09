@@ -81,6 +81,11 @@ services:
         condition: service_healthy
     environment:
       BACKEND_URL: http://api:8000
+      # This service is the only one on two networks, and the Next.js standalone
+      # server binds to a single address taken from $HOSTNAME (which Docker
+      # defaults to the container id). Pin it so the server always listens on
+      # both networks and Traefik can reach it on `dokploy-network`.
+      HOSTNAME: 0.0.0.0
     restart: unless-stopped
     networks:
       - fantasy-internal
