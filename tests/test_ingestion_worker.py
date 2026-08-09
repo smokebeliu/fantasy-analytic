@@ -100,6 +100,48 @@ class WorkerIntegrationTest(unittest.TestCase):
             session.expunge(job)
             return job
 
+    def test_progress_is_recorded_and_ends_at_full_completion(self) -> None:
+        """Step 17: the UI polls the job row, so the worker must write stages."""
+        job_id = self._enqueue()
+        seen: list[str] = []
+
+        status = execute_job(
+            self.engine,
+            self.session_factory,
+            job_id,
+            client=FakeClient(_build_fixture()),
+            on_progress=seen.append,
+        )
+
+        self.assertEqual("succeeded", status)
+        job = self._job(job_id)
+        self.assertEqual("finished", job.progress_stage)
+        self.assertEqual(100, job.progress_percent)
+        self.assertIsNotNone(job.progress_updated_at)
+        self.assertIn("succeeded", job.progress_message)
+        # The quality gate is announced as its own stage before it runs.
+        self.assertTrue(
+            any(message.startswith("Running quality checks") for message in seen),
+            seen,
+        )
+
+    def test_failed_job_keeps_the_stage_it_died_in(self) -> None:
+        job_id = self._enqueue()
+
+        execute_job(
+            self.engine,
+            self.session_factory,
+            job_id,
+            client=FakeClient(_build_fixture(), fail_on_history=True),
+        )
+
+        job = self._job(job_id)
+        self.assertEqual("failed", job.status)
+        # The import dies while fetching the per-player history, which is what
+        # the UI should show next to the error.
+        self.assertEqual("fetch_history", job.progress_stage)
+        self.assertIn("simulated history failure", job.progress_message)
+
     def test_successful_job_publishes_snapshot(self) -> None:
         job_id = self._enqueue()
 

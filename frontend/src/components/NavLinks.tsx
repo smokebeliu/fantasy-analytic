@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 const LINKS = [
   { href: "/", label: "Тур и игроки" },
   { href: "/squad", label: "Состав" },
+  { href: "/admin", label: "Обновление" },
 ];
 
 export function NavLinks() {

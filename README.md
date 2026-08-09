@@ -372,6 +372,53 @@ and the totals, next to `fixture_penalty` and `objective_score`.
 `objective_expected_points` keeps its original meaning of pure expected points,
 and the independent validator recomputes the penalty from the produced eleven.
 
+## Backtesting and model comparison
+
+Once a finished season is imported, `fantasy-backtest` replays it tour by tour to
+check whether the forecast and the optimizer would actually have helped. For each
+tour it rebuilds the leakage-free features at that tour's own cutoff, forecasts
+every model, solves the real squad problem on those projections and then scores
+everything with the points the players actually went on to earn. It only reads
+the database — no Sports.ru API call.
+
+```bash
+export DATABASE_URL=postgresql+psycopg://fantasy:fantasy@localhost:5432/fantasy
+PYTHONPATH=src python3 -m fantasy_analytics.backtest_cli --output data/backtest
+```
+
+Restrict the run while iterating (repeat `--tour`/`--model`, or skip the solver):
+
+```bash
+PYTHONPATH=src python3 -m fantasy_analytics.backtest_cli \
+  --tour 1786 --tour 1787 --model poisson_events --model season_mean
+PYTHONPATH=src python3 -m fantasy_analytics.backtest_cli --no-optimize
+```
+
+What the run reports:
+
+- **Accuracy** (MAE/RMSE/bias) per tour and per position, twice: over every
+  selectable player and over the players who actually took the field. The full
+  population is dominated by correctly predicted zeros for players who never
+  appeared, so the second view is the sharper comparison.
+- **Squad quality**: the projected and the realised points of the squad each model
+  produced, the points left on the bench, the best eleven those same 15 players
+  could have fielded (`lineup_efficiency`), how often the captain turned out to be
+  the eleven's top scorer, and the hindsight optimum the tour allowed.
+- **Two baselines** (`season_mean`, `recent_form`) next to the event model, and an
+  explicit verdict: `accept_model`, `revise_model` or `keep_baseline`, with the
+  numbers behind it.
+- **A leakage audit** that does not trust the feature builder: every row's history
+  totals are recomputed from the raw appearance table restricted to matches before
+  the cutoff and outside the tour. A mismatch is a violation and the command exits
+  non-zero, so a broken cutoff can never look like a good backtest.
+- **The least stable features**, ranked by how much a player's own value moves
+  between consecutive tours relative to how much players differ.
+
+Artifacts land in the chosen directory: `backtest.json` (the full report with the
+run parameters), `tour-metrics.csv` (one row per tour and model) and `report.md`.
+A committed snapshot of a full-season run lives in
+[`docs/backtest-2025-2026.md`](docs/backtest-2025-2026.md).
+
 ## Manual ingestion API
 
 `fantasy-api` serves a small FastAPI control plane that triggers a full refresh
@@ -404,6 +451,23 @@ completed season. A successful job records the import counts, the quality verdic
 and a `data_freshness` timestamp; a failed job records a bounded, credential-free
 error message. The worker can also be run directly for a queued job:
 `PYTHONPATH=src python3 -m fantasy_analytics.ingestion_worker <job_id>`.
+
+While a job runs, the worker mirrors the pipeline's progress onto the job row as a
+coarse stage (`queued` → `starting` → `fetch_season` → `fetch_players` →
+`fetch_history` → `persist` → `quality_gate` → `finished`) with a rough completion
+percentage, so a client can show what is happening instead of a bare spinner. A
+single endpoint answers "is a refresh running, and what is published" without a
+job id, which is what lets the UI recover its state after a reload:
+
+```bash
+curl http://127.0.0.1:8000/admin/ingestion/rpl/status
+```
+
+It returns the in-flight job (with its `progress`), the last job, the last
+successful one, the active snapshot with its `data_freshness`, the season and the
+target tour, plus the stage vocabulary. A finished job's full import/quality
+report stays on `GET /admin/ingestion/runs/{job_id}`; the status payload only
+carries the headline counts so polling stays cheap.
 
 ## User REST API
 
@@ -480,6 +544,17 @@ the result panel names each such pair and the penalty it cost. Data freshness an
 the model version are shown in the header, and loading/empty/error states are
 covered across all views.
 
+The `Обновление` screen (`/admin`) drives the manual refresh: one button enqueues
+a real ingestion job, the panel shows the stage, the progress, the start time and
+the elapsed duration, and it polls only while the job is in flight. A second click
+is impossible while a refresh runs (the button is disabled and the API answers
+`409`), the state is rediscovered from the server after a page reload, and the
+screen always shows the published snapshot with its freshness and the target tour.
+On success it re-renders the header with the new snapshot; on failure it shows the
+bounded, credential-free error message and offers a retry. A successful import
+whose snapshot the quality gate refused to publish is reported as its own case, so
+"the data did not change" is never silently mistaken for "nothing happened".
+
 Every browser request is proxied same-origin through `/api/backend/*` to the
 FastAPI backend (no CORS), so the frontend only needs `BACKEND_URL` to reach it.
 
@@ -500,6 +575,8 @@ npm run build                     # production build (standalone output)
 npm test                          # Vitest unit + component tests
 npx playwright install chromium   # once
 BACKEND_URL=http://127.0.0.1:8000 npm run e2e   # Playwright e2e (needs API up)
+# Also run the real refresh e2e (imports a season; needs outbound network).
+RUN_LIVE_REFRESH_E2E=1 BACKEND_URL=http://127.0.0.1:8000 npm run e2e
 ```
 
 The whole stack (PostgreSQL, migrations, API, worker-free read API and the
@@ -539,6 +616,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
   grains, mappings and unresolved questions.
 - [`docs/feature-dictionary.md`](docs/feature-dictionary.md) documents the
   analytical feature dataset, its leakage guarantees and missing-value strategy.
+- [`docs/backtest-2025-2026.md`](docs/backtest-2025-2026.md) is a committed
+  snapshot of a full-season backtest: model versus baselines, per-tour and
+  per-position errors, squad results and the resulting decision.
 - [`docs/development-plan.md`](docs/development-plan.md) is the agent-oriented
   execution roadmap (planning, current statuses and key nuances) and must be
   updated after every completed step.

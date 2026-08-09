@@ -1007,7 +1007,7 @@ def validate_squad(
 # ---------------------------------------------------------------------------
 
 
-def _load_rules(session, season_id: int, tour_id: int) -> SquadRules:
+def load_squad_rules(session, season_id: int, tour_id: int) -> SquadRules:
     season_rules = session.get(SeasonRules, season_id)
     if season_rules is None:
         raise OptimizerError(
@@ -1143,7 +1143,7 @@ def build_squad_optimization(
         )
 
     with session_scope(session_factory) as session:
-        rules = _load_rules(
+        rules = load_squad_rules(
             session, forecast["season_id"], forecast["tour"]["tour_id"]
         )
 
@@ -1223,6 +1223,7 @@ __all__ = [
     "parse_formation",
     "parse_role_limits",
     "candidates_from_forecast",
+    "load_squad_rules",
     "solve_squad",
     "validate_squad",
     "build_squad_optimization",

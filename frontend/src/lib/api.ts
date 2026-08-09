@@ -1,9 +1,12 @@
 import type {
   ForecastModel,
+  IngestionJob,
+  IngestionStatusResponse,
   OptimizerResponse,
   PlayerDetailModel,
   PlayerListResponse,
   PlayerOrder,
+  RefreshRequestBody,
   Role,
   SeasonDetailModel,
   SeasonListResponse,
@@ -160,6 +163,21 @@ export const api = {
     formation?: string;
   }) =>
     request<OptimizerResponse>("/optimizer/transfers", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  // Admin ingestion (step 17). The refresh call only enqueues a job: a 202
+  // carries the new job, a 409 (thrown as an ApiError with type "conflict")
+  // means a refresh is already running.
+  getIngestionStatus: () =>
+    request<IngestionStatusResponse>("/admin/ingestion/rpl/status"),
+
+  getIngestionJob: (jobId: number) =>
+    request<IngestionJob>(`/admin/ingestion/runs/${jobId}`),
+
+  refreshIngestion: (body: RefreshRequestBody = {}) =>
+    request<IngestionJob>("/admin/ingestion/rpl/refresh", {
       method: "POST",
       body: JSON.stringify(body),
     }),

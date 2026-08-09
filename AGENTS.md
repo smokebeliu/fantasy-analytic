@@ -59,7 +59,17 @@ tests should target `TEST_DATABASE_URL` (safe to drop/recreate `public`).
  single module via discovery too: `PYTHONPATH=src python3 -m unittest discover -s
  tests -p test_optimizer.py -v`, not `-m tests.test_optimizer`.
 - Ensure the schema exists before running DB tools/API:
- `PYTHONPATH=src python3 -m fantasy_analytics.db.cli upgrade`.
+  `PYTHONPATH=src python3 -m fantasy_analytics.db.cli upgrade`.
+- Backtesting needs **no** network, only an imported season:
+  `PYTHONPATH=src python3 -m fantasy_analytics.backtest_cli --output data/backtest`
+  (~50s for a full 30-tour season; add `--no-optimize` or `--tour <id>` while
+  iterating). It exits `3` when its leakage audit finds a violation.
+- Frontend e2e (`cd frontend && BACKEND_URL=http://127.0.0.1:8000 npm run e2e`)
+  needs both the API and `npm run start` up, plus a tour whose projections are
+  persisted (`fantasy-forecast --tour <fantasy_tour_id>`), otherwise the player-card
+  test has no forecast to show. One admin test runs a *real* season import through
+  the UI and stays skipped unless `RUN_LIVE_REFRESH_E2E=1` (needs outbound network
+  and publishes a new snapshot).
 - The admin API is `PYTHONPATH=src python3 -m fantasy_analytics.api --host
  127.0.0.1 --port 8000`. `POST /admin/ingestion/rpl/refresh` returns `202` and a
  job id immediately, then a detached worker subprocess runs the import + quality

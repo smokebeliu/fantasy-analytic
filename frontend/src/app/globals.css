@@ -1135,7 +1135,116 @@ table.players th.num {
   cursor: not-allowed;
 }
 
+/* Admin refresh screen (step 17) */
+.refresh-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) 1fr;
+  grid-template-areas:
+    "action progress"
+    "snapshot progress";
+  gap: 16px;
+  align-items: start;
+}
+.refresh-action {
+  grid-area: action;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.refresh-progress {
+  grid-area: progress;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.refresh-snapshot {
+  grid-area: snapshot;
+}
+.refresh-grid h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.refresh-action__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.refresh-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin: 10px 0 4px;
+}
+
+.progress {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.progress__bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--success));
+  transition: width 0.4s ease;
+}
+.progress__bar--failed {
+  background: var(--danger);
+}
+.refresh-stage {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.refresh-stage__note {
+  color: var(--text-dim);
+}
+
+.stage-list {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+}
+.stage-list__item {
+  font-size: 12px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.stage-list__item.is-done {
+  color: var(--success);
+  border-color: rgba(55, 211, 153, 0.4);
+  background: rgba(55, 211, 153, 0.1);
+}
+.stage-list__item.is-current {
+  color: var(--accent);
+  border-color: var(--border-strong);
+  background: var(--accent-soft);
+}
+
+.chip--published {
+  color: var(--success);
+}
+.chip--failed {
+  color: var(--danger);
+}
+.chip--blocked {
+  color: var(--warning);
+}
+
 @media (max-width: 900px) {
+  .refresh-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "action"
+      "progress"
+      "snapshot";
+  }
   .squad-layout {
     grid-template-columns: 1fr;
   }

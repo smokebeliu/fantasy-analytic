@@ -452,32 +452,16 @@ def _forecast_rows_for_player(
     return rows
 
 
-def build_forecast_dataset(
-    session_factory: sessionmaker,
-    *,
-    run_id: int | None = None,
-    season_ref: str | None = None,
-    tour_ref: str | None = None,
-    now: datetime | None = None,
+def forecast_from_features(
+    features: dict[str, Any], *, now: datetime | None = None
 ) -> dict[str, Any]:
-    """Build forecasts for every player whose club plays the target tour.
+    """Turn an already-built feature dataset into the forecast report.
 
-    Returns a JSON-serialisable report with metadata, the model list and one
-    ``rows`` entry per (player, model). The dataset is reproducible from
-    ``(run_id, tour, model_version, feature_version)``.
+    Separated from :func:`build_forecast_dataset` so a caller that already has
+    the features (backtesting, step 19, which also audits them) does not have to
+    rebuild them from the database a second time.
     """
     generated_at = now or datetime.now(UTC)
-    try:
-        features = build_feature_dataset(
-            session_factory,
-            run_id=run_id,
-            season_ref=season_ref,
-            tour_ref=tour_ref,
-            now=generated_at,
-        )
-    except Exception as error:  # noqa: BLE001 - normalise to a forecast error
-        raise ForecastError(str(error)) from error
-
     cutoff = features["cutoff"]
     rows: list[dict[str, Any]] = []
     for feature_row in features["rows"]:
@@ -528,6 +512,34 @@ def build_forecast_dataset(
         },
         "rows": rows,
     }
+
+
+def build_forecast_dataset(
+    session_factory: sessionmaker,
+    *,
+    run_id: int | None = None,
+    season_ref: str | None = None,
+    tour_ref: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Build forecasts for every player whose club plays the target tour.
+
+    Returns a JSON-serialisable report with metadata, the model list and one
+    ``rows`` entry per (player, model). The dataset is reproducible from
+    ``(run_id, tour, model_version, feature_version)``.
+    """
+    generated_at = now or datetime.now(UTC)
+    try:
+        features = build_feature_dataset(
+            session_factory,
+            run_id=run_id,
+            season_ref=season_ref,
+            tour_ref=tour_ref,
+            now=generated_at,
+        )
+    except Exception as error:  # noqa: BLE001 - normalise to a forecast error
+        raise ForecastError(str(error)) from error
+    return forecast_from_features(features, now=generated_at)
 
 
 def run_forecast(
@@ -585,6 +597,7 @@ __all__ = [
     "forecast_event_model",
     "forecast_mean_baseline",
     "forecast_recent_baseline",
+    "forecast_from_features",
     "build_forecast_dataset",
     "run_forecast",
 ]

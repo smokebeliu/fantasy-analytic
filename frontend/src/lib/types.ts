@@ -246,6 +246,66 @@ export interface OptimizerResponse {
   valid: boolean;
 }
 
+// Admin ingestion (steps 5 and 17). A refresh is enqueued, then polled until it
+// reaches a terminal status; the status endpoint answers without a job id so a
+// page reload recovers an in-flight refresh.
+
+export type IngestionJobStatus = "pending" | "running" | "succeeded" | "failed";
+
+export interface IngestionProgress {
+  stage: string;
+  percent: number;
+  message?: string | null;
+  updated_at?: string | null;
+}
+
+export interface IngestionJobResultSummary {
+  snapshot_active?: boolean | null;
+  data_freshness?: string | null;
+  completed_at?: string | null;
+  counts?: Record<string, number> | null;
+  quality?: {
+    passed?: boolean | null;
+    counts?: { blocking?: number; warnings?: number } | null;
+  } | null;
+}
+
+export interface IngestionJob {
+  id: number;
+  status: IngestionJobStatus;
+  tournament_slug: string;
+  trigger_type?: string | null;
+  requested_season_id?: string | null;
+  requested_season_name?: string | null;
+  use_current_season?: boolean | null;
+  ingestion_run_id?: number | null;
+  error_message?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  data_freshness?: string | null;
+  progress?: IngestionProgress | null;
+  result?: IngestionJobResultSummary | null;
+}
+
+export interface IngestionStatusResponse {
+  tournament_slug: string;
+  is_refreshing: boolean;
+  active_job?: IngestionJob | null;
+  latest_job?: IngestionJob | null;
+  latest_successful_job?: IngestionJob | null;
+  snapshot?: SnapshotMeta | null;
+  season?: SeasonModel | null;
+  target_tour?: TourModel | null;
+  stages: { stage: string; percent: number }[];
+}
+
+export interface RefreshRequestBody {
+  season_id?: string;
+  season_name?: string;
+  current?: boolean;
+}
+
 export interface ApiErrorBody {
   error: {
     type: string;

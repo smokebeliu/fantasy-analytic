@@ -158,6 +158,17 @@ class IngestionJob(Base):
     )
     error_message: Mapped[str | None] = mapped_column(Text)
     result: Mapped[Any | None] = mapped_column(JSONB)
+    # Coarse progress of a running job (step 17), so the admin UI can show the
+    # current stage instead of an opaque spinner. The vocabulary lives in
+    # :mod:`fantasy_analytics.ingestion_progress`; the worker updates these
+    # columns as the import reports progress, and they survive an API restart
+    # because they are part of the job row.
+    progress_stage: Mapped[str | None] = mapped_column(Text)
+    progress_percent: Mapped[int | None] = mapped_column(Integer)
+    progress_message: Mapped[str | None] = mapped_column(Text)
+    progress_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
