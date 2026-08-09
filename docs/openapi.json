@@ -1985,7 +1985,8 @@
                 "projection",
                 "price",
                 "name",
-                "selected_by"
+                "selected_by",
+                "season_score"
               ],
               "title": "Order",
               "type": "string"

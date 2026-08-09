@@ -18,7 +18,7 @@ MAX_PAGE_LIMIT = 200
 
 Role = Literal["GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD"]
 ForecastModel = Literal["poisson_events", "season_mean", "recent_form"]
-PlayerOrder = Literal["projection", "price", "name", "selected_by"]
+PlayerOrder = Literal["projection", "price", "name", "selected_by", "season_score"]
 
 
 # ---------------------------------------------------------------------------

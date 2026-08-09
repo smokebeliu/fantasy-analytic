@@ -41,7 +41,7 @@ from .db.models import (
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
 
 # Ordering keys the players endpoint understands.
-PLAYER_ORDERS = ("projection", "price", "name", "selected_by")
+PLAYER_ORDERS = ("projection", "price", "name", "selected_by", "season_score")
 
 
 def _iso(value: Any) -> str | None:
@@ -405,6 +405,8 @@ class ReadRepository:
             return (snapshot.c.price.desc().nullslast(), pid)
         if order == "selected_by" and join_snapshot:
             return (snapshot.c.selected_by.desc().nullslast(), pid)
+        if order == "season_score" and join_snapshot:
+            return (snapshot.c.season_score.desc().nullslast(), pid)
         return (Player.canonical_name, pid)
 
     @staticmethod
