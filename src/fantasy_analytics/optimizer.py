@@ -875,9 +875,20 @@ def solve_squad(
         if formation is not None:
             extra.append(f"formation {formation}")
         qualifier = f" together with {' and '.join(extra)}" if extra else ""
+        if status == cp_model.INFEASIBLE:
+            # Proven impossible: no budget would ever produce a squad.
+            raise OptimizerError(
+                "No valid squad satisfies the budget, roster and club constraints"
+                f"{qualifier} (solver status: {solver.StatusName(status)})"
+            )
+        # The constraints may well be satisfiable; the search simply ran out of
+        # its budget before finding anything. Saying they are impossible would
+        # send the user off changing pins and formations for no reason.
         raise OptimizerError(
-            "No valid squad satisfies the budget, roster and club constraints"
-            f"{qualifier} (solver status: {solver.StatusName(status)})"
+            "The search ran out of its budget before finding a squad that "
+            f"satisfies the budget, roster and club constraints{qualifier}; "
+            "retry with a larger solve_limit "
+            f"(solver status: {solver.StatusName(status)})"
         )
 
     picked = [i for i in range(n) if solver.Value(pick[i]) == 1]

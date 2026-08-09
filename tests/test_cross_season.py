@@ -27,8 +27,10 @@ import json
 import os
 import unittest
 
+from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from fantasy_analytics.api import create_app
 from fantasy_analytics.db import (
     ForecastRepository,
     create_db_engine,
@@ -52,6 +54,7 @@ from fantasy_analytics.forecast import MODEL_EVENT, run_forecast
 from fantasy_analytics.ingestion import IngestionOptions, run_ingestion
 from fantasy_analytics.optimizer import build_squad_optimization, validate_squad
 from fantasy_analytics.quality import run_quality_checks
+from fantasy_analytics.read_repository import ReadRepository
 
 from test_ingestion import FakeClient
 from test_optimizer import _rules_from_report
@@ -527,6 +530,79 @@ class CrossSeasonIntegrationTest(unittest.TestCase):
         self.assertTrue(
             all(p["stat_source"] == STAT_SOURCE_PRIOR for p in solution["squad"])
         )
+
+    # -- last season's numbers on this season's players -----------------------
+    def test_returning_player_carries_his_previous_season(self) -> None:
+        client = TestClient(
+            create_app(
+                session_factory=self.session_factory,
+                spawn_worker=lambda job_id: None,
+                ensure_forecasts=lambda *a, **kw: 0,
+            )
+        )
+        items = client.get(f"/players?season_id={self.active_season}").json()["items"]
+        by_fid = {item["fantasy_player_id"]: item for item in items}
+
+        forward = by_fid[self.ACTIVE_FORWARD]["prior_season"]
+        self.assertEqual("2025/2026", forward["season_name"])
+        # The prior season had one played match with the player on the pitch.
+        self.assertEqual(1, forward["matches"])
+        self.assertGreater(forward["minutes"], 0)
+        self.assertIsNotNone(forward["points"])
+        self.assertIsNotNone(forward["club_name"])
+
+    def test_newcomer_has_no_previous_season(self) -> None:
+        client = TestClient(
+            create_app(
+                session_factory=self.session_factory,
+                spawn_worker=lambda job_id: None,
+                ensure_forecasts=lambda *a, **kw: 0,
+            )
+        )
+        items = client.get(f"/players?season_id={self.active_season}").json()["items"]
+        by_fid = {item["fantasy_player_id"]: item for item in items}
+        self.assertIsNone(by_fid[self.ACTIVE_NEWCOMER]["prior_season"])
+
+    def test_player_card_repeats_the_previous_season(self) -> None:
+        # The card is what a manager opens to judge a signing, so it must carry
+        # the same block as the list rather than only this season's empty columns.
+        with self.session_factory() as session:
+            player_season_id = session.execute(
+                text(
+                    "SELECT id FROM player_seasons "
+                    "WHERE season_id = :s AND fantasy_player_id = :fid"
+                ),
+                {"s": self.active_season, "fid": self.ACTIVE_FORWARD},
+            ).scalar_one()
+
+        client = TestClient(
+            create_app(
+                session_factory=self.session_factory,
+                spawn_worker=lambda job_id: None,
+                ensure_forecasts=lambda *a, **kw: 0,
+            )
+        )
+        card = client.get(f"/players/{player_season_id}").json()
+        self.assertIsNotNone(card["prior_season"])
+        self.assertEqual("2025/2026", card["prior_season"]["season_name"])
+
+    def test_prior_season_players_have_no_earlier_season(self) -> None:
+        # The oldest imported season has nothing behind it; asking must yield an
+        # empty mapping rather than falling back to a later season.
+        prior_season_id = self._scalar(
+            "SELECT id FROM seasons WHERE fantasy_season_id = '59'"
+        )
+        with self.session_factory() as session:
+            repo = ReadRepository(session)
+            player_ids = list(
+                session.execute(
+                    text("SELECT id FROM player_seasons WHERE season_id = :s"),
+                    {"s": prior_season_id},
+                )
+                .scalars()
+                .all()
+            )
+            self.assertEqual({}, repo.prior_season_stats(prior_season_id, player_ids))
 
 
 if __name__ == "__main__":

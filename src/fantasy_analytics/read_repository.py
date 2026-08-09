@@ -290,16 +290,16 @@ class ReadRepository:
     ) -> tuple[Season, IngestionRun] | None:
         """Resolve the previous season and the snapshot its numbers come from.
 
-        Reuses the cross-season rule of the feature builder: the prior season is
-        another season of the same competition that has a published snapshot,
-        preferring the latest one that started earlier. Returns ``None`` when the
-        season is the only one imported, which simply means no player has a
-        prior-season block.
+        Shares the feature builder's definition of a prior season — another
+        season of the same competition with a published snapshot — but insists it
+        actually started earlier, since a block labelled "last season" must not
+        show a later one. Returns ``None`` when nothing precedes this season,
+        which simply means no player has a prior-season block.
         """
         season = self._session.get(Season, season_id)
         if season is None:
             return None
-        prior_run = resolve_prior_run(self._session, season)
+        prior_run = resolve_prior_run(self._session, season, require_earlier=True)
         if prior_run is None or prior_run.season_id is None:
             return None
         prior_season = self._session.get(Season, prior_run.season_id)

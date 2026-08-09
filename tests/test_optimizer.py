@@ -33,6 +33,7 @@ from fantasy_analytics.optimizer import (
     Candidate,
     FixtureExposure,
     OptimizerError,
+    ROLES,
     SquadRules,
     build_squad_optimization,
     cancellation,
@@ -327,6 +328,122 @@ class TransfersModeTest(unittest.TestCase):
         rules = _rpl_rules(total_transfers=None)
         with self.assertRaises(OptimizerError):
             solve_squad(self.pool, rules, current_ids=self.optimal_ids)
+
+    # -- naming both sides of every swap --------------------------------------
+
+    def test_outgoing_players_are_described_not_just_numbered(self) -> None:
+        # A manager cannot act on "sell #4213": the report has to name the player
+        # being sold as fully as the one being bought.
+        worse = self._worse_squad_ids()
+        solution = solve_squad(
+            self.pool, self.rules, current_ids=worse, max_transfers=3
+        )
+        transfers = solution["transfers"]
+        self.assertEqual(len(transfers["out"]), transfers["made"])
+        for leaving in transfers["out"]:
+            self.assertIsNotNone(leaving["player_name"])
+            self.assertIn(leaving["role"], ROLES)
+            self.assertIsNotNone(leaving["price"])
+        self.assertNotIn(
+            None, [entry["player_season_id"] for entry in transfers["out"]]
+        )
+
+    def test_every_transfer_is_paired_with_its_replacement(self) -> None:
+        worse = self._worse_squad_ids()
+        solution = solve_squad(
+            self.pool, self.rules, current_ids=worse, max_transfers=3
+        )
+        transfers = solution["transfers"]
+        pairs = transfers["pairs"]
+        self.assertEqual(len(pairs), transfers["made"])
+        # Every player who leaves and every player who arrives appears exactly
+        # once, so no transfer is left unexplained or double counted.
+        self.assertEqual(
+            sorted(pair["out"]["player_season_id"] for pair in pairs),
+            sorted(entry["player_season_id"] for entry in transfers["out"]),
+        )
+        self.assertEqual(
+            sorted(pair["in"]["player_season_id"] for pair in pairs),
+            sorted(entry["player_season_id"] for entry in transfers["in"]),
+        )
+
+    def test_pairs_swap_like_for_like_and_quantify_the_change(self) -> None:
+        worse = self._worse_squad_ids()
+        solution = solve_squad(
+            self.pool, self.rules, current_ids=worse, max_transfers=3
+        )
+        for pair in solution["transfers"]["pairs"]:
+            # The roster's role limits are exact, so a transfer can only trade a
+            # player for another of the same position.
+            self.assertEqual(pair["out"]["role"], pair["in"]["role"])
+            self.assertAlmostEqual(
+                pair["delta_expected_points"],
+                pair["in"]["expected_points"] - pair["out"]["expected_points"],
+                places=4,
+            )
+            self.assertAlmostEqual(
+                pair["delta_price"],
+                pair["in"]["price"] - pair["out"]["price"],
+                places=2,
+            )
+
+    def test_forced_out_player_is_still_named_in_a_pair(self) -> None:
+        # A player who vanished from the pool cannot be described, but he must
+        # still show up as a transfer rather than disappearing from the plan.
+        current = self.optimal_ids[:-1] + [99999]
+        solution = solve_squad(
+            self.pool, self.rules, current_ids=current, max_transfers=3
+        )
+        outgoing = {
+            entry["player_season_id"]: entry
+            for entry in solution["transfers"]["out"]
+        }
+        self.assertIn(99999, outgoing)
+        self.assertTrue(outgoing[99999]["unavailable"])
+        self.assertIn(
+            99999,
+            [pair["out"]["player_season_id"] for pair in solution["transfers"]["pairs"]],
+        )
+
+
+class SolveBudgetTest(unittest.TestCase):
+    """The search is bounded, reproducible and honest about optimality."""
+
+    def setUp(self) -> None:
+        self.pool = _pool()
+        self.rules = _rpl_rules()
+
+    def test_an_easy_squad_is_proven_optimal(self) -> None:
+        solution = solve_squad(self.pool, self.rules)
+        self.assertTrue(solution["proven_optimal"])
+        self.assertEqual(solution["status"], "OPTIMAL")
+
+    def test_a_squad_found_without_a_proof_is_still_valid(self) -> None:
+        # A budget too small to prove optimality still has to produce a squad
+        # that obeys every roster rule: a bounded search degrades the answer's
+        # quality, never its validity.
+        solution = solve_squad(self.pool, self.rules, solve_limit=0.02)
+        self.assertEqual(validate_squad(solution, self.rules), [])
+        self.assertEqual(len(solution["squad"]), self.rules.total_players)
+
+    def test_running_out_of_budget_is_not_reported_as_impossible(self) -> None:
+        # Telling the user their constraints cannot be satisfied would send them
+        # off changing pins and formations when the search merely gave up.
+        with self.assertRaises(OptimizerError) as ctx:
+            solve_squad(self.pool, self.rules, solve_limit=1e-9)
+        self.assertIn("ran out of its budget", str(ctx.exception))
+
+    def test_an_impossible_squad_is_reported_as_impossible(self) -> None:
+        with self.assertRaises(OptimizerError) as ctx:
+            solve_squad(self.pool, _rpl_rules(total_budget=1.0))
+        self.assertIn("No valid squad satisfies", str(ctx.exception))
+
+    def test_repeating_a_solve_returns_the_same_squad(self) -> None:
+        # The pool is full of exact ties, so a search that raced its workers
+        # would answer differently each run.
+        first = solve_squad(self.pool, self.rules, formation="4-4-2")
+        second = solve_squad(self.pool, self.rules, formation="4-4-2")
+        self.assertEqual(first, second)
 
 
 class ParseFormationTest(unittest.TestCase):

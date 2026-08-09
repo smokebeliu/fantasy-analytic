@@ -692,6 +692,16 @@
             ],
             "title": "Price"
           },
+          "prior_season": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PriorSeasonModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "projection": {
             "anyOf": [
               {
@@ -988,6 +998,16 @@
             ],
             "title": "Price"
           },
+          "prior_season": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PriorSeasonModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "projection": {
             "anyOf": [
               {
@@ -1052,6 +1072,206 @@
           "role"
         ],
         "title": "PlayerModel",
+        "type": "object"
+      },
+      "PriorSeasonModel": {
+        "description": "What the same player did in the previous season.\n\nEarly in a new season the current-season columns are nearly empty, so these\nnumbers are what a manager actually judges a player by. They come from the\nprevious season's published snapshot, matched through the cross-season\nplayer identity, and are absent when only one season has been imported.",
+        "properties": {
+          "assists": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assists"
+          },
+          "average_points": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Average Points"
+          },
+          "ball_recoveries": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ball Recoveries"
+          },
+          "club_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Club the player belonged to last season",
+            "title": "Club Name"
+          },
+          "goals": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goals"
+          },
+          "goals_conceded": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goals Conceded"
+          },
+          "matches": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Matches with at least one minute played",
+            "title": "Matches"
+          },
+          "minutes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minutes"
+          },
+          "player_season_id": {
+            "title": "Player Season Id",
+            "type": "integer"
+          },
+          "points": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Fantasy points scored over the whole season",
+            "title": "Points"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Price at the end of the previous season",
+            "title": "Price"
+          },
+          "rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Fantasy rank inside the season (1 is best)",
+            "title": "Rank"
+          },
+          "red_cards": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Red Cards"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "saves": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Saves"
+          },
+          "season_id": {
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "season_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Season Name"
+          },
+          "yellow_cards": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Yellow Cards"
+          }
+        },
+        "required": [
+          "season_id",
+          "player_season_id"
+        ],
+        "title": "PriorSeasonModel",
         "type": "object"
       },
       "ProjectionModel": {
