@@ -389,10 +389,12 @@ PYTHONPATH=src python3 -m fantasy_analytics.openapi_cli --output docs/openapi.js
 ## Analytical frontend
 
 `frontend/` is a Next.js (App Router) + TypeScript app that consumes the read API
-and squad optimizer. It shows the next tour's players with position/club/status/
-price filters, server-side sorting, pagination and up-to-four player comparison;
-a player card (slide-over drawer and a dedicated `/players/[id]` route) with match
-history and a forecast breakdown by scoring component; and a squad builder that
+and squad optimizer. The player table shows the full season statistics as of now
+(no tour filter) with position/club/status/price filters, instant client-side
+sorting (including by season points), pagination and up-to-four player
+comparison; the `Прогноз` column is projected for the upcoming tour. A player
+card (slide-over drawer and a dedicated `/players/[id]` route) keeps the per-tour
+match history and a forecast breakdown by scoring component; and a squad builder that
 validates every roster rule (size, per-role, budget, club limit, duplicates) on
 the client before submission and calls the optimizer to build a squad or suggest
 transfers. Data freshness and the model version are shown in the header, and
