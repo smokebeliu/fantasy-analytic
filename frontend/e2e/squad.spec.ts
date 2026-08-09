@@ -119,25 +119,33 @@ test.describe("Squad builder", () => {
     page,
   }) => {
     await page.goto("/squad");
+    await expect(page.getByTestId("pool-row").first()).toBeVisible();
 
-    // Start from a full legal squad, then weaken it so there is something to fix:
-    // three players are swapped for the cheapest ones the pool offers.
-    await page.getByTestId("optimize-from-scratch").click();
-    await expect(page.getByTestId("optimizer-result")).toBeVisible();
-
+    // Assemble a legal but deliberately weak squad, taken from the bottom of the
+    // projection-sorted pool, so the optimizer has something worth changing.
+    const roster: [string, number][] = [
+      ["ВРТ", 2],
+      ["ЗАЩ", 5],
+      ["ПЗЩ", 5],
+      ["НАП", 3],
+    ];
+    for (const [role, needed] of roster) {
+      await page.getByTestId("role-filter").getByRole("button", { name: role }).click();
+      const rows = page.getByTestId("pool-row");
+      await expect(rows.first()).toBeVisible();
+      const total = await rows.count();
+      let added = 0;
+      for (let i = total - 1; i >= 0 && added < needed; i -= 1) {
+        // A row can be unavailable because its club already has three players.
+        const add = rows.nth(i).getByRole("button", { name: /Добавить/ });
+        if (await add.isEnabled()) {
+          await add.click();
+          added += 1;
+        }
+      }
+      expect(added).toBe(needed);
+    }
     const pitch = page.getByTestId("squad-pitch");
-    for (let i = 0; i < 3; i += 1) {
-      await pitch.getByRole("button", { name: /^Убрать / }).first().click();
-    }
-    // Refill from the pool, which is sorted by projection, from the weak end.
-    const pool = page.getByTestId("pool-row");
-    const total = await pool.count();
-    for (let i = 0; i < 3; i += 1) {
-      await pool
-        .nth(total - 1 - i)
-        .getByRole("button", { name: /Добавить/ })
-        .click();
-    }
     await expect(page.getByTestId("valid-note")).toBeVisible();
 
     await expect(page.getByTestId("transfers-select")).toHaveValue("3");
