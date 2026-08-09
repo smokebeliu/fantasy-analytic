@@ -167,6 +167,24 @@ curl -s https://fantasy.smokebeliu.com/api/backend/health   # {"status":"ok"}
 - В Dokploy можно настроить автоматические резервные копии тома/БД во вкладке
   Backups.
 
+### Если домен отдаёт 502 Bad Gateway
+
+502 приходит от Traefik и означает, что до контейнера `frontend` не дошло
+соединение, даже если контейнер «running» и в его логах видно `✓ Ready`.
+`frontend` подключён к двум сетям (`fantasy-internal` и `dokploy-network`), а
+standalone-сервер Next.js слушает один адрес из `$HOSTNAME`, который Docker по
+умолчанию выставляет в id контейнера. Поэтому в `compose.prod.yaml` и в
+`frontend/Dockerfile` жёстко задан `HOSTNAME=0.0.0.0` — без него сервер может
+слушать только приватную сеть, недоступную Traefik.
+
+Проверка на VPS (должно быть `0.0.0.0:3000`, а не адрес `172.*`):
+
+```bash
+FE=$(docker ps --format '{{.Names}}' | grep -- '-frontend-1')
+docker exec "$FE" node -e "console.log(process.env.HOSTNAME)"
+docker exec "$FE" cat /proc/net/tcp   # listen-строки: st=0A
+```
+
 ## Что ещё нужно от вас
 
 1. **DNS** — создать `A`-запись `fantasy → 145.239.74.111` (шаг 1).
