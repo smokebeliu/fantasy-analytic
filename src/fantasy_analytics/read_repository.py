@@ -8,12 +8,20 @@ from the single *active* snapshot published by the quality gate (step 4).
 Projections and their explaining components are served from the persisted
 ``player_forecasts`` rows (step 7) for a given tour and model.
 
+Every player also carries a ``prior_season`` block: what the same person did in
+the previous season, resolved through the cross-season identity
+(``players.stat_player_id``) that step 14 already relies on. Early in a new
+season the current-season numbers are still nearly empty, so last season's
+points, average and rank are what actually tell a manager whether a player is
+worth buying.
+
 The repository returns plain, JSON-serialisable ``dict``s so the API layer only
 has to validate and shape them with Pydantic; it never commits or mutates data.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -32,10 +40,12 @@ from .db.models import (
     PlayerForecast,
     PlayerMatchStats,
     PlayerSeason,
+    PlayerSeasonStats,
     Season,
     SeasonClub,
     SeasonRules,
 )
+from .features import resolve_prior_run
 
 # Roles accepted by the ``role`` player filter.
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
@@ -273,6 +283,151 @@ class ReadRepository:
         return self._match_dict(row) if row is not None else None
 
     # ------------------------------------------------------------------
+    # Prior-season stats.
+    # ------------------------------------------------------------------
+    def _prior_season_context(
+        self, season_id: int
+    ) -> tuple[Season, IngestionRun] | None:
+        """Resolve the previous season and the snapshot its numbers come from.
+
+        Reuses the cross-season rule of the feature builder: the prior season is
+        another season of the same competition that has a published snapshot,
+        preferring the latest one that started earlier. Returns ``None`` when the
+        season is the only one imported, which simply means no player has a
+        prior-season block.
+        """
+        season = self._session.get(Season, season_id)
+        if season is None:
+            return None
+        prior_run = resolve_prior_run(self._session, season)
+        if prior_run is None or prior_run.season_id is None:
+            return None
+        prior_season = self._session.get(Season, prior_run.season_id)
+        if prior_season is None:
+            return None
+        return prior_season, prior_run
+
+    def prior_season_stats(
+        self, season_id: int, player_season_ids: Sequence[int]
+    ) -> dict[int, dict[str, Any]]:
+        """Map current ``player_season_id`` to that player's previous season.
+
+        One batched query per grain rather than a lookup per player, so listing
+        200 players costs three extra statements regardless of page size. The
+        link between the two seasons is ``player_seasons.player_id``, the same
+        cross-season identity the forecast uses.
+        """
+        ids = list(dict.fromkeys(player_season_ids))
+        if not ids:
+            return {}
+        context = self._prior_season_context(season_id)
+        if context is None:
+            return {}
+        prior_season, prior_run = context
+
+        current = PlayerSeason.__table__.alias("current_season")
+        prior = PlayerSeason.__table__.alias("prior_season")
+        snapshot = FantasyPlayerSnapshot.__table__.alias("prior_snapshot")
+        totals = PlayerSeasonStats.__table__.alias("prior_totals")
+        club = SeasonClub.__table__.alias("prior_club")
+
+        rows = self._session.execute(
+            select(
+                current.c.id.label("player_season_id"),
+                prior.c.id.label("prior_player_season_id"),
+                prior.c.role.label("prior_role"),
+                club.c.display_name.label("club_name"),
+                snapshot.c.season_score,
+                snapshot.c.average_score,
+                snapshot.c.rank,
+                snapshot.c.price,
+                totals.c.points.label("stat_points"),
+                totals.c.goals,
+                totals.c.assists,
+                totals.c.saves,
+                totals.c.ball_recoveries,
+                totals.c.yellow_cards,
+                totals.c.red_cards,
+                totals.c.goals_conceded,
+                totals.c.field_minutes,
+            )
+            .select_from(current)
+            .join(prior, prior.c.player_id == current.c.player_id)
+            .join(club, prior.c.current_season_club_id == club.c.id, isouter=True)
+            .join(
+                snapshot,
+                (snapshot.c.player_season_id == prior.c.id)
+                & (snapshot.c.ingestion_run_id == prior_run.id),
+                isouter=True,
+            )
+            .join(
+                totals,
+                (totals.c.player_season_id == prior.c.id)
+                & (totals.c.ingestion_run_id == prior_run.id),
+                isouter=True,
+            )
+            .where(
+                current.c.id.in_(ids),
+                prior.c.season_id == prior_season.id,
+            )
+        ).all()
+        if not rows:
+            return {}
+
+        appearances = self._prior_appearances(
+            [row.prior_player_season_id for row in rows], prior_run.id
+        )
+        return {
+            row.player_season_id: {
+                "season_id": prior_season.id,
+                "season_name": prior_season.name,
+                "player_season_id": row.prior_player_season_id,
+                "role": row.prior_role,
+                "club_name": row.club_name,
+                "points": row.season_score,
+                "average_points": _num(row.average_score),
+                "rank": row.rank,
+                "price": _num(row.price),
+                "matches": appearances.get(row.prior_player_season_id, 0),
+                "minutes": row.field_minutes,
+                "goals": row.goals,
+                "assists": row.assists,
+                "saves": row.saves,
+                "ball_recoveries": row.ball_recoveries,
+                "yellow_cards": row.yellow_cards,
+                "red_cards": row.red_cards,
+                "goals_conceded": row.goals_conceded,
+            }
+            for row in rows
+        }
+
+    def _prior_appearances(
+        self, prior_player_season_ids: Sequence[int], prior_run_id: int
+    ) -> dict[int, int]:
+        """Count matches the player actually appeared in last season.
+
+        ``player_season_stats`` aggregates minutes but not the number of games,
+        so appearances are counted from the per-match grain; a substitute who
+        never came on has a row with zero minutes and is not counted.
+        """
+        ids = [pid for pid in prior_player_season_ids if pid is not None]
+        if not ids:
+            return {}
+        rows = self._session.execute(
+            select(
+                PlayerMatchStats.player_season_id,
+                func.count().label("matches"),
+            )
+            .where(
+                PlayerMatchStats.player_season_id.in_(ids),
+                PlayerMatchStats.ingestion_run_id == prior_run_id,
+                PlayerMatchStats.field_minutes > 0,
+            )
+            .group_by(PlayerMatchStats.player_season_id)
+        ).all()
+        return {row.player_season_id: row.matches for row in rows}
+
+    # ------------------------------------------------------------------
     # Players.
     # ------------------------------------------------------------------
     def list_players(
@@ -396,7 +551,13 @@ class ReadRepository:
             *self._player_order(order, snapshot, forecast, join_snapshot, join_forecast)
         )
         rows = self._session.execute(base.limit(limit).offset(offset)).all()
-        return total, [self._player_row_dict(row) for row in rows]
+        prior = self.prior_season_stats(
+            season_id, [row.player_season_id for row in rows]
+        )
+        return total, [
+            self._player_row_dict(row, prior.get(row.player_season_id))
+            for row in rows
+        ]
 
     @staticmethod
     def _player_order(order, snapshot, forecast, join_snapshot, join_forecast):
@@ -430,7 +591,9 @@ class ReadRepository:
             "components": row.components,
         }
 
-    def _player_row_dict(self, row: Any) -> dict[str, Any]:
+    def _player_row_dict(
+        self, row: Any, prior_season: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         return {
             "player_season_id": row.player_season_id,
             "fantasy_player_id": row.fantasy_player_id,
@@ -448,6 +611,7 @@ class ReadRepository:
             "last_tour_score": row.last_tour_score,
             "rank": row.rank,
             "projection": self._projection_from_row(row),
+            "prior_season": prior_season,
         }
 
     def get_player(
@@ -495,6 +659,9 @@ class ReadRepository:
         payload["projection"] = self._player_projection(
             player_season_id, run_id, tour_id, model
         )
+        payload["prior_season"] = self.prior_season_stats(
+            row.season_id, [player_season_id]
+        ).get(player_season_id)
         payload["history"] = self._player_history(
             player_season_id, run_id, history_limit
         )

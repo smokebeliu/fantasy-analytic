@@ -13,6 +13,9 @@ The worker:
   ``ingestion_jobs`` partial unique index);
 * marks the job ``running``, executes the full import and then the quality gate,
   which publishes the snapshot only when no blocking issue is found;
+* materialises the forecast for the next unplayed tour once the snapshot is
+  published, so the freshly imported players arrive with a projection instead of
+  an empty «Прогноз» column;
 * mirrors the pipeline's progress messages onto the job row as a coarse stage
   (see :mod:`fantasy_analytics.ingestion_progress`) so the admin refresh UI
   (step 17) can show *what* is happening while it polls;
@@ -45,6 +48,7 @@ from .db import (
     session_scope,
 )
 from .db.models import IngestionRun
+from .forecast_service import ensure_next_tour_forecasts
 from .ingestion import IngestionOptions, ProgressCallback, run_ingestion
 from .ingestion_progress import (
     STAGE_FINISHED,
@@ -112,6 +116,7 @@ def _build_result(
     *,
     ingestion_report: dict[str, Any],
     quality_report: dict[str, Any],
+    forecast_rows: int = 0,
 ) -> dict[str, Any]:
     """Combine the import and quality reports and derive data freshness.
 
@@ -132,6 +137,7 @@ def _build_result(
         "quality": quality_report,
         "snapshot_active": published,
         "data_freshness": data_freshness,
+        "forecast_rows": forecast_rows,
         "completed_at": datetime.now(UTC).isoformat(),
     }
 
@@ -144,6 +150,7 @@ def execute_job(
     client: Any,
     run_ingestion_fn: Callable[..., dict[str, Any]] = run_ingestion,
     run_quality_fn: Callable[..., dict[str, Any]] = run_quality_checks,
+    build_forecasts_fn: Callable[..., int] = ensure_next_tour_forecasts,
     on_progress: ProgressCallback = _noop,
 ) -> str:
     """Run one ingestion job end to end and return its terminal status.
@@ -222,10 +229,23 @@ def execute_job(
 
             enter_stage("quality_gate", f"Running quality checks for run {run_id}")
             quality_report = run_quality_fn(session_factory, run_id=run_id)
+
+            # Only a published snapshot is worth forecasting: a blocked one is
+            # never read, and its projections would point at a run nobody sees.
+            forecast_rows = 0
+            if quality_report.get("is_active"):
+                enter_stage(
+                    "forecast", f"Forecasting the next tour for run {run_id}"
+                )
+                forecast_rows = build_forecasts_fn(
+                    session_factory, run_id=run_id, on_progress=report
+                )
+
             result = _build_result(
                 session_factory,
                 ingestion_report=ingestion_report,
                 quality_report=quality_report,
+                forecast_rows=forecast_rows,
             )
             with session_scope(session_factory) as session:
                 repo = IngestionJobRepository(session)

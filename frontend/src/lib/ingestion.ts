@@ -19,6 +19,7 @@ export const STAGE_LABELS: Record<string, string> = {
   fetch_history: "Загрузка истории матчей",
   persist: "Запись в базу",
   quality_gate: "Контроль качества",
+  forecast: "Расчёт прогноза",
   finished: "Готово",
 };
 

@@ -593,7 +593,7 @@ def _role_priors(
     return priors
 
 
-def _resolve_prior_run(session, season: Season):
+def resolve_prior_run(session, season: Season):
     """Return the active run of the season preceding ``season``, if any.
 
     A "prior season" is another season of the same competition with its own
@@ -1001,7 +1001,7 @@ def build_feature_dataset(
         # of returning an all-zero forecast. Once the season starts (any club
         # match exists before the cutoff) the pure current-season path is used,
         # so backtesting a finished season is unaffected.
-        prior_run = _resolve_prior_run(session, season) if season else None
+        prior_run = resolve_prior_run(session, season) if season else None
         cross_season = prior_run is not None and not club_matches
         prior = (
             _load_prior_context(session, prior_run, cutoff) if cross_season else None
@@ -1122,6 +1122,7 @@ __all__ = [
     "recent_before_cutoff",
     "per90",
     "load_appearances",
+    "resolve_prior_run",
     "resolve_run",
     "resolve_target_tour",
     "build_feature_dataset",

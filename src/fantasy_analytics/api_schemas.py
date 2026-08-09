@@ -161,6 +161,45 @@ class ProjectionModel(BaseModel):
     components: dict[str, float] | None = None
 
 
+class PriorSeasonModel(BaseModel):
+    """What the same player did in the previous season.
+
+    Early in a new season the current-season columns are nearly empty, so these
+    numbers are what a manager actually judges a player by. They come from the
+    previous season's published snapshot, matched through the cross-season
+    player identity, and are absent when only one season has been imported.
+    """
+
+    season_id: int
+    season_name: str | None = None
+    player_season_id: int
+    role: str | None = None
+    club_name: str | None = Field(
+        default=None, description="Club the player belonged to last season"
+    )
+    points: int | None = Field(
+        default=None, description="Fantasy points scored over the whole season"
+    )
+    average_points: float | None = None
+    rank: int | None = Field(
+        default=None, description="Fantasy rank inside the season (1 is best)"
+    )
+    price: float | None = Field(
+        default=None, description="Price at the end of the previous season"
+    )
+    matches: int | None = Field(
+        default=None, description="Matches with at least one minute played"
+    )
+    minutes: int | None = None
+    goals: int | None = None
+    assists: int | None = None
+    saves: int | None = None
+    ball_recoveries: int | None = None
+    yellow_cards: int | None = None
+    red_cards: int | None = None
+    goals_conceded: int | None = None
+
+
 class PlayerModel(BaseModel):
     player_season_id: int
     fantasy_player_id: str | None = None
@@ -178,6 +217,7 @@ class PlayerModel(BaseModel):
     last_tour_score: int | None = None
     rank: int | None = None
     projection: ProjectionModel | None = None
+    prior_season: PriorSeasonModel | None = None
 
 
 class PlayerHistoryEntry(BaseModel):
@@ -215,6 +255,7 @@ class PlayerDetailModel(BaseModel):
     last_tour_score: int | None = None
     rank: int | None = None
     projection: ProjectionModel | None = None
+    prior_season: PriorSeasonModel | None = None
     history: list[PlayerHistoryEntry] = Field(default_factory=list)
     snapshot: SnapshotMeta | None = None
 
@@ -407,6 +448,7 @@ __all__ = [
     "MatchModel",
     "MatchListResponse",
     "ProjectionModel",
+    "PriorSeasonModel",
     "PlayerModel",
     "PlayerDetailModel",
     "PlayerListResponse",
