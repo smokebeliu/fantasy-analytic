@@ -34,6 +34,7 @@ from fantasy_analytics.forecast import (
     SCORING,
     SCORING_VERSION,
     ForecastError,
+    _forecast_rows_for_player,
     appearance_probabilities,
     build_forecast_dataset,
     clean_sheet_probability,
@@ -211,6 +212,49 @@ class EventModelTest(unittest.TestCase):
     def test_deterministic(self) -> None:
         row = _feature_row(goals_per90=0.7, assists_per90=0.3)
         self.assertEqual(forecast_event_model(row), forecast_event_model(row))
+
+
+class FixtureExposureTest(unittest.TestCase):
+    """Step 16: the exposures the optimizer prices head-to-head clashes with."""
+
+    def test_goal_upside_is_the_goal_and_assist_points(self) -> None:
+        row = _feature_row(role="FORWARD", goals_per90=0.5, assists_per90=0.25)
+        result = forecast_event_model(row)
+        components = result["components"]
+        self.assertAlmostEqual(
+            result["fixture"]["goal_upside"],
+            components["goals"] + components["assists"],
+            places=4,
+        )
+
+    def test_shutout_stake_adds_the_concession_penalty(self) -> None:
+        # A full-time defender: forfeits the clean sheet and -1 per 2 conceded.
+        row = _feature_row(role="DEFENDER", p_appearance=1.0)
+        result = forecast_event_model(row)
+        self.assertAlmostEqual(
+            result["fixture"]["shutout_stake"],
+            result["components"]["clean_sheet"] + 0.5,
+            places=4,
+        )
+
+    def test_forward_has_nothing_to_lose_to_a_conceded_goal(self) -> None:
+        row = _feature_row(role="FORWARD", goals_per90=0.5)
+        self.assertEqual(forecast_event_model(row)["fixture"]["shutout_stake"], 0.0)
+
+    def test_unavailable_player_has_no_exposure(self) -> None:
+        row = _feature_row(role="DEFENDER", is_available=False, goals_per90=1.0)
+        fixture = forecast_event_model(row)["fixture"]
+        self.assertEqual(fixture, {"goal_upside": 0.0, "shutout_stake": 0.0})
+
+    def test_exposures_are_persisted_in_the_event_model_params(self) -> None:
+        rows = _forecast_rows_for_player(_feature_row(role="DEFENDER"), "2025-07-24")
+        event = next(row for row in rows if row["model_name"] == MODEL_EVENT)
+        self.assertIn("fixture", event["params"])
+        self.assertIn("goal_upside", event["params"]["fixture"])
+        # The baselines do not decompose their points into events.
+        for row in rows:
+            if row["model_name"] != MODEL_EVENT:
+                self.assertIsNone(row["params"])
 
 
 class BaselineTest(unittest.TestCase):

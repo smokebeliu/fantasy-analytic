@@ -260,6 +260,14 @@ class SquadRequest(BaseModel):
             "goalkeepers fill the remaining starting slots"
         ),
     )
+    fixture_conflict_weight: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "How hard starters that meet each other in the tour are penalised "
+            "(default 0.25); 0 ignores the schedule but still reports clashes"
+        ),
+    )
 
 
 class TransfersRequest(SquadRequest):
@@ -286,6 +294,9 @@ class SquadPlayerModel(BaseModel):
     opponent_name: str | None = None
     is_home: bool | None = None
     match_id: int | None = None
+    opponent_club_id: int | None = None
+    goal_upside: float | None = None
+    shutout_stake: float | None = None
     p_appearance: float | None = None
     expected_minutes: float | None = None
     stat_source: str | None = None

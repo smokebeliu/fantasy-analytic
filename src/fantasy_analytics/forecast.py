@@ -15,6 +15,11 @@ deliberately an *interpretable* baseline, not a black box:
   versioned scoring table (:data:`SCORING`), reconstructed from the season's
   own per-match points, so ``expected_points`` is the exact sum of its
   ``components``.
+* **Fixture-linked exposures.** Alongside the components, each event forecast
+  reports how much of it rides on the player's own club scoring
+  (``goal_upside``) and how much is lost per goal their opponent scores
+  (``shutout_stake``). The squad optimizer (step 16) uses the pair to price the
+  anti-correlation between a defence and the attack it faces.
 
 Two trivial baselines (season mean and recent form) are produced alongside the
 event model so the main model can always be compared against them. Every
@@ -206,9 +211,10 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
     """Interpretable event-based forecast for one feature row.
 
     Returns a dict with ``expected_points`` (the exact sum of ``components``),
-    an ``uncertainty`` standard deviation and the intermediate expectations. An
-    unavailable player (``is_available`` false or ``p_appearance`` 0) scores a
-    flat zero so it never enters a squad.
+    an ``uncertainty`` standard deviation, the ``fixture`` exposures the
+    optimizer prices and the intermediate expectations. An unavailable player
+    (``is_available`` false or ``p_appearance`` 0) scores a flat zero so it never
+    enters a squad.
     """
     role = row["role"]
     scoring = SCORING.get(role)
@@ -269,15 +275,32 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
         "yellow_cards": round(yellow_pts, 4),
     }
 
-    if not is_available or p_appearance <= 0.0:
+    playing = is_available and p_appearance > 0.0
+    if not playing:
         components = {key: 0.0 for key in components}
 
     expected_points = round(sum(components.values()), 4)
 
+    # Fixture-linked exposures (step 16). ``goal_upside`` is the part of the
+    # forecast that only materialises when the player's own club scores, and
+    # ``shutout_stake`` is what the player forfeits per goal their opponent
+    # scores: the clean sheet they lose plus the concession penalty. For two
+    # players on opposite sides of one fixture, ``goal_upside * shutout_stake``
+    # (both ways round) is exactly the magnitude of the covariance of their two
+    # forecasts under this Poisson goal model, because the Poisson mean cancels
+    # out of ``Cov(1{G=0}, G) = -P(G=0) * lambda`` and ``Var(G) = lambda``.
+    conceded_per_goal = (
+        (-scoring.conceded_per_two / 2.0) * p_appearance if playing else 0.0
+    )
+    fixture = {
+        "goal_upside": round(components["goals"] + components["assists"], 4),
+        "shutout_stake": round(components["clean_sheet"] + conceded_per_goal, 4),
+    }
+
     # Uncertainty: standard deviation from independent component variances.
     # Counts are treated as Poisson (Var = mean); the two Bernoulli terms use
     # p(1-p). This is a documented approximation, not a calibrated interval.
-    if not is_available or p_appearance <= 0.0:
+    if not playing:
         uncertainty = 0.0
     else:
         variance = (
@@ -299,6 +322,7 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
         "expected_points": expected_points,
         "uncertainty": uncertainty,
         "components": components,
+        "fixture": fixture,
         "expected": {
             "goals": round(exp_goals, 4),
             "assists": round(exp_assists, 4),
@@ -402,7 +426,7 @@ def _forecast_rows_for_player(
             "expected_points": event["expected_points"],
             "uncertainty": event["uncertainty"],
             "components": event["components"],
-            "params": {"expected": event["expected"]},
+            "params": {"expected": event["expected"], "fixture": event["fixture"]},
         },
         {
             **common,

@@ -198,6 +198,61 @@ class OfflineAppTest(unittest.TestCase):
         self.assertEqual(["111"], kwargs["locked_starters"])
         self.assertEqual("3-5-2", kwargs["formation"])
 
+    def test_optimizer_forwards_the_fixture_conflict_weight(self) -> None:
+        with mock.patch(
+            "fantasy_analytics.api.build_squad_optimization",
+            return_value={
+                "optimizer_version": "1.2.0",
+                "model": "poisson_events",
+                "mode": "squad",
+                "generated_at": "2026-08-09T00:00:00+00:00",
+                "run_id": 1,
+                "season_id": 1,
+                "season": {},
+                "tour": {},
+                "rules": {},
+                "counts": {"clashes": 0},
+                "solution": {"status": "OPTIMAL", "fixture_penalty": 0.0},
+                "valid": True,
+            },
+        ) as builder:
+            response = self._client().post(
+                "/optimizer/squad",
+                json={"tour": "1786", "fixture_conflict_weight": 0},
+            )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(0.0, builder.call_args.kwargs["fixture_conflict_weight"])
+
+    def test_optimizer_rejects_negative_fixture_conflict_weight(self) -> None:
+        response = self._client().post(
+            "/optimizer/squad",
+            json={"tour": "1786", "fixture_conflict_weight": -1},
+        )
+        self.assertEqual(422, response.status_code)
+        self.assertEqual("validation_error", response.json()["error"]["type"])
+
+    def test_optimizer_defaults_the_fixture_conflict_weight_to_none(self) -> None:
+        # Omitting the setting must let the optimizer apply its own default.
+        with mock.patch(
+            "fantasy_analytics.api.build_squad_optimization",
+            return_value={
+                "optimizer_version": "1.2.0",
+                "model": "poisson_events",
+                "mode": "squad",
+                "generated_at": "2026-08-09T00:00:00+00:00",
+                "run_id": 1,
+                "season_id": 1,
+                "season": {},
+                "tour": {},
+                "rules": {},
+                "counts": {},
+                "solution": {"status": "OPTIMAL"},
+                "valid": True,
+            },
+        ) as builder:
+            self._client().post("/optimizer/squad", json={"tour": "1786"})
+        self.assertIsNone(builder.call_args.kwargs["fixture_conflict_weight"])
+
     def test_optimizer_rejects_malformed_formation(self) -> None:
         response = self._client().post(
             "/optimizer/squad", json={"tour": "1786", "formation": "4x4x2"}

@@ -1212,6 +1212,19 @@
       },
       "SquadRequest": {
         "properties": {
+          "fixture_conflict_weight": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How hard starters that meet each other in the tour are penalised (default 0.25); 0 ignores the schedule but still reports clashes",
+            "title": "Fixture Conflict Weight"
+          },
           "formation": {
             "anyOf": [
               {
@@ -1421,6 +1434,19 @@
             "minItems": 1,
             "title": "Current Squad",
             "type": "array"
+          },
+          "fixture_conflict_weight": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How hard starters that meet each other in the tour are penalised (default 0.25); 0 ignores the schedule but still reports clashes",
+            "title": "Fixture Conflict Weight"
           },
           "formation": {
             "anyOf": [
