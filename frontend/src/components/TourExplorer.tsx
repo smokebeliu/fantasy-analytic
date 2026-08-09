@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import type {
   ForecastModel,
-  PlayerListResponse,
   PlayerModel,
   PlayerOrder,
   Role,
@@ -12,6 +11,7 @@ import type {
   TourModel,
 } from "@/lib/types";
 import { ROLE_LABELS, ROLES } from "@/lib/squad";
+import { sortPlayers } from "@/lib/players";
 import { PlayerTable } from "./PlayerTable";
 import { PlayerDrawer } from "./PlayerDrawer";
 import { CompareModal } from "./CompareModal";
@@ -20,6 +20,9 @@ import { formatDateTime } from "@/lib/format";
 
 const PAGE_SIZE = 50;
 const MAX_COMPARE = 4;
+// The read API caps a page at 200 rows, so the full season working set is loaded
+// in a few requests and then sorted/paginated on the client.
+const FETCH_PAGE = 200;
 const MODELS: ForecastModel[] = ["poisson_events", "season_mean", "recent_form"];
 
 interface Filters {
@@ -52,13 +55,15 @@ export function TourExplorer({
   tours: TourModel[];
   defaultTourId: number;
 }) {
-  const [tourId, setTourId] = useState(defaultTourId);
+  // Projections are tour-specific; with the tour filter removed the table shows
+  // full-season stats and implicitly projects the upcoming (default) tour.
+  const projectionTourId = defaultTourId;
   const [model, setModel] = useState<ForecastModel>("poisson_events");
-  const [order, setOrder] = useState<PlayerOrder>("projection");
+  const [order, setOrder] = useState<PlayerOrder>("season_score");
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [offset, setOffset] = useState(0);
 
-  const [data, setData] = useState<PlayerListResponse | null>(null);
+  const [players, setPlayers] = useState<PlayerModel[]>([]);
   const [snapshot, setSnapshot] = useState<SnapshotMeta | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -71,17 +76,17 @@ export function TourExplorer({
   const [compare, setCompare] = useState<PlayerModel[]>([]);
   const [compareOpen, setCompareOpen] = useState(false);
 
-  const selectedTour = useMemo(
-    () => tours.find((t) => t.tour_id === tourId),
-    [tours, tourId],
+  const projectionTour = useMemo(
+    () => tours.find((t) => t.tour_id === projectionTourId),
+    [tours, projectionTourId],
   );
 
   // Build club and status dropdowns from a single broad player fetch (all 16
-  // clubs appear well within the first page). Refreshed when the tour changes.
+  // clubs appear well within the first page). Refreshed when the season changes.
   useEffect(() => {
     let active = true;
     api
-      .listPlayers({ season_id: seasonId, order: "name", limit: 200 })
+      .listPlayers({ season_id: seasonId, order: "name", limit: FETCH_PAGE })
       .then((res) => {
         if (!active) return;
         const clubMap = new Map<number, string>();
@@ -105,42 +110,54 @@ export function TourExplorer({
     };
   }, [seasonId]);
 
+  // Load the whole filtered working set once; sorting and pagination then happen
+  // on the client so switching the sort column never triggers a server request.
   useEffect(() => {
     let active = true;
     setLoading(true);
     setError(null);
-    api
-      .listPlayers({
-        season_id: seasonId,
-        tour_id: tourId,
-        model,
-        order,
-        role: filters.role || undefined,
-        club_id: filters.clubId === "" ? undefined : filters.clubId,
-        status: filters.status || undefined,
-        min_price: filters.minPrice ? Number(filters.minPrice) : undefined,
-        max_price: filters.maxPrice ? Number(filters.maxPrice) : undefined,
-        limit: PAGE_SIZE,
-        offset,
-      })
-      .then((res) => {
-        if (!active) return;
-        setData(res);
-        if (res.snapshot) setSnapshot(res.snapshot);
-      })
-      .catch((err: unknown) => {
-        if (active) {
-          setError(err instanceof ApiError ? err.message : "Неизвестная ошибка");
-          setData(null);
+
+    (async () => {
+      try {
+        const acc: PlayerModel[] = [];
+        let snap: SnapshotMeta | null = null;
+        let page = 0;
+        for (;;) {
+          const res = await api.listPlayers({
+            season_id: seasonId,
+            tour_id: projectionTourId,
+            model,
+            order: "name",
+            role: filters.role || undefined,
+            club_id: filters.clubId === "" ? undefined : filters.clubId,
+            status: filters.status || undefined,
+            min_price: filters.minPrice ? Number(filters.minPrice) : undefined,
+            max_price: filters.maxPrice ? Number(filters.maxPrice) : undefined,
+            limit: FETCH_PAGE,
+            offset: page * FETCH_PAGE,
+          });
+          acc.push(...res.items);
+          if (res.snapshot) snap = res.snapshot;
+          page += 1;
+          if (res.items.length === 0 || acc.length >= res.pagination.total) break;
         }
-      })
-      .finally(() => {
+        if (!active) return;
+        setPlayers(acc);
+        if (snap) setSnapshot(snap);
+        setOffset(0);
+      } catch (err: unknown) {
+        if (!active) return;
+        setError(err instanceof ApiError ? err.message : "Неизвестная ошибка");
+        setPlayers([]);
+      } finally {
         if (active) setLoading(false);
-      });
+      }
+    })();
+
     return () => {
       active = false;
     };
-  }, [seasonId, tourId, model, order, filters, offset, reloadKey]);
+  }, [seasonId, projectionTourId, model, filters, reloadKey]);
 
   const updateFilter = useCallback(<K extends keyof Filters>(key: K, value: Filters[K]) => {
     setFilters((prev) => ({ ...prev, [key]: value }));
@@ -158,30 +175,18 @@ export function TourExplorer({
     });
   }, []);
 
+  const sorted = useMemo(() => sortPlayers(players, order), [players, order]);
+  const pageItems = useMemo(
+    () => sorted.slice(offset, offset + PAGE_SIZE),
+    [sorted, offset],
+  );
+
   const compareIds = compare.map((p) => p.player_season_id);
-  const items = data?.items ?? [];
-  const pagination = data?.pagination;
+  const total = players.length;
 
   return (
     <div>
       <div className="panel toolbar" data-testid="toolbar">
-        <div className="field">
-          <label htmlFor="tour">Тур</label>
-          <select
-            id="tour"
-            value={tourId}
-            onChange={(e) => {
-              setTourId(Number(e.target.value));
-              setOffset(0);
-            }}
-          >
-            {tours.map((t) => (
-              <option key={t.tour_id} value={t.tour_id}>
-                {t.name} {t.status === "FINISHED" ? "✓" : ""}
-              </option>
-            ))}
-          </select>
-        </div>
         <div className="field">
           <label htmlFor="model">Модель</label>
           <select
@@ -279,33 +284,31 @@ export function TourExplorer({
         </button>
       </div>
 
-      {selectedTour && (
-        <p className="inline-note" style={{ margin: "0 0 12px" }}>
-          Дедлайн трансферов:{" "}
-          {formatDateTime(selectedTour.transfers_deadline_at ?? selectedTour.starts_at)}{" "}
-          · лимит из клуба: {selectedTour.max_same_team_players ?? "—"} · трансферов:{" "}
-          {selectedTour.total_transfers ?? "—"}
-          {snapshot?.data_freshness && (
-            <> · данные от {formatDateTime(snapshot.data_freshness)}</>
-          )}
-        </p>
-      )}
+      <p className="inline-note" style={{ margin: "0 0 12px" }}>
+        Полная статистика сезона на текущий момент.
+        {projectionTour && (
+          <> Прогноз в колонке «Прогноз» рассчитан на ближайший тур: {projectionTour.name}.</>
+        )}
+        {snapshot?.data_freshness && (
+          <> Данные от {formatDateTime(snapshot.data_freshness)}.</>
+        )}
+      </p>
 
       <div className="panel">
         {loading && <TableSkeleton />}
         {!loading && error && (
           <ErrorState message={error} onRetry={() => setReloadKey((k) => k + 1)} />
         )}
-        {!loading && !error && items.length === 0 && (
+        {!loading && !error && total === 0 && (
           <EmptyState
             title="Игроки не найдены"
-            hint="Измените фильтры или выберите другой тур."
+            hint="Измените фильтры, чтобы увидеть больше игроков."
           />
         )}
-        {!loading && !error && items.length > 0 && (
+        {!loading && !error && total > 0 && (
           <>
             <PlayerTable
-              players={items}
+              players={pageItems}
               order={order}
               onOrderChange={(o) => {
                 setOrder(o);
@@ -316,28 +319,25 @@ export function TourExplorer({
               onToggleCompare={toggleCompare}
               canCompareMore={compare.length < MAX_COMPARE}
             />
-            {pagination && (
-              <div className="pagination">
-                <span>
-                  {pagination.offset + 1}–
-                  {pagination.offset + pagination.count} из {pagination.total}
-                </span>
-                <button
-                  className="btn btn--sm"
-                  disabled={offset === 0}
-                  onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-                >
-                  ← Назад
-                </button>
-                <button
-                  className="btn btn--sm"
-                  disabled={offset + pagination.count >= pagination.total}
-                  onClick={() => setOffset(offset + PAGE_SIZE)}
-                >
-                  Вперёд →
-                </button>
-              </div>
-            )}
+            <div className="pagination">
+              <span>
+                {offset + 1}–{offset + pageItems.length} из {total}
+              </span>
+              <button
+                className="btn btn--sm"
+                disabled={offset === 0}
+                onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+              >
+                ← Назад
+              </button>
+              <button
+                className="btn btn--sm"
+                disabled={offset + PAGE_SIZE >= total}
+                onClick={() => setOffset(offset + PAGE_SIZE)}
+              >
+                Вперёд →
+              </button>
+            </div>
           </>
         )}
       </div>
@@ -373,7 +373,7 @@ export function TourExplorer({
       {drawerId != null && (
         <PlayerDrawer
           playerSeasonId={drawerId}
-          tourId={tourId}
+          tourId={projectionTourId}
           model={model}
           onClose={() => setDrawerId(null)}
         />

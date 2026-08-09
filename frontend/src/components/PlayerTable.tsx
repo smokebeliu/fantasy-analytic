@@ -17,7 +17,7 @@ const COLUMNS: Column[] = [
   { key: "price", label: "Цена", order: "price", numeric: true },
   { key: "projection", label: "Прогноз", order: "projection", numeric: true },
   { key: "form", label: "Форма", numeric: true },
-  { key: "season_score", label: "Очки", numeric: true },
+  { key: "season_score", label: "Очки", order: "season_score", numeric: true },
   { key: "selected_by", label: "Выбор", order: "selected_by", numeric: true },
   { key: "compare", label: "" },
 ];
