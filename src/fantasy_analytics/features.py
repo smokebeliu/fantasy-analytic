@@ -276,7 +276,7 @@ FEATURE_DICTIONARY: tuple[dict[str, str], ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _resolve_run(session, run_id: int | None, season_ref: str | None):
+def resolve_run(session, run_id: int | None, season_ref: str | None):
     """Resolve the ingestion run whose snapshot the features are built from.
 
     With an explicit ``run_id`` that run is used. Otherwise the single active
@@ -434,7 +434,7 @@ def _load_club_matches(
     return by_club
 
 
-def _load_appearances(
+def load_appearances(
     session, season_id: int, run_id: int
 ) -> dict[int, list[Appearance]]:
     rows = session.execute(
@@ -637,7 +637,7 @@ def _load_prior_context(session, prior_run, cutoff: datetime) -> PriorContext:
     """Load the prior season's history keyed by the cross-season identities."""
     season_id = prior_run.season_id
     run_id = prior_run.id
-    appearances = _load_appearances(session, season_id, run_id)
+    appearances = load_appearances(session, season_id, run_id)
     club_matches = _load_club_matches(session, season_id, run_id, cutoff)
     players = _load_players(session, season_id)
     season_clubs = _load_season_clubs(session, season_id)
@@ -981,7 +981,7 @@ def build_feature_dataset(
     """
     generated_at = now or datetime.now(UTC)
     with session_scope(session_factory) as session:
-        run = _resolve_run(session, run_id, season_ref)
+        run = resolve_run(session, run_id, season_ref)
         season_id = run.season_id
         season = session.get(Season, season_id)
 
@@ -991,7 +991,7 @@ def build_feature_dataset(
         target_match_ids = frozenset(f.match_id for f in fixtures)
 
         club_matches = _load_club_matches(session, season_id, run.id, cutoff)
-        appearances = _load_appearances(session, season_id, run.id)
+        appearances = load_appearances(session, season_id, run.id)
         snapshots = _load_snapshots(session, run.id)
         players = _load_players(session, season_id)
         season_clubs = _load_season_clubs(session, season_id)
@@ -1121,6 +1121,8 @@ __all__ = [
     "PriorContext",
     "recent_before_cutoff",
     "per90",
+    "load_appearances",
+    "resolve_run",
     "resolve_target_tour",
     "build_feature_dataset",
 ]

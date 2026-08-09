@@ -14,6 +14,306 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "IngestionJobModel": {
+        "description": "A manual refresh job as the admin UI sees it.",
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "data_freshness": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Snapshot time published by a successful job",
+            "title": "Data Freshness"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "ingestion_run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ingestion Run Id"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngestionProgressModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requested_season_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested Season Id"
+          },
+          "requested_season_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested Season Name"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "succeeded",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tournament_slug": {
+            "title": "Tournament Slug",
+            "type": "string"
+          },
+          "trigger_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger Type"
+          },
+          "use_current_season": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Current Season"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "tournament_slug"
+        ],
+        "title": "IngestionJobModel",
+        "type": "object"
+      },
+      "IngestionProgressModel": {
+        "description": "Coarse progress of a running refresh (see ingestion_progress.STAGES).",
+        "properties": {
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Latest progress note from the pipeline",
+            "title": "Message"
+          },
+          "percent": {
+            "description": "Rough completion percentage",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Percent",
+            "type": "integer"
+          },
+          "stage": {
+            "description": "Machine-readable stage key",
+            "title": "Stage",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "stage",
+          "percent"
+        ],
+        "title": "IngestionProgressModel",
+        "type": "object"
+      },
+      "IngestionStatusResponse": {
+        "description": "Everything the admin refresh screen needs in a single request.\n\nIt is deliberately answerable without knowing a job id, so a page reload\n(or a second browser tab) recovers the state of an in-flight refresh.",
+        "properties": {
+          "active_job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngestionJobModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "is_refreshing": {
+            "description": "True while a pending/running job exists for the tournament",
+            "title": "Is Refreshing",
+            "type": "boolean"
+          },
+          "latest_job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngestionJobModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_successful_job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngestionJobModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "season": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SeasonModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnapshotMeta"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Active snapshot of the season shown in the UI"
+          },
+          "stages": {
+            "description": "Ordered stage vocabulary with completion percentages",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Stages",
+            "type": "array"
+          },
+          "target_tour": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TourModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Next non-finished tour, else the last one"
+          },
+          "tournament_slug": {
+            "title": "Tournament Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tournament_slug",
+          "is_refreshing"
+        ],
+        "title": "IngestionStatusResponse",
+        "type": "object"
+      },
       "MatchListResponse": {
         "properties": {
           "items": {
@@ -1639,6 +1939,28 @@
         ]
       }
     },
+    "/admin/ingestion/rpl/status": {
+      "get": {
+        "description": "Report refresh state plus the snapshot and tour the UI should show.\n\nThe admin screen calls this on load (and while polling), so it never has\nto remember a job id: an in-flight refresh is discovered from the\ndatabase, which is also what makes a second browser tab consistent.",
+        "operationId": "ingestion_status_admin_ingestion_rpl_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Ingestion Status",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/admin/ingestion/runs/{job_id}": {
       "get": {
         "operationId": "get_run_admin_ingestion_runs__job_id__get",
@@ -1658,9 +1980,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Run Admin Ingestion Runs  Job Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/IngestionJobModel"
                 }
               }
             },
