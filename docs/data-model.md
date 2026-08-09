@@ -110,7 +110,7 @@ These values demonstrably vary by tour. Optimizer constraints must come from
 | `stat_season.stats(id)` | `club_season_stats` |
 | Derived match scores | `club_match_stats`, `club_season_stats` |
 | Quality-gate violations (step 4) | `data_quality_issues` |
-| Points forecasts (step 7) | `player_forecasts` |
+| Points forecasts (step 7), cross-season source (step 14) | `player_forecasts` |
 
 ## Extended match statistics
 
@@ -320,6 +320,39 @@ touch the data model are:
   produced solution without trusting the solver, so a model bug surfaces as a
   validation failure rather than an invalid squad, and an infeasible problem
   raises a clear `OptimizerError`.
+
+## Cross-season forecast (step 14)
+
+The forecast pipeline builds a squad for the **first tour of a new season** out
+of the **previous** season's data, then transitions to current data as the new
+season plays out. It reuses the existing feature/forecast/optimizer path and
+adds no new tables beyond two provenance columns on `player_forecasts`
+(`stat_source`, `has_history`, migration `0005`).
+
+- **Cross-season identities.** Seasons are joined through the already-imported
+  identities: `players.stat_player_id` (a player shared across seasons keeps one
+  `players.id`) and `clubs.stat_team_id` (a club keeps one `clubs.id`). Because
+  `club_match_stats.club_id` and `matches.home/away_club_id` reference the shared
+  `clubs.id`, the prior season's club strength joins straight onto the active
+  season's fixtures.
+- **Season-level switch.** `features.py` sources history from the prior season
+  only while the active season has **no** club match before the cutoff and a
+  prior season of the same competition has an active snapshot. The moment the
+  season produces a played match the pure current-season path resumes, so a
+  finished season's backtest is unchanged.
+- **Player resolution.** A returning player is matched by the shared
+  `player_id`; their appearance/start shares use the prior club they actually
+  played for (a transfer keeps its record), while venue and opponent come from
+  the active club. A departed player has no active `player_season` and drops out
+  of the candidate pool. A newcomer with no prior history is scored from
+  documented, position-based role priors and flagged `is_newcomer` /
+  `has_history = false`.
+- **Provenance.** Every feature and forecast row carries a `stat_source`
+  (`current_season` / `prior_season`); it is persisted on `player_forecasts` and
+  exposed through the read API projection so the frontend visually separates last
+  season's numbers from the ones collected this season (steps 12–13). Team and
+  opponent *strength* coefficients and fixture-aware co-selection remain out of
+  scope (steps 16 and 18).
 
 ## Questions left for the next discovery iteration
 

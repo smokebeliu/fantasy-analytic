@@ -48,10 +48,29 @@ from .db.models import (
 # Bumped whenever the feature set or its computation changes so that datasets
 # built by different code revisions never get silently mixed.
 # 1.1.0 added the per-90 rates the event-based forecast (step 7) consumes.
-FEATURE_VERSION = "1.1.0"
+# 1.2.0 added cross-season sourcing (step 14): when the target season has not
+#   started yet, a player's history is drawn from the prior season by the shared
+#   cross-season identity, every row carries a ``stat_source`` label, and
+#   newcomers without any prior history get documented role priors.
+FEATURE_VERSION = "1.2.0"
+
+ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
 
 # Rolling look-back windows (in appearances) required by the plan.
 ROLLING_WINDOWS = (3, 5, 10)
+
+# ``stat_source`` marks where a row's history came from so the frontend can
+# visually separate last season's numbers from the ones collected this season.
+STAT_SOURCE_CURRENT = "current_season"
+STAT_SOURCE_PRIOR = "prior_season"
+
+# Documented priors applied to a newcomer that has no history in the prior
+# season (step 14). Offensive/defensive per-90 rates default to the role average
+# from the prior season, discounted because an unknown player is riskier than a
+# proven one; the appearance probability is a conservative constant. These are
+# deliberately position-based; refining them by price/club is left to step 18.
+NEWCOMER_P_APPEARANCE = 0.5
+NEWCOMER_RATE_FACTOR = 0.7
 
 # A player is credited with a "start" when they played at least this many
 # minutes. Sports.ru does not import an explicit lineup flag, so start share is
@@ -118,6 +137,39 @@ class Fixture:
     club_id: int
     opponent_club_id: int
     is_home: bool
+
+
+@dataclass(frozen=True)
+class RolePrior:
+    """Position-based per-90 priors used for newcomers (step 14)."""
+
+    goals_per90: float
+    assists_per90: float
+    saves_per90: float
+    recoveries_per90: float
+    yellows_per90: float
+    mean_minutes: float
+
+
+@dataclass(frozen=True)
+class PriorPlayer:
+    """A player's prior-season identity, resolved by the shared ``player_id``."""
+
+    player_season_id: int
+    club_id: int | None
+    role: str
+
+
+@dataclass(frozen=True)
+class PriorContext:
+    """Everything needed to source a target-tour row from the prior season."""
+
+    run_id: int
+    season_id: int
+    appearances: dict[int, list[Appearance]]
+    club_matches: dict[int, list[ClubMatch]]
+    by_player_id: dict[int, PriorPlayer]
+    role_priors: dict[str, RolePrior]
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +265,9 @@ FEATURE_DICTIONARY: tuple[dict[str, str], ...] = (
     {"name": "club_defense", "description": "Club goals conceded per match at the fixture venue; league mean when no venue matches yet."},
     {"name": "opponent_attack", "description": "Opponent goals scored per match at their fixture venue; league mean fallback."},
     {"name": "opponent_defense", "description": "Opponent goals conceded per match at their fixture venue; league mean fallback."},
-    {"name": "has_history", "description": "True when the player has at least one appearance before cutoff."},
+    {"name": "has_history", "description": "True when the player has at least one appearance in the sourced history."},
+    {"name": "stat_source", "description": "Where the history came from: 'current_season' or 'prior_season' (cross-season backfill while the target season has not started)."},
+    {"name": "is_newcomer", "description": "True when the player has no prior-season history and is scored from documented role priors."},
 )
 
 
@@ -448,6 +502,7 @@ def _load_players(session, season_id: int) -> list[dict[str, Any]]:
     rows = session.execute(
         select(
             PlayerSeason.id,
+            PlayerSeason.player_id,
             PlayerSeason.fantasy_player_id,
             PlayerSeason.role,
             PlayerSeason.current_season_club_id,
@@ -459,12 +514,13 @@ def _load_players(session, season_id: int) -> list[dict[str, Any]]:
     return [
         {
             "player_season_id": pid,
+            "player_id": player_id,
             "fantasy_player_id": fantasy_id,
             "role": role,
             "current_season_club_id": season_club_id,
             "player_name": name,
         }
-        for pid, fantasy_id, role, season_club_id, name in rows
+        for pid, player_id, fantasy_id, role, season_club_id, name in rows
     ]
 
 
@@ -479,6 +535,189 @@ def _load_season_clubs(session, season_id: int) -> dict[int, dict[str, Any]]:
     return {
         season_club_id: {"club_id": club_id, "display_name": name}
         for season_club_id, club_id, name in rows
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cross-season sourcing (step 14).
+# ---------------------------------------------------------------------------
+
+
+def _role_priors(
+    appearances_by_ps: dict[int, list[Appearance]],
+    role_by_ps: dict[int, str],
+) -> dict[str, RolePrior]:
+    """Aggregate the prior season into per-role per-90 priors for newcomers.
+
+    Rates are pooled across every appearance of a role (so they are minute-
+    weighted), and ``mean_minutes`` is the average minutes of a single
+    appearance. A role without any prior appearance yields an all-zero prior.
+    """
+    totals: dict[str, dict[str, int]] = {}
+    for ps_id, appearances in appearances_by_ps.items():
+        role = role_by_ps.get(ps_id)
+        if role is None:
+            continue
+        agg = totals.setdefault(
+            role,
+            {
+                "minutes": 0,
+                "count": 0,
+                "goals": 0,
+                "assists": 0,
+                "saves": 0,
+                "recoveries": 0,
+                "yellows": 0,
+            },
+        )
+        for appearance in appearances:
+            agg["minutes"] += appearance.minutes
+            agg["count"] += 1
+            agg["goals"] += appearance.goals
+            agg["assists"] += appearance.assists
+            agg["saves"] += appearance.saves
+            agg["recoveries"] += appearance.ball_recoveries
+            agg["yellows"] += appearance.yellow_cards
+
+    priors: dict[str, RolePrior] = {}
+    for role, agg in totals.items():
+        minutes = agg["minutes"]
+        priors[role] = RolePrior(
+            goals_per90=per90(agg["goals"], minutes),
+            assists_per90=per90(agg["assists"], minutes),
+            saves_per90=per90(agg["saves"], minutes),
+            recoveries_per90=per90(agg["recoveries"], minutes),
+            yellows_per90=per90(agg["yellows"], minutes),
+            mean_minutes=round(minutes / agg["count"], 2) if agg["count"] else 0.0,
+        )
+    return priors
+
+
+def _resolve_prior_run(session, season: Season):
+    """Return the active run of the season preceding ``season``, if any.
+
+    A "prior season" is another season of the same competition with its own
+    published (active) snapshot. The immediately-preceding season (the latest
+    one starting before the target) is preferred; when none starts earlier the
+    latest other season is used as a fallback. Returns ``None`` when the target
+    season is the only one imported, which disables cross-season sourcing.
+    """
+    from .db.models import IngestionRun
+
+    rows = session.execute(
+        select(IngestionRun, Season.starts_at)
+        .join(Season, IngestionRun.season_id == Season.id)
+        .where(
+            IngestionRun.is_active.is_(True),
+            Season.competition_id == season.competition_id,
+            Season.id != season.id,
+        )
+    ).all()
+    if not rows:
+        return None
+
+    target_start = season.starts_at
+    earlier = [
+        item
+        for item in rows
+        if item[1] is not None
+        and target_start is not None
+        and item[1] < target_start
+    ]
+    pool = earlier or rows
+
+    def _key(item):
+        run, starts_at = item
+        return (starts_at is not None, starts_at, run.id)
+
+    return max(pool, key=_key)[0]
+
+
+def _load_prior_context(session, prior_run, cutoff: datetime) -> PriorContext:
+    """Load the prior season's history keyed by the cross-season identities."""
+    season_id = prior_run.season_id
+    run_id = prior_run.id
+    appearances = _load_appearances(session, season_id, run_id)
+    club_matches = _load_club_matches(session, season_id, run_id, cutoff)
+    players = _load_players(session, season_id)
+    season_clubs = _load_season_clubs(session, season_id)
+
+    role_by_ps = {p["player_season_id"]: p["role"] for p in players}
+    by_player_id: dict[int, PriorPlayer] = {}
+    for player in players:
+        season_club_id = player["current_season_club_id"]
+        club_info = season_clubs.get(season_club_id) if season_club_id else None
+        by_player_id[player["player_id"]] = PriorPlayer(
+            player_season_id=player["player_season_id"],
+            club_id=club_info["club_id"] if club_info else None,
+            role=player["role"],
+        )
+    role_priors = _role_priors(appearances, role_by_ps)
+    return PriorContext(
+        run_id=run_id,
+        season_id=season_id,
+        appearances=appearances,
+        club_matches=club_matches,
+        by_player_id=by_player_id,
+        role_priors=role_priors,
+    )
+
+
+def _resolve_history_source(
+    player: dict[str, Any],
+    active_club_id: int | None,
+    *,
+    cross_season: bool,
+    appearances: dict[int, list[Appearance]],
+    current_club_matches: dict[int, list[ClubMatch]],
+    prior: PriorContext | None,
+) -> dict[str, Any]:
+    """Pick where one player's history comes from and how to label it.
+
+    In a normal (started) season a player uses their own current-season
+    history. While the target season has not started (``cross_season``), a
+    player is instead sourced from the prior season by the shared ``player_id``:
+    the appearances and the denominator club are those of the club they played
+    for last season (so a transfer keeps their real track record), while the
+    fixture, venue and opponent come from the active season. A player with no
+    prior history is a newcomer and gets role priors.
+    """
+    active_ps_id = player["player_season_id"]
+    if not cross_season or prior is None:
+        return {
+            "appearances": appearances.get(active_ps_id, []),
+            "club_matches": current_club_matches.get(active_club_id, [])
+            if active_club_id is not None
+            else [],
+            "stat_source": STAT_SOURCE_CURRENT,
+            "is_newcomer": False,
+            "newcomer_prior": None,
+        }
+
+    prior_player = prior.by_player_id.get(player["player_id"])
+    prior_appearances = (
+        prior.appearances.get(prior_player.player_season_id, [])
+        if prior_player is not None
+        else []
+    )
+    if prior_appearances:
+        return {
+            "appearances": prior_appearances,
+            "club_matches": prior.club_matches.get(prior_player.club_id, [])
+            if prior_player.club_id is not None
+            else [],
+            "stat_source": STAT_SOURCE_PRIOR,
+            "is_newcomer": False,
+            "newcomer_prior": None,
+        }
+
+    # Newcomer: registered in the active season with no prior-season history.
+    return {
+        "appearances": [],
+        "club_matches": [],
+        "stat_source": STAT_SOURCE_PRIOR,
+        "is_newcomer": True,
+        "newcomer_prior": prior.role_priors.get(player["role"]),
     }
 
 
@@ -569,6 +808,10 @@ def _build_row(
     snapshot: dict[str, Any] | None,
     strengths: dict[int, dict[str, float]],
     league: dict[str, float],
+    stat_source: str = STAT_SOURCE_CURRENT,
+    is_newcomer: bool = False,
+    newcomer_prior: RolePrior | None = None,
+    cross_season: bool = False,
 ) -> dict[str, Any]:
     history = recent_before_cutoff(
         appearances, cutoff, exclude_match_ids=target_match_ids
@@ -584,6 +827,8 @@ def _build_row(
         "club_id": fixture.club_id,
         "club_name": club_name,
         "tour_cutoff": cutoff.isoformat(),
+        "stat_source": stat_source,
+        "is_newcomer": is_newcomer,
         "is_home": fixture.is_home,
         "opponent_club_id": fixture.opponent_club_id,
         "opponent_name": opponent_name,
@@ -665,8 +910,10 @@ def _build_row(
     mean_recent_minutes = _mean(recent_minutes)
     row["expected_minutes"] = round(p_appearance * mean_recent_minutes, 2)
 
-    # Rest days since the club's previous match.
-    if club_matches:
+    # Rest days since the club's previous match. Meaningless when the history
+    # comes from the prior season (the active club has not played yet), so it is
+    # left null rather than reporting a several-month gap.
+    if club_matches and not cross_season:
         last_match = max(club_matches, key=lambda m: m.scheduled_at)
         row["rest_days"] = (fixture.scheduled_at - last_match.scheduled_at).days
     else:
@@ -684,7 +931,37 @@ def _build_row(
     row["opponent_attack"] = opponent_attack
     row["opponent_defense"] = opponent_defense
 
+    if is_newcomer and newcomer_prior is not None:
+        _apply_newcomer_prior(row, newcomer_prior, is_available=row["is_available"])
+
     return row
+
+
+def _apply_newcomer_prior(
+    row: dict[str, Any], prior: RolePrior, *, is_available: bool
+) -> None:
+    """Overwrite the empty history-derived features with role priors in place.
+
+    A newcomer has no appearances, so every rolling / per-90 feature is zero.
+    The event forecast (step 7) reads the per-90 rates, the appearance
+    probability, the expected minutes and the full/sub split, so those are set
+    from the position prior while the totals stay zero and ``has_history`` stays
+    ``False`` (the row is explicitly flagged as a newcomer).
+    """
+    p_appearance = round(NEWCOMER_P_APPEARANCE if is_available else 0.0, 4)
+    mean_minutes = max(0.0, prior.mean_minutes)
+    full_ratio = min(max(mean_minutes / 90.0, 0.0), 1.0)
+
+    row["p_appearance"] = p_appearance
+    row["expected_minutes"] = round(p_appearance * mean_minutes, 2)
+    row["appearance_share"] = p_appearance
+    row["start_share"] = round(p_appearance * full_ratio, 4)
+    row["goals_per90"] = round(prior.goals_per90 * NEWCOMER_RATE_FACTOR, 4)
+    row["assists_per90"] = round(prior.assists_per90 * NEWCOMER_RATE_FACTOR, 4)
+    row["saves_per90"] = round(prior.saves_per90 * NEWCOMER_RATE_FACTOR, 4)
+    row["recoveries_per90"] = round(prior.recoveries_per90 * NEWCOMER_RATE_FACTOR, 4)
+    # Yellow cards are a penalty, so they are not discounted (staying cautious).
+    row["yellows_per90"] = round(prior.yellows_per90, 4)
 
 
 def build_feature_dataset(
@@ -719,7 +996,19 @@ def build_feature_dataset(
         players = _load_players(session, season_id)
         season_clubs = _load_season_clubs(session, season_id)
 
-        strengths, league = _club_strengths(club_matches)
+        # Cross-season sourcing (step 14): while the target season has no played
+        # match before the cutoff, source history from the prior season instead
+        # of returning an all-zero forecast. Once the season starts (any club
+        # match exists before the cutoff) the pure current-season path is used,
+        # so backtesting a finished season is unaffected.
+        prior_run = _resolve_prior_run(session, season) if season else None
+        cross_season = prior_run is not None and not club_matches
+        prior = (
+            _load_prior_context(session, prior_run, cutoff) if cross_season else None
+        )
+
+        strength_matches = prior.club_matches if cross_season and prior else club_matches
+        strengths, league = _club_strengths(strength_matches)
 
         # Map a club id to its display name via any of its season-club rows.
         club_names: dict[int, str] = {}
@@ -736,6 +1025,8 @@ def build_feature_dataset(
 
         rows: list[dict[str, Any]] = []
         players_without_fixture = 0
+        newcomers = 0
+        prior_sourced = 0
         for player in players:
             season_club_id = player["current_season_club_id"]
             club_info = season_clubs.get(season_club_id) if season_club_id else None
@@ -744,6 +1035,18 @@ def build_feature_dataset(
             if fixture is None:
                 players_without_fixture += 1
                 continue
+            source = _resolve_history_source(
+                player,
+                club_id,
+                cross_season=cross_season,
+                appearances=appearances,
+                current_club_matches=club_matches,
+                prior=prior,
+            )
+            if source["stat_source"] == STAT_SOURCE_PRIOR:
+                prior_sourced += 1
+            if source["is_newcomer"]:
+                newcomers += 1
             rows.append(
                 _build_row(
                     player=player,
@@ -752,11 +1055,15 @@ def build_feature_dataset(
                     opponent_name=club_names.get(fixture.opponent_club_id, ""),
                     cutoff=cutoff,
                     target_match_ids=target_match_ids,
-                    appearances=appearances.get(player["player_season_id"], []),
-                    club_matches=club_matches.get(club_id, []),
+                    appearances=source["appearances"],
+                    club_matches=source["club_matches"],
                     snapshot=snapshots.get(player["player_season_id"]),
                     strengths=strengths,
                     league=league,
+                    stat_source=source["stat_source"],
+                    is_newcomer=source["is_newcomer"],
+                    newcomer_prior=source["newcomer_prior"],
+                    cross_season=cross_season,
                 )
             )
 
@@ -778,11 +1085,15 @@ def build_feature_dataset(
                 "status": tour.status,
             },
             "cutoff": cutoff.isoformat(),
+            "cross_season": cross_season,
+            "prior_run_id": prior.run_id if prior else None,
             "counts": {
                 "rows": len(rows),
                 "fixtures": len(target_match_ids),
                 "players_without_fixture": players_without_fixture,
-                "clubs_with_history": len(club_matches),
+                "clubs_with_history": len(strength_matches),
+                "prior_sourced": prior_sourced,
+                "newcomers": newcomers,
             },
             "feature_dictionary": list(FEATURE_DICTIONARY),
             "rows": rows,
@@ -791,15 +1102,23 @@ def build_feature_dataset(
 
 __all__ = [
     "FEATURE_VERSION",
+    "ROLES",
     "ROLLING_WINDOWS",
     "START_MINUTES_THRESHOLD",
     "AVAILABILITY_WINDOW",
     "UNAVAILABLE_STATUSES",
+    "STAT_SOURCE_CURRENT",
+    "STAT_SOURCE_PRIOR",
+    "NEWCOMER_P_APPEARANCE",
+    "NEWCOMER_RATE_FACTOR",
     "FEATURE_DICTIONARY",
     "FeaturesError",
     "Appearance",
     "ClubMatch",
     "Fixture",
+    "RolePrior",
+    "PriorPlayer",
+    "PriorContext",
     "recent_before_cutoff",
     "per90",
     "resolve_target_tour",

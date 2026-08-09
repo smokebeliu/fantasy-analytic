@@ -324,6 +324,8 @@ class ReadRepository:
             "model_version",
             "feature_version",
             "scoring_version",
+            "stat_source",
+            "has_history",
             "match_id",
         )
 
@@ -418,6 +420,8 @@ class ReadRepository:
             "model_version": row.model_version,
             "feature_version": row.feature_version,
             "scoring_version": row.scoring_version,
+            "stat_source": row.stat_source,
+            "has_history": row.has_history,
             "match_id": row.match_id,
             "expected_points": _num(row.expected_points),
             "uncertainty": _num(row.uncertainty),
@@ -565,6 +569,8 @@ class ReadRepository:
             "model_version": row.model_version,
             "feature_version": row.feature_version,
             "scoring_version": row.scoring_version,
+            "stat_source": row.stat_source,
+            "has_history": row.has_history,
             "match_id": row.match_id,
             "expected_points": _num(row.expected_points),
             "uncertainty": _num(row.uncertainty),

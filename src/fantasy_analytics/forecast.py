@@ -368,6 +368,11 @@ _IDENTITY_FIELDS = (
     "is_available",
     "availability_status",
     "price",
+    # Cross-season provenance (step 14): where the history came from, whether the
+    # player has any history at all and whether they are a prior-less newcomer.
+    "stat_source",
+    "has_history",
+    "is_newcomer",
 )
 
 
@@ -478,6 +483,8 @@ def build_forecast_dataset(
         "season": features["season"],
         "tour": features["tour"],
         "cutoff": cutoff,
+        "cross_season": features.get("cross_season", False),
+        "prior_run_id": features.get("prior_run_id"),
         "models": [
             {"name": MODEL_EVENT, "version": MODEL_VERSION, "kind": "event"},
             {"name": MODEL_MEAN, "version": MODEL_VERSION, "kind": "baseline"},
@@ -492,6 +499,8 @@ def build_forecast_dataset(
             "available_players": available_players,
             "rows": len(rows),
             "fixtures": features["counts"]["fixtures"],
+            "prior_sourced": features["counts"].get("prior_sourced", 0),
+            "newcomers": features["counts"].get("newcomers", 0),
         },
         "rows": rows,
     }

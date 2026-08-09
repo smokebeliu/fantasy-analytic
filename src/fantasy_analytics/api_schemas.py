@@ -141,6 +141,13 @@ class ProjectionModel(BaseModel):
     model_version: str
     feature_version: str | None = None
     scoring_version: str | None = None
+    stat_source: str | None = Field(
+        default=None,
+        description="History source: 'current_season' or 'prior_season' (cross-season)",
+    )
+    has_history: bool | None = Field(
+        default=None, description="Whether the projection is backed by real history"
+    )
     match_id: int | None = None
     expected_points: float | None = None
     uncertainty: float | None = None
@@ -257,6 +264,8 @@ class SquadPlayerModel(BaseModel):
     match_id: int | None = None
     p_appearance: float | None = None
     expected_minutes: float | None = None
+    stat_source: str | None = None
+    is_newcomer: bool | None = None
     is_starter: bool | None = None
     is_captain: bool | None = None
     is_vice_captain: bool | None = None

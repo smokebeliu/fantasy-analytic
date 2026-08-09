@@ -59,4 +59,48 @@ describe("PlayerTable", () => {
     const checkboxes = screen.getAllByRole("checkbox") as HTMLInputElement[];
     expect(checkboxes.every((c) => c.disabled)).toBe(true);
   });
+
+  it("marks prior-season and newcomer projections (step 14)", () => {
+    setup({
+      players: [
+        makePlayer({
+          player_season_id: 1,
+          player_name: "Вернувшийся",
+          projection: {
+            model_name: "poisson_events",
+            model_version: "1.0.0",
+            stat_source: "prior_season",
+            has_history: true,
+            expected_points: 5,
+          },
+        }),
+        makePlayer({
+          player_season_id: 2,
+          player_name: "Новобранец",
+          projection: {
+            model_name: "poisson_events",
+            model_version: "1.0.0",
+            stat_source: "prior_season",
+            has_history: false,
+            expected_points: 2,
+          },
+        }),
+        makePlayer({
+          player_season_id: 3,
+          player_name: "Текущий",
+          projection: {
+            model_name: "poisson_events",
+            model_version: "1.0.0",
+            stat_source: "current_season",
+            has_history: true,
+            expected_points: 4,
+          },
+        }),
+      ],
+    });
+    expect(screen.getByText("прошлый сезон")).toBeInTheDocument();
+    expect(screen.getByText("новичок")).toBeInTheDocument();
+    // A current-season projection carries no provenance badge.
+    expect(screen.getAllByText("прошлый сезон")).toHaveLength(1);
+  });
 });
