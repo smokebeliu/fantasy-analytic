@@ -24,3 +24,37 @@ export function StatusDot({ status }: { status?: string | null }) {
     />
   );
 }
+
+// Label a projection whose numbers do not come from this season's play, so the
+// analytical statistics of the previous and current season stay visually
+// separated (development-plan step 14). A projection sourced from the current
+// season shows nothing.
+export function SourceBadge({
+  statSource,
+  isNewcomer,
+}: {
+  statSource?: string | null;
+  isNewcomer?: boolean | null;
+}) {
+  if (isNewcomer) {
+    return (
+      <span
+        className="source-badge source-newcomer"
+        title="Новичок без истории — прогноз по прайорам позиции"
+      >
+        новичок
+      </span>
+    );
+  }
+  if (statSource === "prior_season") {
+    return (
+      <span
+        className="source-badge source-prior"
+        title="Прогноз построен по данным прошлого сезона"
+      >
+        прошлый сезон
+      </span>
+    );
+  }
+  return null;
+}

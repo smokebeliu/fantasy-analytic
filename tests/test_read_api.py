@@ -310,6 +310,11 @@ class ReadApiIntegrationTest(unittest.TestCase):
             self.assertIsNotNone(player["projection"])
             self.assertEqual(MODEL_EVENT, player["projection"]["model_name"])
             self.assertIn("components", player["projection"])
+            # The projection exposes its cross-season provenance (step 14).
+            self.assertEqual(
+                "current_season", player["projection"]["stat_source"]
+            )
+            self.assertIn("has_history", player["projection"])
 
     def test_players_filter_by_role(self) -> None:
         response = self.client.get(

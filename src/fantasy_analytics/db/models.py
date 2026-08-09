@@ -623,6 +623,11 @@ class PlayerForecast(Base):
     model_version: Mapped[str] = mapped_column(Text, nullable=False)
     feature_version: Mapped[str] = mapped_column(Text, nullable=False)
     scoring_version: Mapped[str | None] = mapped_column(Text)
+    # Cross-season provenance (step 14): where the underlying history came from
+    # ('current_season' / 'prior_season') and whether the player had any history
+    # at all. Nullable because forecasts predating the column carry no source.
+    stat_source: Mapped[str | None] = mapped_column(Text)
+    has_history: Mapped[bool | None] = mapped_column(Boolean)
     cutoff: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

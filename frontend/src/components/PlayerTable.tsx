@@ -1,7 +1,7 @@
 "use client";
 
 import type { PlayerModel, PlayerOrder } from "@/lib/types";
-import { RoleBadge, StatusDot } from "./badges";
+import { RoleBadge, SourceBadge, StatusDot } from "./badges";
 import { formatPercent, formatPoints, formatPrice } from "@/lib/format";
 
 interface Column {
@@ -89,6 +89,13 @@ export function PlayerTable({
                   {p.projection?.expected_points != null ? (
                     <span className="proj-value">
                       {formatPoints(p.projection.expected_points, 1)}
+                      <SourceBadge
+                        statSource={p.projection.stat_source}
+                        isNewcomer={
+                          p.projection.stat_source === "prior_season" &&
+                          p.projection.has_history === false
+                        }
+                      />
                     </span>
                   ) : (
                     "—"

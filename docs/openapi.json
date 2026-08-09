@@ -803,6 +803,18 @@
             ],
             "title": "Feature Version"
           },
+          "has_history": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whether the projection is backed by real history",
+            "title": "Has History"
+          },
           "match_id": {
             "anyOf": [
               {
@@ -843,6 +855,18 @@
               }
             ],
             "title": "Scoring Version"
+          },
+          "stat_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "History source: 'current_season' or 'prior_season' (cross-season)",
+            "title": "Stat Source"
           },
           "uncertainty": {
             "anyOf": [

@@ -80,6 +80,10 @@ export interface ProjectionModel {
   model_version: string;
   feature_version?: string | null;
   scoring_version?: string | null;
+  // Cross-season provenance (step 14): where the underlying history came from
+  // and whether the projection is backed by any real history.
+  stat_source?: string | null;
+  has_history?: boolean | null;
   match_id?: number | null;
   expected_points?: number | null;
   uncertainty?: number | null;
@@ -148,6 +152,8 @@ export interface OptimizerCandidate {
   expected_points: number;
   opponent_name?: string | null;
   is_home?: boolean | null;
+  stat_source?: string | null;
+  is_newcomer?: boolean | null;
   is_starter?: boolean;
   is_captain?: boolean;
   is_vice_captain?: boolean;

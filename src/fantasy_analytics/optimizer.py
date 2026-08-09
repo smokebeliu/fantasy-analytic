@@ -89,6 +89,8 @@ class Candidate:
     match_id: int | None = None
     p_appearance: float | None = None
     expected_minutes: float | None = None
+    stat_source: str | None = None
+    is_newcomer: bool | None = None
 
     @property
     def price_cents(self) -> int:
@@ -181,6 +183,8 @@ def candidates_from_forecast(
                 match_id=row.get("match_id"),
                 p_appearance=row.get("p_appearance"),
                 expected_minutes=row.get("expected_minutes"),
+                stat_source=row.get("stat_source"),
+                is_newcomer=row.get("is_newcomer"),
             )
         )
     # Deterministic order so the CP-SAT model is built identically every run.
@@ -208,6 +212,8 @@ def _candidate_public(candidate: Candidate) -> dict[str, Any]:
         "match_id": candidate.match_id,
         "p_appearance": candidate.p_appearance,
         "expected_minutes": candidate.expected_minutes,
+        "stat_source": candidate.stat_source,
+        "is_newcomer": candidate.is_newcomer,
     }
 
 

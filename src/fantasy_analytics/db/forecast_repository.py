@@ -69,6 +69,8 @@ class ForecastRepository:
                 "model_version": row["model_version"],
                 "feature_version": row["feature_version"],
                 "scoring_version": row.get("scoring_version"),
+                "stat_source": row.get("stat_source"),
+                "has_history": row.get("has_history"),
                 "cutoff": cutoff,
                 "expected_points": row["expected_points"],
                 "uncertainty": row.get("uncertainty"),

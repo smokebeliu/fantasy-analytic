@@ -6,9 +6,10 @@ the `fantasy-features` CLI. It turns the *active* snapshot published by the
 quality gate (step 4) into a reproducible, leakage-free table with one row per
 player whose club plays a target tour.
 
-The current `feature_version` is `1.1.0`; version `1.1.0` added the
+The current `feature_version` is `1.2.0`. Version `1.1.0` added the
 `saves_per90`, `recoveries_per90` and `yellows_per90` rates that the step-7
-event forecast consumes.
+event forecast consumes; version `1.2.0` added cross-season sourcing (step 14),
+the `stat_source` / `is_newcomer` labels and newcomer priors.
 
 ## Reproducibility and leakage guarantees
 
@@ -48,6 +49,39 @@ Availability is unavailable when `availability_status` is one of
 `SUSPENSION`, `OUT`, `LEFT`. Any other value (including `FIERY` and `UNKNOWN`)
 is treated as available so a new status never silently zeroes a player.
 
+## Cross-season sourcing (step 14)
+
+Before the target season has played a single match, a pure current-season
+dataset would be all zeros (there is no history yet). To forecast the first tour
+of a new tournament, the builder falls back to the **prior season** by the
+shared cross-season identities (`players.stat_player_id`,
+`clubs.stat_team_id`), while the fixture, venue and opponent still come from the
+active season.
+
+- **When it activates.** Cross-season sourcing turns on only when the target
+  season has no club match before the cutoff *and* a prior season of the same
+  competition has its own published (active) snapshot. As soon as the season
+  produces a played match, the builder switches back to the pure current-season
+  path, so backtesting a finished season is never affected. `cross_season` and
+  `prior_run_id` are reported in the dataset metadata.
+- **Returning players.** A player registered in both seasons is sourced from the
+  prior season by the shared `player_id`. Their appearances and appearance/start
+  shares use the club they actually played for last season, so a transfer keeps
+  its real track record, while the venue and opponent come from the active club.
+- **Departed players.** A player who is not registered in the active season has
+  no `player_season` there and simply produces no row (and no optimizer
+  candidate).
+- **Newcomers.** A player registered in the active season with no prior-season
+  history is a newcomer: `is_newcomer` is `true`, `has_history` is `false`, and
+  the event rates are filled from documented **role priors** — the prior
+  season's per-90 role averages discounted by `NEWCOMER_RATE_FACTOR` (0.7),
+  with a conservative `NEWCOMER_P_APPEARANCE` (0.5) play probability. These
+  priors are position-based; refining them by price/club is left to step 18.
+- **Provenance label.** Every row carries `stat_source` (`current_season` or
+  `prior_season`), so the frontend can visually separate last season's numbers
+  from the ones collected this season (steps 12–13). `rest_days` is `null` in
+  cross-season mode because the active club has not played yet.
+
 ## Fields
 
 | Field | Description |
@@ -82,7 +116,9 @@ is treated as available so a new status never silently zeroes a player.
 | `expected_minutes` | `p_appearance` x recent mean minutes when appearing. |
 | `club_attack`, `club_defense` | Club goals scored/conceded per match at the fixture venue. |
 | `opponent_attack`, `opponent_defense` | Opponent goals scored/conceded per match at their venue. |
-| `has_history` | `true` when at least one appearance exists before cutoff. |
+| `has_history` | `true` when at least one appearance exists in the sourced history. |
+| `stat_source` | `current_season` or `prior_season` (cross-season backfill while the target season has not started). |
+| `is_newcomer` | `true` when the player has no prior-season history and is scored from role priors. |
 
 ## Command
 

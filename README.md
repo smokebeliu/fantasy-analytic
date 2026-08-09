@@ -275,6 +275,30 @@ to only write the `forecast.json`/`forecast.csv` artifacts. The forecast design
 and the reconstructed scoring rules live in
 [`docs/data-model.md`](docs/data-model.md).
 
+### Cross-season first-tour forecast
+
+When the target season has not played a match yet (for example the first tour of
+a new tournament), the forecast falls back to the **previous** season by the
+shared cross-season identities (`players.stat_player_id`, `clubs.stat_team_id`):
+returning players keep their prior-season history, departed players drop out, and
+newcomers get documented position priors flagged `is_newcomer` /
+`has_history = false`. Every row records its `stat_source` (`prior_season` vs
+`current_season`), which is persisted and exposed through the read API so the
+frontend separates last season's numbers from this season's. Import both seasons
+first, then forecast the active season's first tour:
+
+```bash
+PYTHONPATH=src python3 -m fantasy_analytics.ingest_cli --season-name 2025/2026
+PYTHONPATH=src python3 -m fantasy_analytics.ingest_cli --current            # active season
+PYTHONPATH=src python3 -m fantasy_analytics.quality_cli --run-id <active_run>
+PYTHONPATH=src python3 -m fantasy_analytics.forecast_cli --season 2026/2027 --tour <tour1>
+```
+
+The season-level switch resumes the pure current-season path as soon as the new
+season produces a played match, so backtesting a finished season is unaffected.
+Team-strength coefficients and fixture-aware co-selection stay out of scope
+(steps 16 and 18).
+
 ## Squad optimizer
 
 Once forecasts can be built, `fantasy-optimize` selects the optimal fantasy

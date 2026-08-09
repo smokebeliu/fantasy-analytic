@@ -341,6 +341,25 @@ table.players th.num {
   font-weight: 700;
   color: var(--success);
 }
+.source-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.source-prior {
+  background: rgba(120, 120, 200, 0.16);
+  color: #6a6ad0;
+}
+.source-newcomer {
+  background: rgba(220, 160, 40, 0.18);
+  color: #c58a13;
+}
 .chip {
   display: inline-flex;
   align-items: center;
