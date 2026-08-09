@@ -57,15 +57,24 @@ from .forecast import MODEL_EVENT, ForecastError, build_forecast_dataset
 # by different code revisions never get silently compared.
 OPTIMIZER_VERSION = "1.3.0"
 
-# Search configuration. Eight workers is not about wall-clock parallelism (the
-# box may well have fewer cores): the worker count selects CP-SAT's strategy
-# portfolio, and the extra strategies are what crack the transfers model. With a
-# single worker, keeping twelve near-worthless players from a real user squad is
-# an instance the solver can find the optimum of but not *prove*, so it searches
-# without end. The budget below is expressed in deterministic time — a
-# machine-independent measure of work — so the same request keeps returning the
-# same squad on any hardware, and a hard instance degrades into "best found so
-# far" (status ``FEASIBLE``) instead of hanging the request.
+# Search configuration, in *deterministic* time: a machine-independent measure of
+# work rather than wall clock, so the same request returns the same squad on any
+# hardware and an instance too hard to finish degrades into "best squad found so
+# far" (status ``FEASIBLE``) instead of searching without end.
+#
+# The search runs in two phases because the two things it has to be good at pull
+# in opposite directions. Building a squad from scratch — the button most people
+# press — is proven optimal by one worker in a fifth of a deterministic second.
+# A transfers request is not: forced to keep twelve near-worthless players from a
+# real user squad, one worker finds the optimum quickly but cannot *prove* it,
+# and before this budget existed such a request ran for over ten minutes. Only
+# CP-SAT's wider strategy portfolio cracks that, and the portfolio has to take
+# turns rather than race, because a squad is full of exact ties (two bench
+# players of the same role and price are interchangeable) and whichever worker
+# finished first would decide the answer. Interleaving keeps one input mapped to
+# one squad, at roughly half a second of overhead — worth paying only for the
+# instances that need it.
+_FAST_PATH_LIMIT = 0.5
 _SEARCH_WORKERS = 8
 DEFAULT_SOLVE_LIMIT = 8.0
 
@@ -383,6 +392,52 @@ def _candidate_public(candidate: Candidate) -> dict[str, Any]:
         "stat_source": candidate.stat_source,
         "is_newcomer": candidate.is_newcomer,
     }
+
+
+def _run_solver(
+    model: cp_model.CpModel, *, workers: int, interleave: bool, limit: float
+) -> tuple[cp_model.CpSolver, int]:
+    """Solve once with an explicit, reproducible search configuration."""
+    solver = cp_model.CpSolver()
+    solver.parameters.num_search_workers = workers
+    solver.parameters.interleave_search = interleave
+    solver.parameters.random_seed = 0
+    solver.parameters.max_deterministic_time = limit
+    return solver, solver.Solve(model)
+
+
+def _search(
+    model: cp_model.CpModel, limit: float
+) -> tuple[cp_model.CpSolver, int]:
+    """Search for the best squad within a deterministic budget.
+
+    Runs the cheap single-worker phase first and only pays for the interleaved
+    portfolio when that phase could not prove optimality (see the comment on
+    :data:`_FAST_PATH_LIMIT`). Infeasibility is never retried: CP-SAT reports it
+    only once proven, so a second phase could not change the answer. Both phases
+    are reproducible and the winner is chosen on the reported objective, so the
+    whole search stays a pure function of its input.
+    """
+    solver, status = _run_solver(
+        model, workers=1, interleave=False, limit=min(_FAST_PATH_LIMIT, limit)
+    )
+    if status == cp_model.OPTIMAL or status == cp_model.INFEASIBLE:
+        return solver, status
+    if limit <= _FAST_PATH_LIMIT:
+        return solver, status
+
+    retry, retry_status = _run_solver(
+        model, workers=_SEARCH_WORKERS, interleave=True, limit=limit
+    )
+    if retry_status == cp_model.OPTIMAL:
+        return retry, retry_status
+    if status not in (cp_model.FEASIBLE, cp_model.OPTIMAL):
+        return retry, retry_status
+    if retry_status == cp_model.FEASIBLE and (
+        retry.ObjectiveValue() > solver.ObjectiveValue()
+    ):
+        return retry, retry_status
+    return solver, status
 
 
 def _unknown_player_public(player_season_id: int) -> dict[str, Any]:
@@ -809,13 +864,9 @@ def solve_squad(
     spend_term = sum(candidates[i].price_cents * pick[i] for i in range(n))
     model.Maximize(points_term * _TIE_BREAK_HEADROOM - spend_term)
 
-    solver = cp_model.CpSolver()
-    solver.parameters.num_search_workers = _SEARCH_WORKERS
-    solver.parameters.random_seed = 0
-    solver.parameters.max_deterministic_time = (
-        DEFAULT_SOLVE_LIMIT if solve_limit is None else solve_limit
+    solver, status = _search(
+        model, DEFAULT_SOLVE_LIMIT if solve_limit is None else solve_limit
     )
-    status = solver.Solve(model)
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         extra = []
