@@ -296,8 +296,8 @@ PYTHONPATH=src python3 -m fantasy_analytics.forecast_cli --season 2026/2027 --to
 
 The season-level switch resumes the pure current-season path as soon as the new
 season produces a played match, so backtesting a finished season is unaffected.
-Team-strength coefficients and fixture-aware co-selection stay out of scope
-(steps 16 and 18).
+Fixture-aware co-selection is handled by the optimizer (see "Head-to-head
+fixtures" below); team-strength coefficients stay out of scope (step 18).
 
 ## Squad optimizer
 
@@ -347,6 +347,30 @@ instead of a bare "infeasible". Locked players are flagged `is_locked` in the
 report and re-verified by the independent validator. The same three options exist
 on `POST /optimizer/squad` and `POST /optimizer/transfers` as `locked`,
 `locked_starters` and `formation`.
+
+### Head-to-head fixtures
+
+The tour schedule is part of the objective, so the squad does not bet on both
+sides of one match: the clean sheet a defence needs is exactly what the opposing
+attack has to break. Two starters that meet each other are charged the magnitude
+of that cancellation, so such a pair only survives when it still wins on expected
+points:
+
+```bash
+# Compare the fixture-aware optimum with the fixture-blind one.
+PYTHONPATH=src python3 -m fantasy_analytics.optimizer_cli --tour 2285
+PYTHONPATH=src python3 -m fantasy_analytics.optimizer_cli --tour 2285 \
+  --fixture-conflict-weight 0
+```
+
+`--fixture-conflict-weight` tunes how hard a clash is charged (`0` ignores the
+schedule but still reports the clashes; the API accepts the same
+`fixture_conflict_weight`). The report explains the effect in
+`solution.fixtures`: the fixtures whose both sides are in the eleven
+(`head_to_head`), the cancelling pairs with their individual penalty (`clashes`)
+and the totals, next to `fixture_penalty` and `objective_score`.
+`objective_expected_points` keeps its original meaning of pure expected points,
+and the independent validator recomputes the penalty from the produced eleven.
 
 ## Manual ingestion API
 
@@ -420,6 +444,10 @@ curl -X POST http://127.0.0.1:8000/optimizer/squad \
 curl -X POST http://127.0.0.1:8000/optimizer/transfers \
   -H 'Content-Type: application/json' \
   -d '{"tour": "1786", "current_squad": ["54138", "..."], "max_transfers": 2}'
+# Ignore the tour schedule (the clashes are still reported).
+curl -X POST http://127.0.0.1:8000/optimizer/squad \
+  -H 'Content-Type: application/json' \
+  -d '{"tour": "1786", "fixture_conflict_weight": 0}'
 ```
 
 List responses carry the snapshot time (`data_freshness`); projections carry the
@@ -447,8 +475,10 @@ the client before submission and calls the optimizer to build a squad or suggest
 transfers. In the squad builder, any player can be pinned (📌) on the pitch or in
 the squad list and a formation can be chosen; `Подобрать под мою схему` then asks
 the optimizer to keep the pinned players, honour the formation and fill the rest
-optimally. Data freshness and the model version are shown in the header, and
-loading/empty/error states are covered across all views.
+optimally. When the resulting eleven still contains players who face each other,
+the result panel names each such pair and the penalty it cost. Data freshness and
+the model version are shown in the header, and loading/empty/error states are
+covered across all views.
 
 Every browser request is proxied same-origin through `/api/backend/*` to the
 FastAPI backend (no CORS), so the frontend only needs `BACKEND_URL` to reach it.

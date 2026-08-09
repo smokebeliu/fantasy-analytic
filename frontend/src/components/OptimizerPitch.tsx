@@ -89,6 +89,29 @@ export function OptimizerPitch({ result }: { result: OptimizerResponse }) {
         </div>
       )}
 
+      {solution.fixtures && solution.fixtures.clashes.length > 0 && (
+        <div className="panel panel--pad" style={{ marginBottom: 14 }} data-testid="optimizer-clashes">
+          <strong>
+            Очные встречи в составе: {solution.fixtures.clashes.length}
+            {typeof solution.fixture_penalty === "number" &&
+              ` · штраф ${formatPoints(solution.fixture_penalty, 2)} очк.`}
+          </strong>
+          <div style={{ marginTop: 8 }}>
+            {solution.fixtures.clashes.map((clash) => (
+              <div key={`${clash.player_season_id}-${clash.opponent_player_season_id}`}>
+                {clash.player_name ?? `#${clash.player_season_id}`} ({clash.club_name}) —{" "}
+                {clash.opponent_player_name ?? `#${clash.opponent_player_season_id}`} (
+                {clash.opponent_club_name}): −{formatPoints(clash.penalty, 2)}
+              </div>
+            ))}
+          </div>
+          <p className="inline-note" style={{ marginTop: 8 }}>
+            Эти игроки играют друг против друга: голы одной стороны отнимают «сухарь» у
+            другой, поэтому их совместный апсайд частично гасится.
+          </p>
+        </div>
+      )}
+
       <div className="pitch">
         {ROLES.map((role) => (
           <div className="pitch-row" key={role}>
