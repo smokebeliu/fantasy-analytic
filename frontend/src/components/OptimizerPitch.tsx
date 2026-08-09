@@ -6,7 +6,15 @@ import { ROLES } from "@/lib/squad";
 
 function PitchPlayer({ player }: { player: OptimizerCandidate }) {
   return (
-    <div className="pitch-player" title={`${player.club_name ?? ""}`}>
+    <div
+      className={`pitch-player${player.is_locked ? " pitch-player--locked" : ""}`}
+      title={`${player.club_name ?? ""}`}
+    >
+      {player.is_locked && (
+        <span className="pitch-player__pin is-locked" title="Закреплён пользователем">
+          📌
+        </span>
+      )}
       <div className="nm">{player.player_name ?? `#${player.player_season_id}`}</div>
       <div className="pts">{formatPoints(player.expected_points, 1)}</div>
       {player.is_captain && <span className="badge-c">К</span>}
@@ -96,10 +104,7 @@ export function OptimizerPitch({ result }: { result: OptimizerResponse }) {
       </div>
       <div className="bench-strip">
         {solution.bench.map((p) => (
-          <div className="pitch-player" key={p.player_season_id}>
-            <div className="nm">{p.player_name ?? `#${p.player_season_id}`}</div>
-            <div className="pts">{formatPoints(p.expected_points, 1)}</div>
-          </div>
+          <PitchPlayer key={p.player_season_id} player={p} />
         ))}
       </div>
       <p className="inline-note" style={{ marginTop: 12 }}>

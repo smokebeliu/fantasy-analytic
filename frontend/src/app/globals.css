@@ -883,6 +883,34 @@ table.players th.num {
   padding: 8px 10px;
   margin-top: 12px;
 }
+.locked-note {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 12px;
+}
+
+/* Pinning (step 15): locked players the optimizer must keep. */
+.pin-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  filter: grayscale(1);
+  opacity: 0.55;
+}
+.pin-btn:hover,
+.pin-btn.is-locked {
+  filter: none;
+  opacity: 1;
+}
+.pin-btn.is-locked {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
 .selected-list {
   margin-top: 12px;
   display: flex;
@@ -961,6 +989,36 @@ table.players th.num {
 .pitch-player:hover .pitch-player__remove,
 .pitch-player__remove:focus-visible {
   opacity: 1;
+}
+.pitch-player__pin {
+  position: absolute;
+  top: -7px;
+  left: -7px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(6, 20, 12, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  font-size: 10px;
+  line-height: 1;
+  padding: 0;
+  filter: grayscale(1);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.pitch-player:hover .pitch-player__pin,
+.pitch-player__pin:focus-visible,
+.pitch-player__pin.is-locked {
+  opacity: 1;
+}
+.pitch-player__pin.is-locked {
+  filter: none;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.pitch-player--locked {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
 }
 .pitch-player--empty {
   display: flex;

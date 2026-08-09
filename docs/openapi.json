@@ -1212,6 +1212,35 @@
       },
       "SquadRequest": {
         "properties": {
+          "formation": {
+            "anyOf": [
+              {
+                "pattern": "^\\d{1,2}-\\d{1,2}-\\d{1,2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Starting formation as defenders-midfielders-forwards, e.g. '4-4-2'; goalkeepers fill the remaining starting slots",
+            "title": "Formation"
+          },
+          "locked": {
+            "description": "Fantasy (or internal) player ids forced into the squad; the remaining slots are filled optimally",
+            "items": {
+              "type": "string"
+            },
+            "title": "Locked",
+            "type": "array"
+          },
+          "locked_starters": {
+            "description": "Player ids forced into the starting eleven (implies locked)",
+            "items": {
+              "type": "string"
+            },
+            "title": "Locked Starters",
+            "type": "array"
+          },
           "model": {
             "default": "poisson_events",
             "description": "Forecast model to optimize on",
@@ -1391,6 +1420,35 @@
             },
             "minItems": 1,
             "title": "Current Squad",
+            "type": "array"
+          },
+          "formation": {
+            "anyOf": [
+              {
+                "pattern": "^\\d{1,2}-\\d{1,2}-\\d{1,2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Starting formation as defenders-midfielders-forwards, e.g. '4-4-2'; goalkeepers fill the remaining starting slots",
+            "title": "Formation"
+          },
+          "locked": {
+            "description": "Fantasy (or internal) player ids forced into the squad; the remaining slots are filled optimally",
+            "items": {
+              "type": "string"
+            },
+            "title": "Locked",
+            "type": "array"
+          },
+          "locked_starters": {
+            "description": "Player ids forced into the starting eleven (implies locked)",
+            "items": {
+              "type": "string"
+            },
+            "title": "Locked Starters",
             "type": "array"
           },
           "max_transfers": {

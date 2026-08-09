@@ -139,6 +139,9 @@ export const api = {
     season?: string;
     model?: ForecastModel;
     run_id?: number;
+    locked?: string[];
+    locked_starters?: string[];
+    formation?: string;
   }) =>
     request<OptimizerResponse>("/optimizer/squad", {
       method: "POST",
@@ -152,6 +155,9 @@ export const api = {
     model?: ForecastModel;
     max_transfers?: number | null;
     run_id?: number;
+    locked?: string[];
+    locked_starters?: string[];
+    formation?: string;
   }) =>
     request<OptimizerResponse>("/optimizer/transfers", {
       method: "POST",

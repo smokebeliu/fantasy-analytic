@@ -328,6 +328,26 @@ error, and the computation is deterministic. The full result is written to
 `optimizer.json`. The optimizer design lives in
 [`docs/data-model.md`](docs/data-model.md).
 
+### Pinned players and a chosen formation
+
+`--locked` keeps the players you already want and fills every remaining slot
+optimally; `--locked-starters` additionally forces them into the starting eleven,
+and `--formation` fixes the shape as defenders-midfielders-forwards (the
+goalkeepers take the remaining starting slots):
+
+```bash
+PYTHONPATH=src python3 -m fantasy_analytics.optimizer_cli \
+  --tour 2283 --locked 54138,55020 --formation 3-5-2
+```
+
+Pins are checked against the rules before the solver runs, so an impossible set
+(too many players in one position or club, pins alone over budget, a formation the
+season does not allow) fails with a message naming the conflicting constraint
+instead of a bare "infeasible". Locked players are flagged `is_locked` in the
+report and re-verified by the independent validator. The same three options exist
+on `POST /optimizer/squad` and `POST /optimizer/transfers` as `locked`,
+`locked_starters` and `formation`.
+
 ## Manual ingestion API
 
 `fantasy-api` serves a small FastAPI control plane that triggers a full refresh
@@ -394,6 +414,9 @@ Optimizer endpoints wrap the step-8 solver (database only, no GraphQL):
 ```bash
 curl -X POST http://127.0.0.1:8000/optimizer/squad \
   -H 'Content-Type: application/json' -d '{"tour": "1786"}'
+curl -X POST http://127.0.0.1:8000/optimizer/squad \
+  -H 'Content-Type: application/json' \
+  -d '{"tour": "1786", "locked": ["54138"], "formation": "3-5-2"}'
 curl -X POST http://127.0.0.1:8000/optimizer/transfers \
   -H 'Content-Type: application/json' \
   -d '{"tour": "1786", "current_squad": ["54138", "..."], "max_transfers": 2}'
@@ -421,7 +444,10 @@ card (slide-over drawer and a dedicated `/players/[id]` route) keeps the per-tou
 match history and a forecast breakdown by scoring component; and a squad builder that
 validates every roster rule (size, per-role, budget, club limit, duplicates) on
 the client before submission and calls the optimizer to build a squad or suggest
-transfers. Data freshness and the model version are shown in the header, and
+transfers. In the squad builder, any player can be pinned (📌) on the pitch or in
+the squad list and a formation can be chosen; `Подобрать под мою схему` then asks
+the optimizer to keep the pinned players, honour the formation and fill the rest
+optimally. Data freshness and the model version are shown in the header, and
 loading/empty/error states are covered across all views.
 
 Every browser request is proxied same-origin through `/api/backend/*` to the

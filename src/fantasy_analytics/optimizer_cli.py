@@ -7,8 +7,10 @@ bench. The full result is written to disk and a compact, human-readable summary
 is printed so the command composes in a pipeline.
 
 Pass ``--current-squad`` (a comma-separated list of fantasy player ids) to run
-in limited-transfers mode instead of building a fresh squad. The database is
-never mutated and the Sports.ru API is never called.
+in limited-transfers mode instead of building a fresh squad. ``--locked``,
+``--locked-starters`` and ``--formation`` pin the user's own picks and shape, and
+the optimizer fills the rest. The database is never mutated and the Sports.ru API
+is never called.
 """
 
 from __future__ import annotations
@@ -70,6 +72,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the tour's transfer limit (limited-transfers mode only)",
     )
     parser.add_argument(
+        "--locked",
+        help=(
+            "Comma-separated player ids that must be in the squad; the "
+            "remaining slots are filled optimally"
+        ),
+    )
+    parser.add_argument(
+        "--locked-starters",
+        help="Comma-separated player ids that must be in the starting eleven",
+    )
+    parser.add_argument(
+        "--formation",
+        help=(
+            "Starting formation as defenders-midfielders-forwards, e.g. 4-4-2 "
+            "(default: whatever the solver finds best)"
+        ),
+    )
+    parser.add_argument(
         "--output",
         default="data/optimizer",
         help="Directory for the optimizer artifacts (default: data/optimizer)",
@@ -82,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _parse_current_squad(raw: str | None) -> list[str] | None:
+def _parse_ids(raw: str | None) -> list[str] | None:
     if not raw:
         return None
     ids = [part.strip() for part in raw.split(",") if part.strip()]
@@ -121,7 +141,15 @@ def _summarize(report: dict[str, Any], paths: dict[str, str], stream) -> None:
             f"kept {transfers['kept']}",
             file=stream,
         )
-    print("  starting eleven:", file=stream)
+    constraints = solution.get("constraints") or {}
+    if constraints.get("locked") or constraints.get("formation"):
+        print(
+            f"  pinned: {len(constraints.get('locked') or [])} player(s), "
+            f"{len(constraints.get('locked_starters') or [])} as starters; "
+            f"requested formation {constraints.get('formation') or 'any'}",
+            file=stream,
+        )
+    print("  starting eleven ('*' = locked by the user):", file=stream)
     for player in solution["starting"]:
         tag = (
             " (C)"
@@ -130,16 +158,18 @@ def _summarize(report: dict[str, Any], paths: dict[str, str], stream) -> None:
             if player["is_vice_captain"]
             else ""
         )
+        pin = "*" if player.get("is_locked") else " "
         print(
-            f"    {player['expected_points']:>6}  {player['role'][:3]:<3} "
+            f"   {pin}{player['expected_points']:>6}  {player['role'][:3]:<3} "
             f"{player['player_name']}{tag} ({player['club_name']}, "
             f"{player['price']})",
             file=stream,
         )
     print("  bench:", file=stream)
     for player in solution["bench"]:
+        pin = "*" if player.get("is_locked") else " "
         print(
-            f"    #{player['bench_order']}  {player['role'][:3]:<3} "
+            f"   {pin}#{player['bench_order']}  {player['role'][:3]:<3} "
             f"{player['player_name']} ({player['club_name']}, {player['price']})",
             file=stream,
         )
@@ -160,8 +190,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             season_ref=args.season_ref,
             tour_ref=args.tour_ref,
             model=args.model,
-            current_squad=_parse_current_squad(args.current_squad),
+            current_squad=_parse_ids(args.current_squad),
             max_transfers=args.max_transfers,
+            locked=_parse_ids(args.locked),
+            locked_starters=_parse_ids(args.locked_starters),
+            formation=args.formation,
         )
     except OptimizerError as error:
         print(f"Optimization failed: {error}", file=sys.stderr)

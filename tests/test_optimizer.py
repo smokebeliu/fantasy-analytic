@@ -32,6 +32,7 @@ from fantasy_analytics.optimizer import (
     SquadRules,
     build_squad_optimization,
     candidates_from_forecast,
+    parse_formation,
     parse_role_limits,
     solve_squad,
     validate_squad,
@@ -322,6 +323,238 @@ class TransfersModeTest(unittest.TestCase):
             solve_squad(self.pool, rules, current_ids=self.optimal_ids)
 
 
+class ParseFormationTest(unittest.TestCase):
+    def test_derives_goalkeepers_from_the_starting_size(self) -> None:
+        counts = parse_formation("4-4-2", _rpl_rules())
+        self.assertEqual(
+            counts,
+            {"DEFENDER": 4, "MIDFIELDER": 4, "FORWARD": 2, "GOALKEEPER": 1},
+        )
+
+    def test_rejects_malformed_input(self) -> None:
+        for bad in ("442", "4-4", "4-4-2-1", "a-b-c", ""):
+            with self.assertRaises(OptimizerError):
+                parse_formation(bad, _rpl_rules())
+
+    def test_rejects_formation_outside_starting_limits(self) -> None:
+        # Only 1..3 forwards may start, so 3-2-5 is not playable.
+        with self.assertRaises(OptimizerError) as ctx:
+            parse_formation("3-2-5", _rpl_rules())
+        self.assertIn("FWD", str(ctx.exception))
+
+    def test_rejects_formation_leaving_no_goalkeeper(self) -> None:
+        with self.assertRaises(OptimizerError) as ctx:
+            parse_formation("4-4-3", _rpl_rules())
+        self.assertIn("GK", str(ctx.exception))
+
+    def test_rejects_more_outfielders_than_starters(self) -> None:
+        with self.assertRaises(OptimizerError) as ctx:
+            parse_formation("5-5-5", _rpl_rules())
+        self.assertIn("11", str(ctx.exception))
+
+
+class LockedPlayersTest(unittest.TestCase):
+    """Step 15: user-pinned players and a user-chosen formation."""
+
+    def setUp(self) -> None:
+        self.pool = _pool()
+        self.rules = _rpl_rules()
+        self.free = solve_squad(self.pool, self.rules)
+        self.free_ids = {p["player_season_id"] for p in self.free["squad"]}
+
+    def _unwanted(self, count: int, role: str | None = None) -> list[int]:
+        """Players the unconstrained optimum leaves out (so pinning bites)."""
+        return [
+            c.player_season_id
+            for c in self.pool
+            if c.player_season_id not in self.free_ids
+            and (role is None or c.role == role)
+        ][:count]
+
+    def test_locked_players_are_always_selected(self) -> None:
+        locked = self._unwanted(3)
+        solution = solve_squad(self.pool, self.rules, locked_ids=locked)
+        picked = {p["player_season_id"] for p in solution["squad"]}
+        self.assertTrue(set(locked) <= picked)
+        self.assertEqual(
+            validate_squad(solution, self.rules, locked_ids=locked), []
+        )
+        self.assertEqual(solution["constraints"]["locked"], sorted(locked))
+
+    def test_locked_players_are_flagged_in_the_report(self) -> None:
+        locked = self._unwanted(2)
+        solution = solve_squad(self.pool, self.rules, locked_ids=locked)
+        flagged = {
+            p["player_season_id"] for p in solution["squad"] if p["is_locked"]
+        }
+        self.assertEqual(flagged, set(locked))
+
+    def test_remaining_slots_are_filled_optimally(self) -> None:
+        # Fixing one player and re-optimizing must give exactly the best squad
+        # that contains them, which is what an exhaustive search over the pool
+        # with that player forced would return. Pinning a player the free
+        # optimum already picked must therefore reproduce the free optimum.
+        already_optimal = sorted(self.free_ids)[:2]
+        solution = solve_squad(self.pool, self.rules, locked_ids=already_optimal)
+        self.assertEqual(
+            solution["objective_expected_points"],
+            self.free["objective_expected_points"],
+        )
+        self.assertEqual(
+            {p["player_season_id"] for p in solution["squad"]}, self.free_ids
+        )
+
+    def test_locking_never_beats_the_unconstrained_optimum(self) -> None:
+        locked = self._unwanted(3)
+        solution = solve_squad(self.pool, self.rules, locked_ids=locked)
+        self.assertLessEqual(
+            solution["objective_expected_points"],
+            self.free["objective_expected_points"],
+        )
+
+    def test_locked_starter_is_in_the_starting_eleven(self) -> None:
+        benched = self.free["bench"][0]["player_season_id"]
+        solution = solve_squad(
+            self.pool, self.rules, locked_starter_ids=[benched]
+        )
+        starters = {p["player_season_id"] for p in solution["starting"]}
+        self.assertIn(benched, starters)
+        self.assertEqual(
+            validate_squad(
+                solution, self.rules, locked_starter_ids=[benched]
+            ),
+            [],
+        )
+
+    def test_locked_starter_implies_locked_in_squad(self) -> None:
+        target = self._unwanted(1)[0]
+        solution = solve_squad(
+            self.pool, self.rules, locked_starter_ids=[target]
+        )
+        self.assertIn(target, solution["constraints"]["locked"])
+
+    def test_formation_shapes_the_starting_eleven(self) -> None:
+        solution = solve_squad(self.pool, self.rules, formation="3-4-3")
+        self.assertEqual(solution["formation"], "3-4-3")
+        self.assertEqual(
+            validate_squad(solution, self.rules, formation="3-4-3"), []
+        )
+
+    def test_formation_and_locks_combine(self) -> None:
+        locked = self._unwanted(2, role="DEFENDER")
+        solution = solve_squad(
+            self.pool, self.rules, locked_ids=locked, formation="5-3-2"
+        )
+        picked = {p["player_season_id"] for p in solution["squad"]}
+        self.assertTrue(set(locked) <= picked)
+        self.assertEqual(solution["formation"], "5-3-2")
+        self.assertEqual(
+            validate_squad(
+                solution, self.rules, locked_ids=locked, formation="5-3-2"
+            ),
+            [],
+        )
+
+    def test_locks_apply_in_transfers_mode(self) -> None:
+        current = sorted(self.free_ids)
+        locked = self._unwanted(1)
+        solution = solve_squad(
+            self.pool,
+            self.rules,
+            current_ids=current,
+            max_transfers=3,
+            locked_ids=locked,
+        )
+        picked = {p["player_season_id"] for p in solution["squad"]}
+        self.assertTrue(set(locked) <= picked)
+        self.assertLessEqual(solution["transfers"]["made"], 3)
+        self.assertEqual(
+            validate_squad(solution, self.rules, locked_ids=locked), []
+        )
+
+    def test_deterministic_with_locks(self) -> None:
+        locked = self._unwanted(3)
+        first = solve_squad(
+            self.pool, self.rules, locked_ids=locked, formation="4-4-2"
+        )
+        second = solve_squad(
+            self.pool, self.rules, locked_ids=locked, formation="4-4-2"
+        )
+        self.assertEqual(first, second)
+
+    # -- incompatible pin sets ------------------------------------------------
+
+    def test_unknown_locked_player_raises(self) -> None:
+        with self.assertRaises(OptimizerError) as ctx:
+            solve_squad(self.pool, self.rules, locked_ids=[999999])
+        self.assertIn("999999", str(ctx.exception))
+
+    def test_too_many_locked_players_raises(self) -> None:
+        everyone = [c.player_season_id for c in self.pool]
+        with self.assertRaises(OptimizerError) as ctx:
+            solve_squad(self.pool, self.rules, locked_ids=everyone)
+        self.assertIn("15", str(ctx.exception))
+
+    def test_locked_role_over_limit_raises(self) -> None:
+        keepers = [c.player_season_id for c in self.pool if c.role == "GOALKEEPER"]
+        with self.assertRaises(OptimizerError) as ctx:
+            solve_squad(self.pool, self.rules, locked_ids=keepers)
+        self.assertIn("GK", str(ctx.exception))
+
+    def test_locked_club_over_limit_raises(self) -> None:
+        club = self.pool[0].club_id
+        same_club = [c.player_season_id for c in self.pool if c.club_id == club][:4]
+        with self.assertRaises(OptimizerError) as ctx:
+            solve_squad(self.pool, self.rules, locked_ids=same_club)
+        self.assertIn("club", str(ctx.exception))
+
+    def test_locked_players_over_budget_raises(self) -> None:
+        rules = _rpl_rules(total_budget=10.0)
+        # One keeper, one defender and one midfielder: legal on every other
+        # count, but together already more expensive than the whole budget.
+        locked = [
+            next(c.player_season_id for c in self.pool if c.role == role)
+            for role in ("GOALKEEPER", "DEFENDER", "MIDFIELDER")
+        ]
+        with self.assertRaises(OptimizerError) as ctx:
+            solve_squad(self.pool, rules, locked_ids=locked)
+        self.assertIn("budget", str(ctx.exception))
+
+    def test_locked_starters_conflicting_with_formation_raise(self) -> None:
+        forwards = [c.player_season_id for c in self.pool if c.role == "FORWARD"][:3]
+        with self.assertRaises(OptimizerError) as ctx:
+            solve_squad(
+                self.pool,
+                self.rules,
+                locked_starter_ids=forwards,
+                formation="5-4-1",
+            )
+        self.assertIn("formation", str(ctx.exception))
+
+    def test_infeasible_lock_combination_names_the_locks(self) -> None:
+        # Each pin is legal on its own, but together they eat the whole budget
+        # and leave nothing for the remaining, mandatory squad slots.
+        expensive = _pool()
+        expensive = [
+            replace(c, price=30.0) if c.player_season_id <= 3 else c
+            for c in expensive
+        ]
+        locked = [1, 2, 3]
+        with self.assertRaises(OptimizerError) as ctx:
+            solve_squad(expensive, self.rules, locked_ids=locked)
+        self.assertIn("locked", str(ctx.exception))
+
+    def test_validator_catches_a_dropped_lock(self) -> None:
+        solution = solve_squad(self.pool, self.rules)
+        violations = validate_squad(solution, self.rules, locked_ids=[999999])
+        self.assertTrue(any("locked player 999999" in v for v in violations))
+
+    def test_validator_catches_a_wrong_formation(self) -> None:
+        solution = solve_squad(self.pool, self.rules, formation="4-4-2")
+        violations = validate_squad(solution, self.rules, formation="3-4-3")
+        self.assertTrue(any("formation 3-4-3" in v for v in violations))
+
+
 class ValidatorTest(unittest.TestCase):
     def _valid_solution(self) -> dict:
         return solve_squad(_pool(), _rpl_rules())
@@ -473,6 +706,35 @@ class OptimizerIntegrationTest(unittest.TestCase):
             report["solution"]["transfers"]["made"],
             report["rules"]["total_transfers"],
         )
+
+    def test_end_to_end_locked_player(self) -> None:
+        report = build_squad_optimization(
+            self.session_factory, tour_ref="1773", locked=["111"]
+        )
+        squad = report["solution"]["squad"]
+        locked_entry = next(p for p in squad if p["fantasy_player_id"] == "111")
+        self.assertTrue(locked_entry["is_locked"])
+        self.assertEqual(report["counts"]["locked"], 1)
+        self.assertEqual(
+            report["solution"]["constraints"]["locked"],
+            [locked_entry["player_season_id"]],
+        )
+        self.assertTrue(report["valid"])
+
+    def test_end_to_end_locked_formation(self) -> None:
+        # Two starters: one goalkeeper and one forward, i.e. formation 0-0-1.
+        report = build_squad_optimization(
+            self.session_factory, tour_ref="1773", formation="0-0-1"
+        )
+        self.assertEqual(report["solution"]["formation"], "0-0-1")
+        self.assertTrue(report["valid"])
+
+    def test_end_to_end_unknown_lock_raises(self) -> None:
+        with self.assertRaises(OptimizerError) as ctx:
+            build_squad_optimization(
+                self.session_factory, tour_ref="1773", locked=["does-not-exist"]
+            )
+        self.assertIn("does-not-exist", str(ctx.exception))
 
     def test_finished_season_without_tour_raises(self) -> None:
         self._exec("UPDATE fantasy_tours SET status = 'FINISHED'")

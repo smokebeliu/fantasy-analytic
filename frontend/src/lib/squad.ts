@@ -25,8 +25,10 @@ interface RoleConstraint {
 export interface SquadLimits {
   totalBudget: number;
   totalPlayers: number;
+  startingPlayers: number;
   maxSameTeam: number;
   roleLimits: Record<Role, { min: number; max: number }>;
+  startingRoleLimits: Record<Role, { min: number; max: number }>;
 }
 
 // Parse the API roster-constraint list ({role, minCount, maxCount}) into a
@@ -58,12 +60,37 @@ export function resolveSquadLimits(
   maxSameTeam: number | null | undefined,
 ): SquadLimits {
   const totalPlayers = rules?.total_players ?? 15;
+  const startingPlayers = rules?.starting_players ?? 11;
   return {
     totalBudget: rules?.total_budget ?? 100,
     totalPlayers,
+    startingPlayers,
     maxSameTeam: maxSameTeam ?? totalPlayers,
     roleLimits: parseRoleLimits(rules?.full_roster_constraints, totalPlayers),
+    startingRoleLimits: parseRoleLimits(
+      rules?.starting_roster_constraints,
+      startingPlayers,
+    ),
   };
+}
+
+// Enumerate every "defenders-midfielders-forwards" formation the season rules
+// allow, mirroring optimizer.parse_formation on the backend: goalkeepers take
+// whatever is left of the starting eleven.
+export function formationOptions(limits: SquadLimits): string[] {
+  const bound = (role: Role) => limits.startingRoleLimits[role];
+  const options: string[] = [];
+  for (let def = bound("DEFENDER").min; def <= bound("DEFENDER").max; def += 1) {
+    for (let mid = bound("MIDFIELDER").min; mid <= bound("MIDFIELDER").max; mid += 1) {
+      for (let fwd = bound("FORWARD").min; fwd <= bound("FORWARD").max; fwd += 1) {
+        const keepers = limits.startingPlayers - def - mid - fwd;
+        const gk = bound("GOALKEEPER");
+        if (keepers < gk.min || keepers > gk.max) continue;
+        options.push(`${def}-${mid}-${fwd}`);
+      }
+    }
+  }
+  return options;
 }
 
 export interface SquadValidation {
