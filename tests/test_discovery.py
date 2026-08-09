@@ -5,6 +5,8 @@ from pathlib import Path
 from fantasy_analytics.discovery import (
     DiscoveryOptions,
     _derive_team_match_stats,
+    _flatten_matches,
+    _is_match_finished,
     _normalize_team_season_stats,
     _select_history_samples,
     _select_season,
@@ -73,10 +75,12 @@ class DerivedTeamStatsTest(unittest.TestCase):
         ]
         matches = [
             {
+                "match_status": "CLOSED",
                 "home": {"score": 2, "team": {"id": "home"}},
                 "away": {"score": 0, "team": {"id": "away"}},
             },
             {
+                "match_status": "CLOSED",
                 "home": {"score": 1, "team": {"id": "away"}},
                 "away": {"score": 1, "team": {"id": "home"}},
             },
@@ -99,6 +103,7 @@ class DerivedTeamStatsTest(unittest.TestCase):
         teams = [{"name": "Home", "statObject": {"id": "home"}}]
         matches = [
             {
+                "match_status": "CLOSED",
                 "home": {"score": None, "team": {"id": "home"}},
                 "away": {"score": None, "team": {"id": "unknown"}},
             }
@@ -107,6 +112,65 @@ class DerivedTeamStatsTest(unittest.TestCase):
         result = _derive_team_match_stats(teams, matches)
 
         self.assertEqual(0, result[0]["matches"])
+
+    def test_ignores_not_started_matches_with_zero_scores(self) -> None:
+        """An unplayed fixture returns 0:0 (not null); it must be ignored."""
+        teams = [
+            {"name": "Home", "statObject": {"id": "home"}},
+            {"name": "Away", "statObject": {"id": "away"}},
+        ]
+        matches = [
+            {
+                "match_status": "NOT_STARTED",
+                "home": {"score": 0, "team": {"id": "home"}},
+                "away": {"score": 0, "team": {"id": "away"}},
+            }
+        ]
+
+        result = {
+            item["stat_team_id"]: item
+            for item in _derive_team_match_stats(teams, matches)
+        }
+
+        self.assertEqual(0, result["home"]["matches"])
+        self.assertEqual(0, result["home"]["draws"])
+        self.assertEqual(0, result["away"]["matches"])
+
+
+class MatchFinishedTest(unittest.TestCase):
+    def test_only_closed_matches_are_finished(self) -> None:
+        self.assertTrue(_is_match_finished("CLOSED"))
+        self.assertTrue(_is_match_finished("closed"))
+        self.assertFalse(_is_match_finished("NOT_STARTED"))
+        self.assertFalse(_is_match_finished("LIVE"))
+        self.assertFalse(_is_match_finished(None))
+        self.assertFalse(_is_match_finished(""))
+
+    def test_flatten_matches_carries_match_status(self) -> None:
+        season = {
+            "tours": [
+                {
+                    "id": "1",
+                    "name": "1 тур",
+                    "status": "OPENED",
+                    "matches": [
+                        {
+                            "id": "900001",
+                            "scheduledAt": "2026-07-24T17:00:00Z",
+                            "matchStatus": "NOT_STARTED",
+                            "home": {"score": 0, "team": {"id": "home"}},
+                            "away": {"score": 0, "team": {"id": "away"}},
+                        }
+                    ],
+                }
+            ]
+        }
+
+        flattened = _flatten_matches(season)
+
+        self.assertEqual(1, len(flattened))
+        self.assertEqual("NOT_STARTED", flattened[0]["match_status"])
+        self.assertFalse(_is_match_finished(flattened[0]["match_status"]))
 
 
 class NormalizeTeamStatsTest(unittest.TestCase):
