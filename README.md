@@ -275,6 +275,27 @@ to only write the `forecast.json`/`forecast.csv` artifacts. The forecast design
 and the reconstructed scoring rules live in
 [`docs/data-model.md`](docs/data-model.md).
 
+### Forecasts are materialised automatically
+
+Running the CLI by hand is no longer a prerequisite for the read API. Nothing
+used to call the forecast step, so a freshly published snapshot served
+`projection: null` and the player table's forecast column was empty until
+somebody remembered to run `fantasy-forecast`; the optimizer hid the problem
+because it rebuilds the forecast in process instead of reading the table. Two
+places now close that gap:
+
+- the ingestion worker forecasts the next unplayed tour right after the quality
+  gate publishes (reported as the `forecast` stage of the refresh job), so a
+  fresh import arrives with projections stored;
+- `GET /players` and `GET /players/{id}` materialise the requested tour on first
+  access, so a snapshot imported by an older build heals itself.
+
+Building one tour is three models over a few hundred players and takes well under
+a second. It runs under a session-level advisory lock keyed by `(run, tour)`, so
+concurrent readers never build the same tour twice, and a tour that cannot be
+forecast (no fixture yet) leaves the table untouched instead of failing the read.
+The CLI remains the way to forecast an arbitrary historical tour.
+
 ### Cross-season first-tour forecast
 
 When the target season has not played a match yet (for example the first tour of
@@ -327,6 +348,37 @@ re-checked by an independent validator, an infeasible problem raises a clear
 error, and the computation is deterministic. The full result is written to
 `optimizer.json`. The optimizer design lives in
 [`docs/data-model.md`](docs/data-model.md).
+
+The objective is lexicographic: expected points first, then — among squads that
+score the same — the fewest transfers, then the least money spent. Ties are
+everywhere (two bench players of the same role and price are interchangeable), and
+without the middle rank the answer could ask for three transfers worth `+0.0`
+points and burn an allowance the user cannot get back. Asking for transfers on an
+already optimal squad therefore reports none.
+
+The search is bounded by a budget in *deterministic* time rather than wall clock,
+so the same request returns the same squad on any machine. It runs in two phases:
+a single worker proves optimality for almost everything in a fraction of a second,
+and only the awkward instances — a transfers request forced to keep a squad of
+near-worthless players — fall back to CP-SAT's wider strategy portfolio, which is
+interleaved rather than raced so ties are still broken reproducibly. A budget that
+runs out yields the best squad found so far, reported as
+`solution.proven_optimal: false`, instead of no answer at all; `solve_limit` on
+`solve_squad`/`build_squad_optimization` raises or lowers it.
+
+### Which replacements to make
+
+In limited-transfers mode `solution.transfers` describes both sides of every swap
+rather than two unrelated lists:
+
+- `out` and `in` carry full player entries (name, position, club, price, expected
+  points). A player who has no candidate row for the tour — he left the league or
+  his club has no fixture — is reported with `unavailable: true` and his id;
+- `pairs` matches them up, one entry per swap, with `delta_expected_points` and
+  `delta_price`. Because the roster's per-role limits are exact, a transfer trades
+  like for like, so the pairing inside a position is the only sensible reading;
+  within a position the two sides are matched by price rank, which keeps each pair
+  roughly budget-neutral.
 
 ### Pinned players and a chosen formation
 
@@ -497,6 +549,16 @@ curl "http://127.0.0.1:8000/players?season_id=1&tour_id=15&model=poisson_events\
 curl "http://127.0.0.1:8000/players/2?tour_id=15"   # card with history + projection
 ```
 
+Every player also carries a `prior_season` block — what the same person did in the
+previous season, resolved through the cross-season identity
+(`players.stat_player_id`): points, average, rank, closing price, appearances with
+at least a minute played, minutes, goals, assists, saves, recoveries, cards and
+goals conceded. In the opening tours the current-season columns are still nearly
+empty, so this is what actually tells a manager whether a player is worth buying.
+The block is `null` when nothing precedes the season — unlike the cross-season
+forecast, the read path refuses to fall back to a *later* season, which would
+label next season as last season.
+
 Optimizer endpoints wrap the step-8 solver (database only, no GraphQL):
 
 ```bash
@@ -517,8 +579,9 @@ curl -X POST http://127.0.0.1:8000/optimizer/squad \
 List responses carry the snapshot time (`data_freshness`); projections carry the
 model, feature and scoring versions. Every error uses one envelope,
 `{"error": {"type", "message", "details"}}`. Projections are read from
-`player_forecasts`, so run `fantasy-forecast --tour <id>` first to populate a
-tour's projections. The OpenAPI schema is committed at
+`player_forecasts`, which the player endpoints materialise on first access (see
+"Forecasts are materialised automatically"), so no manual `fantasy-forecast` run
+is needed before a tour has projections. The OpenAPI schema is committed at
 [`docs/openapi.json`](docs/openapi.json) and regenerated with:
 
 ```bash
@@ -531,18 +594,39 @@ PYTHONPATH=src python3 -m fantasy_analytics.openapi_cli --output docs/openapi.js
 and squad optimizer. The player table shows the full season statistics as of now
 (no tour filter) with position/club/status/price filters, instant client-side
 sorting (including by season points), pagination and up-to-four player
-comparison; the `Прогноз` column is projected for the upcoming tour. A player
-card (slide-over drawer and a dedicated `/players/[id]` route) keeps the per-tour
-match history and a forecast breakdown by scoring component; and a squad builder that
-validates every roster rule (size, per-role, budget, club limit, duplicates) on
-the client before submission and calls the optimizer to build a squad or suggest
-transfers. In the squad builder, any player can be pinned (📌) on the pitch or in
-the squad list and a formation can be chosen; `Подобрать под мою схему` then asks
-the optimizer to keep the pinned players, honour the formation and fill the rest
-optimally. When the resulting eleven still contains players who face each other,
-the result panel names each such pair and the penalty it cost. Data freshness and
-the model version are shown in the header, and loading/empty/error states are
-covered across all views.
+comparison; the `Прогноз` column is projected for the upcoming tour and a
+`Прошлый сезон` column carries last season's points. A player card (slide-over
+drawer and a dedicated `/players/[id]` route) keeps the per-tour match history, a
+forecast breakdown by scoring component and a `Прошлый сезон` block (points,
+average, rank, appearances, minutes, goals, assists and saves or recoveries).
+
+Hovering any player — on the pitch, in the pool or in the table — opens a compact
+card with his full name, position, club, price, projection, season points and
+average, plus last season's points, average, rank and appearances. A pitch card
+only has room for a name and a number, and last season is the evidence that
+matters most before the new one has produced any.
+
+The squad builder validates every roster rule (size, per-role, budget, club limit,
+duplicates) on the client before submission and offers three optimizer actions
+that differ only in what they are allowed to keep — which a note under the toolbar
+spells out, because the labels alone cannot:
+
+- **`Собрать состав с нуля`** builds the best squad for the tour and ignores
+  everything you selected;
+- **`Подобрать под мою схему`** keeps the players pinned with 📌 and the chosen
+  formation and fills the remaining slots optimally. While nothing is pinned and no
+  formation is chosen it is unavailable with the reason on the button: it would
+  return the same squad as building from scratch;
+- **`Оптимизировать замены (N)`** keeps the squad you own and suggests at most `N`
+  replacements, `N` defaulting to the tour's own allowance (three in the RPL). The
+  result is one row per swap — who leaves, who arrives, the points gained and
+  whether the replacement is dearer or cheaper — and it does *not* overwrite your
+  squad, because the whole point is to compare the two.
+
+When the resulting eleven still contains players who face each other, the result
+panel names each such pair and the penalty it cost. Data freshness and the model
+version are shown in the header, and loading/empty/error states are covered across
+all views.
 
 The `Обновление` screen (`/admin`) drives the manual refresh: one button enqueues
 a real ingestion job, the panel shows the stage, the progress, the start time and
