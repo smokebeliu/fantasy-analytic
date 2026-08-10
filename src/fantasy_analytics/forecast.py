@@ -10,7 +10,10 @@ deliberately an *interpretable* baseline, not a black box:
   Poisson rates derived from venue attack/defence, and the clean-sheet
   probability is the Poisson probability that the opponent fails to score.
 * **Event contributions.** Goals, assists, saves, ball recoveries and cards are
-  projected from the player's per-90 rates and expected minutes.
+  projected from the player's per-90 rates and expected minutes. Rewards that
+  the rules pay per completed block (per three saves or recoveries, per two
+  goals conceded) are scored as the expected number of whole blocks, not as the
+  count divided by the block size.
 * **Rules, not constants.** Each projected event is converted into points with a
   versioned scoring table (:data:`SCORING`), reconstructed from the season's
   own per-match points, so ``expected_points`` is the exact sum of its
@@ -48,7 +51,9 @@ from .features import FEATURE_VERSION, build_feature_dataset
 
 # Bumped whenever the model or its parameters change so forecasts from different
 # code revisions never get silently mixed.
-MODEL_VERSION = "1.0.0"
+# 1.1.0 corrected the goalkeeper scoring row and replaced the linear
+#   approximation of the per-N thresholds with their exact Poisson expectation.
+MODEL_VERSION = "1.1.0"
 
 # Model names persisted alongside every forecast row.
 MODEL_EVENT = "poisson_events"
@@ -58,12 +63,19 @@ MODEL_RECENT = "recent_form"
 # Version of the scoring table below. It is empirically reconstructed from the
 # 2025/2026 RPL season's per-match ``points`` (the authoritative fantasy score),
 # because Sports.ru only publishes the scoring rules as an image and the
-# structured per-event breakdown (``statDetails``) is empty. Reconstructing the
-# 9578 imported player-match rows from these rules reproduces 83% exactly and
-# 96% within +/-1 point; the residual is dominated by the indirect "fantasy
-# assist" and late ball-recovery adjustments that are not present in the
-# imported per-match columns (documented in docs/data-model.md).
-SCORING_VERSION = "rpl-2025-2026.1"
+# structured per-event breakdown (``statDetails``) is empty.
+#
+# ``.2`` corrected the goalkeeper row: keepers are *not* paid for ball
+# recoveries. They record ~8.4 of them per 90 minutes — every claimed cross and
+# collected back-pass — so paying the outfield rate of 1 point per 3 credited a
+# keeper with roughly 2.3 points he never scored, in every single match. The
+# error was invisible in the pooled accuracy figure because keepers are 6% of
+# the rows, and it made the optimizer buy cheap goalkeepers instead of forwards.
+# Dropping the reward moves the goalkeeper reconstruction from 3.7% to 94.6%
+# exact on the RPL and from 2.4% to 94.7% on La Liga; the outfield rows were
+# re-fitted at the same time and came out unchanged (see
+# :mod:`fantasy_analytics.scoring_audit`).
+SCORING_VERSION = "rpl-2025-2026.2"
 
 # Minutes threshold for a "full" appearance (a start): clean sheets and the
 # 2-point appearance bonus require it.
@@ -88,7 +100,8 @@ class RoleScoring:
 
 
 # The versioned scoring table. Rewards/penalties that are role-independent
-# (assist +3, recovery +1 per 3, yellow -1) are repeated per role for clarity.
+# (assist +3, yellow -1) are repeated per role for clarity. The ball-recovery
+# reward is *not* role-independent: only outfield players are paid for it.
 SCORING: dict[str, RoleScoring] = {
     "GOALKEEPER": RoleScoring(
         appearance_sub=1,
@@ -98,7 +111,7 @@ SCORING: dict[str, RoleScoring] = {
         clean_sheet=4,
         conceded_per_two=-1,
         save_per_three=1,
-        recovery_per_three=1,
+        recovery_per_three=0,
         yellow_card=-1,
     ),
     "DEFENDER": RoleScoring(
@@ -199,6 +212,34 @@ def clean_sheet_probability(opponent_goals_mean: float) -> float:
     return poisson_pmf(0, max(0.0, opponent_goals_mean))
 
 
+def expected_threshold_count(mean: float, step: int) -> float:
+    """``E[floor(N / step)]`` for a Poisson count ``N`` with the given mean.
+
+    Several rewards are paid in whole blocks rather than per event: one point
+    per *three* recoveries or saves, one penalty per *two* goals conceded. Two
+    recoveries are therefore worth nothing, and scoring them as ``2 / 3`` of a
+    point is not a rounding detail — averaged over a season it overpays every
+    threshold reward by roughly a third of a point per match, which is most of a
+    goalkeeper's or a defender's whole edge.
+
+    The expectation is summed directly from the Poisson probability mass, whose
+    tail is cut where it can no longer move the result.
+    """
+    if step <= 0:
+        raise ValueError("Threshold step must be positive")
+    lam = max(0.0, float(mean))
+    if lam == 0.0:
+        return 0.0
+    limit = int(lam + 12.0 * math.sqrt(lam)) + 4 * step + 12
+    total = 0.0
+    pmf = math.exp(-lam)
+    for count in range(limit + 1):
+        if count:
+            pmf *= lam / count
+        total += pmf * (count // step)
+    return total
+
+
 def team_goal_means(
     club_attack: float,
     club_defense: float,
@@ -297,10 +338,19 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
     assist_pts = scoring.assist * exp_assists
     # A clean sheet only counts for a full appearance.
     clean_sheet_pts = scoring.clean_sheet * p_full * p_clean_sheet
-    # -1 per 2 conceded ~= -0.5 per conceded goal, weighted by playing at all.
-    conceded_pts = (scoring.conceded_per_two / 2.0) * goals_against * p_appearance
-    save_pts = (scoring.save_per_three / 3.0) * exp_saves
-    recovery_pts = (scoring.recovery_per_three / 3.0) * exp_recoveries
+    # The three block rewards are paid per completed threshold, so each one is
+    # the expected number of *whole* blocks rather than the count divided by the
+    # block size. The concession penalty is additionally weighted by playing at
+    # all, since a player who never comes on concedes nothing.
+    conceded_pts = (
+        scoring.conceded_per_two
+        * expected_threshold_count(goals_against, 2)
+        * p_appearance
+    )
+    save_pts = scoring.save_per_three * expected_threshold_count(exp_saves, 3)
+    recovery_pts = scoring.recovery_per_three * expected_threshold_count(
+        exp_recoveries, 3
+    )
     yellow_pts = scoring.yellow_card * exp_yellows
 
     components = {
@@ -378,9 +428,14 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def forecast_mean_baseline(row: dict[str, Any]) -> dict[str, Any]:
-    """Baseline: season mean points per appearance scaled by play probability."""
+    """Baseline: season mean points per appearance scaled by play probability.
+
+    The totals are the feature builder's blended ones, so early in a season they
+    are fractional: last season's matches are still in there, at the weight the
+    blend gives them.
+    """
     p_appearance = float(row.get("p_appearance") or 0.0)
-    total_appearances = int(row.get("total_appearances") or 0)
+    total_appearances = float(row.get("total_appearances") or 0.0)
     total_points = float(row.get("total_points") or 0.0)
     is_available = bool(row.get("is_available", True))
 
@@ -636,6 +691,7 @@ __all__ = [
     "reconstruct_points",
     "poisson_pmf",
     "clean_sheet_probability",
+    "expected_threshold_count",
     "team_goal_means",
     "appearance_probabilities",
     "forecast_event_model",

@@ -38,6 +38,7 @@ from fantasy_analytics.forecast import (
     appearance_probabilities,
     build_forecast_dataset,
     clean_sheet_probability,
+    expected_threshold_count,
     forecast_event_model,
     forecast_mean_baseline,
     forecast_recent_baseline,
@@ -161,6 +162,43 @@ class ScoringTableTest(unittest.TestCase):
         self.assertEqual(SCORING["GOALKEEPER"].conceded_per_two, -1)
         self.assertEqual(SCORING["MIDFIELDER"].conceded_per_two, 0)
 
+    def test_only_outfield_players_are_paid_for_recoveries(self) -> None:
+        self.assertEqual(SCORING["GOALKEEPER"].recovery_per_three, 0)
+        for role in ("DEFENDER", "MIDFIELDER", "FORWARD"):
+            self.assertEqual(SCORING[role].recovery_per_three, 1)
+
+
+class ThresholdRewardTest(unittest.TestCase):
+    """The per-N rewards are paid in whole blocks, not pro rata."""
+
+    def test_zero_mean_pays_nothing(self) -> None:
+        self.assertEqual(expected_threshold_count(0.0, 3), 0.0)
+
+    def test_below_the_threshold_is_worth_much_less_than_the_ratio(self) -> None:
+        # Two recoveries on average pay far less than two thirds of a point.
+        self.assertLess(expected_threshold_count(2.0, 3), 2.0 / 3.0 - 0.2)
+
+    def test_matches_a_brute_force_expectation(self) -> None:
+        for mean in (0.5, 2.0, 3.0, 8.4):
+            for step in (2, 3):
+                brute = sum(
+                    poisson_pmf(count, mean) * (count // step)
+                    for count in range(0, 60)
+                )
+                self.assertAlmostEqual(
+                    expected_threshold_count(mean, step), brute, places=8
+                )
+
+    def test_stays_below_the_linear_approximation(self) -> None:
+        # The linear form is what the model used to charge, and it always
+        # overpays, by roughly (step - 1) / (2 * step) of a block.
+        for mean in (1.0, 3.0, 6.0, 9.0):
+            self.assertLess(expected_threshold_count(mean, 3), mean / 3.0)
+
+    def test_rejects_a_non_positive_step(self) -> None:
+        with self.assertRaises(ValueError):
+            expected_threshold_count(3.0, 0)
+
 
 class EventModelTest(unittest.TestCase):
     def test_components_sum_to_expected_points(self) -> None:
@@ -181,7 +219,12 @@ class EventModelTest(unittest.TestCase):
         self.assertEqual(c["appearance"], 2.0)  # full appearance
         self.assertAlmostEqual(c["goals"], 2.5, places=4)  # MID goal 5 * 0.5
         self.assertAlmostEqual(c["assists"], 0.75, places=4)  # 3 * 0.25
-        self.assertAlmostEqual(c["recoveries"], 1.0, places=4)  # (1/3) * 3
+        # Three recoveries a match do not pay a whole point: the reward needs
+        # three *completed*, and a match with two of them is worth nothing.
+        self.assertAlmostEqual(
+            c["recoveries"], expected_threshold_count(3.0, 3), places=4
+        )
+        self.assertLess(c["recoveries"], 1.0)
         # Clean sheet: MID(1) * p_full(1) * exp(-1.0).
         self.assertAlmostEqual(c["clean_sheet"], math.exp(-1.0), places=3)
         self.assertGreater(result["uncertainty"], 0.0)
@@ -207,7 +250,23 @@ class EventModelTest(unittest.TestCase):
         result = forecast_event_model(row)
         # opponent scores 0 on average -> clean-sheet probability 1.0 -> +4.
         self.assertAlmostEqual(result["components"]["clean_sheet"], 4.0, places=4)
-        self.assertAlmostEqual(result["components"]["saves"], 1.0, places=4)  # 3/3
+        self.assertAlmostEqual(
+            result["components"]["saves"], expected_threshold_count(3.0, 3), places=4
+        )
+
+    def test_goalkeeper_is_not_paid_for_ball_recoveries(self) -> None:
+        # A keeper is credited with every claimed cross and collected back-pass,
+        # around eight a match. Paying the outfield rate for them handed him ~2.3
+        # points he never scored and had the optimizer filling squads with cheap
+        # keepers instead of forwards.
+        keeper = forecast_event_model(
+            _feature_row(role="GOALKEEPER", recoveries_per90=9.0)
+        )
+        defender = forecast_event_model(
+            _feature_row(role="DEFENDER", recoveries_per90=9.0)
+        )
+        self.assertEqual(keeper["components"]["recoveries"], 0.0)
+        self.assertGreater(defender["components"]["recoveries"], 2.0)
 
     def test_deterministic(self) -> None:
         row = _feature_row(goals_per90=0.7, assists_per90=0.3)
@@ -375,7 +434,8 @@ class ForecastIntegrationTest(unittest.TestCase):
     def test_forward_event_forecast_matches_history(self) -> None:
         # Player 111 (forward) has one pre-cutoff match: 78', 1 goal, 2 assists,
         # 5 recoveries, 1 yellow. Expected counts recover the raw stat line, so
-        # expected points ~= 2(app) + 4(goal) + 6(assists) + 1.67(rec) - 1(yc).
+        # expected points ~= 2(app) + 4(goal) + 6(assists) + 1.33(rec) - 1(yc),
+        # the recoveries being the expected number of completed blocks of three.
         report = build_forecast_dataset(self.session_factory, tour_ref="1773")
         row = self._event_rows(report)["111"]
         self.assertEqual(row["role"], "FORWARD")
@@ -383,10 +443,12 @@ class ForecastIntegrationTest(unittest.TestCase):
         self.assertEqual(c["appearance"], 2.0)
         self.assertAlmostEqual(c["goals"], 4.0, places=1)
         self.assertAlmostEqual(c["assists"], 6.0, places=1)
-        self.assertAlmostEqual(c["recoveries"], 5.0 / 3.0, places=1)
+        self.assertAlmostEqual(
+            c["recoveries"], expected_threshold_count(5.0, 3), places=1
+        )
         self.assertAlmostEqual(c["yellow_cards"], -1.0, places=1)
         self.assertEqual(c["clean_sheet"], 0.0)  # forwards get no clean sheet
-        self.assertAlmostEqual(float(row["expected_points"]), 12.67, delta=0.1)
+        self.assertAlmostEqual(float(row["expected_points"]), 12.33, delta=0.1)
 
     def test_baselines_match_history(self) -> None:
         report = build_forecast_dataset(self.session_factory, tour_ref="1773")

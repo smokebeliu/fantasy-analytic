@@ -19,9 +19,12 @@ league.
 
 Only matches the player actually played are scored. A row with no minutes is worth
 zero points and is reconstructed exactly, so including them would inflate every
-league's accuracy by the same uninformative amount — which is why the exact-match
-rate here reads a few points lower than the 83% quoted in ``docs/data-model.md``,
-which counted all 9578 imported RPL rows rather than the 7052 played ones.
+league's accuracy by the same uninformative amount.
+
+The audit is also how the table gets corrected. Pooled across roles it reported a
+healthy 78% exact on La Liga while the goalkeeper row was wrong by more than two
+points a match, because keepers are 6% of the rows: read the per-role breakdown,
+not only the total.
 """
 
 from __future__ import annotations
@@ -89,14 +92,22 @@ def audit_run(session: Session, run_id: int) -> dict[str, Any]:
 
     def shares(counter: Counter[int], total: int) -> dict[str, float]:
         if total == 0:
-            return {f"within_{t}": 0.0 for t in TOLERANCES}
+            return {
+                "mean_residual": 0.0,
+                **{f"within_{t}": 0.0 for t in TOLERANCES},
+            }
         return {
-            f"within_{t}": round(
-                sum(count for diff, count in counter.items() if abs(diff) <= t)
-                / total,
-                4,
-            )
-            for t in TOLERANCES
+            "mean_residual": round(
+                sum(diff * count for diff, count in counter.items()) / total, 4
+            ),
+            **{
+                f"within_{t}": round(
+                    sum(count for diff, count in counter.items() if abs(diff) <= t)
+                    / total,
+                    4,
+                )
+                for t in TOLERANCES
+            },
         }
 
     total = len(rows)
@@ -104,11 +115,6 @@ def audit_run(session: Session, run_id: int) -> dict[str, Any]:
         "run_id": run_id,
         "scoring_version": SCORING_VERSION,
         "appearances": total,
-        "mean_residual": (
-            round(sum(diff * count for diff, count in residuals.items()) / total, 4)
-            if total
-            else 0.0
-        ),
         **shares(residuals, total),
         "by_role": {
             role: {"appearances": sum(counter.values()), **shares(counter, sum(counter.values()))}
@@ -180,16 +186,22 @@ def _print_table(reports: list[dict[str, Any]]) -> None:
         f"{'slug':<18} {'season':<12} {'appearances':>11} "
         f"{'exact':>7} {'±1':>7} {'±2':>7} {'mean':>7}"
     )
+    def _row(label: str, season: str, stats: dict[str, Any]) -> str:
+        return (
+            f"{label:<18} {season:<12} {stats['appearances']:>11} "
+            f"{stats['within_0'] * 100:>6.1f}% {stats['within_1'] * 100:>6.1f}% "
+            f"{stats['within_2'] * 100:>6.1f}% {stats['mean_residual']:>7.3f}"
+        )
+
     print(f"scoring table: {SCORING_VERSION}")
     print(header)
     print("-" * len(header))
     for report in reports:
-        print(
-            f"{report.get('slug', '?'):<18} {report.get('season', '?'):<12} "
-            f"{report['appearances']:>11} "
-            f"{report['within_0'] * 100:>6.1f}% {report['within_1'] * 100:>6.1f}% "
-            f"{report['within_2'] * 100:>6.1f}% {report['mean_residual']:>7.3f}"
-        )
+        print(_row(report.get("slug", "?"), report.get("season", "?"), report))
+        # A role scored by different rules disappears into the pooled figure —
+        # goalkeepers are 6% of the rows — so every role is reported separately.
+        for role, stats in report.get("by_role", {}).items():
+            print(_row(f"  {role.lower()}", "", stats))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
