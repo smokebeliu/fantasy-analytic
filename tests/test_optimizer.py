@@ -296,6 +296,37 @@ class TransfersModeTest(unittest.TestCase):
         self.assertEqual(solution["transfers"]["kept"], 15)
         self.assertEqual(validate_squad(solution, self.rules), [])
 
+    def test_no_transfer_is_suggested_when_it_gains_nothing(self) -> None:
+        # Ties are everywhere: two bench players of the same role and price are
+        # interchangeable, so an arbitrary tie-break would answer "make three
+        # transfers for +0.0 points" and burn an allowance the user cannot get
+        # back. Keeping players has to win every tie.
+        solution = solve_squad(
+            self.pool, self.rules, current_ids=self.optimal_ids, max_transfers=3
+        )
+        self.assertEqual(0, solution["transfers"]["made"])
+        self.assertEqual([], solution["transfers"]["pairs"])
+
+    def test_a_gaining_transfer_still_beats_keeping_the_player(self) -> None:
+        # The preference for keeping players must not be strong enough to refuse a
+        # transfer that actually scores more.
+        worse = self._worse_squad_ids()
+        solution = solve_squad(
+            self.pool, self.rules, current_ids=worse, max_transfers=3
+        )
+        self.assertGreater(solution["transfers"]["made"], 0)
+        free = solve_squad(self.pool, self.rules)
+        self.assertLessEqual(
+            solution["objective_expected_points"],
+            free["objective_expected_points"],
+        )
+        self.assertGreater(
+            solution["objective_expected_points"],
+            solve_squad(
+                self.pool, self.rules, current_ids=worse, max_transfers=0
+            )["objective_expected_points"],
+        )
+
     def test_transfer_limit_caps_changes(self) -> None:
         worse = self._worse_squad_ids()
         limited = solve_squad(
@@ -437,6 +468,17 @@ class SolveBudgetTest(unittest.TestCase):
         with self.assertRaises(OptimizerError) as ctx:
             solve_squad(self.pool, _rpl_rules(total_budget=1.0))
         self.assertIn("No valid squad satisfies", str(ctx.exception))
+
+    def test_spending_less_only_breaks_a_genuine_tie(self) -> None:
+        # The cheapest of several equally projected squads is chosen, but never at
+        # the cost of a single point.
+        free = solve_squad(self.pool, self.rules)
+        richer = solve_squad(self.pool, _rpl_rules(total_budget=200.0))
+        self.assertGreaterEqual(
+            richer["objective_expected_points"],
+            free["objective_expected_points"],
+        )
+        self.assertLessEqual(free["total_price"], self.rules.total_budget)
 
     def test_repeating_a_solve_returns_the_same_squad(self) -> None:
         # The pool is full of exact ties, so a search that raced its workers

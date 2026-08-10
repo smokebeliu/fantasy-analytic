@@ -102,10 +102,13 @@ ROLE_SHORT = {
 _POINTS_SCALE = 10_000
 _PRICE_SCALE = 100
 
-# The primary (points) term is multiplied by this factor before the secondary
-# spend tie-break is subtracted, so the tie-break can never overturn a better
-# points solution. It only has to exceed the largest possible spend in cents.
-_TIE_BREAK_HEADROOM = 10_000_000
+# The objective is lexicographic: expected points first, then — when several
+# squads score the same — the fewest transfers, then the least money spent. The
+# order matters because ties are common: swapping one bench player for an equally
+# priced, equally projected one changes nothing, and answering "make three
+# transfers for +0.0 points" would spend a resource the user cannot get back.
+# Each rank is weighted so that one unit of a higher rank outweighs every
+# possible difference in the ranks below it (see :func:`_objective_weights`).
 
 
 class OptimizerError(RuntimeError):
@@ -392,6 +395,24 @@ def _candidate_public(candidate: Candidate) -> dict[str, Any]:
         "stat_source": candidate.stat_source,
         "is_newcomer": candidate.is_newcomer,
     }
+
+
+def _objective_weights(rules: SquadRules) -> tuple[int, int]:
+    """Weights that make the objective's three ranks strictly ordered.
+
+    Returns ``(points_weight, keep_weight)`` for
+    ``points * points_weight + kept * keep_weight - spend``.
+
+    Spend is bounded by the budget in cents, so a weight of one cent more than the
+    budget makes a single kept player outrank any possible saving. A squad can keep
+    at most ``total_players``, so points in turn need to outrank the whole keep
+    term plus the whole spend term. Deriving the weights instead of hard-coding a
+    large constant keeps the coefficients as small as the guarantee allows, which
+    is what the solver's bounds have to reason about.
+    """
+    keep_weight = rules.budget_cents + 1
+    points_weight = rules.total_players * keep_weight + rules.budget_cents + 1
+    return points_weight, keep_weight
 
 
 def _run_solver(
@@ -855,14 +876,22 @@ def solve_squad(
             model.Add(together <= start[right])
             clash_terms.append((together, charge))
 
-    # Objective: maximise starting + captain points less the fixture charge,
-    # break ties by spending less (more unused budget). The headroom keeps spend
-    # strictly secondary.
+    # Objective: maximise starting + captain points less the fixture charge, then
+    # keep as many current players as possible, then spend as little as possible.
     points_term = sum(
         candidates[i].points_scaled * (start[i] + captain[i]) for i in range(n)
     ) - sum(charge * together for together, charge in clash_terms)
     spend_term = sum(candidates[i].price_cents * pick[i] for i in range(n))
-    model.Maximize(points_term * _TIE_BREAK_HEADROOM - spend_term)
+    points_weight, keep_weight = _objective_weights(rules)
+    objective = points_term * points_weight - spend_term
+    if transfers_meta is not None:
+        # Every current player kept is one transfer not made. Without this a tie
+        # would be settled arbitrarily and the plan could ask for three swaps that
+        # gain nothing.
+        objective += (
+            sum(pick[i] for i in transfers_meta["current_present"]) * keep_weight
+        )
+    model.Maximize(objective)
 
     solver, status = _search(
         model, DEFAULT_SOLVE_LIMIT if solve_limit is None else solve_limit
