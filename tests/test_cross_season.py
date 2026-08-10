@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -42,15 +43,22 @@ from fantasy_analytics.features import (
     STAT_SOURCE_CURRENT,
     STAT_SOURCE_PRIOR,
     Appearance,
+    ClubMatch,
+    Fixture,
     PriorContext,
     PriorPlayer,
     RolePrior,
     _apply_newcomer_prior,
+    _build_row,
     _resolve_history_source,
     _role_priors,
     build_feature_dataset,
 )
-from fantasy_analytics.forecast import MODEL_EVENT, run_forecast
+from fantasy_analytics.forecast import (
+    MODEL_EVENT,
+    forecast_event_model,
+    run_forecast,
+)
 from fantasy_analytics.ingestion import IngestionOptions, run_ingestion
 from fantasy_analytics.optimizer import build_squad_optimization, validate_squad
 from fantasy_analytics.quality import run_quality_checks
@@ -87,8 +95,6 @@ requires_database = unittest.skipUnless(
 
 def _appearance(match_id: int, *, minutes: int, goals: int = 0, assists: int = 0,
                 saves: int = 0, recoveries: int = 0, yellows: int = 0) -> Appearance:
-    from datetime import datetime, timezone
-
     return Appearance(
         match_id=match_id,
         scheduled_at=datetime(2025, 7, match_id, tzinfo=timezone.utc),
@@ -150,47 +156,227 @@ class ResolveHistorySourceTest(unittest.TestCase):
             role_priors={"FORWARD": RolePrior(1.0, 0.5, 0.0, 2.0, 0.3, 70.0)},
         )
 
-    def test_current_season_when_not_cross_season(self) -> None:
+    def test_current_season_history_without_a_prior_run(self) -> None:
         source = _resolve_history_source(
             self._player(),
             3,
-            cross_season=False,
             appearances={10: [_appearance(1, minutes=90)]},
             current_club_matches={3: []},
             prior=None,
         )
-        self.assertEqual(STAT_SOURCE_CURRENT, source["stat_source"])
         self.assertFalse(source["is_newcomer"])
         self.assertEqual(1, len(source["appearances"]))
+        self.assertEqual([], source["prior_appearances"])
 
-    def test_prior_season_when_cross_and_history_exists(self) -> None:
+    def test_both_seasons_are_returned_when_both_exist(self) -> None:
+        # The two halves come back side by side; which one dominates is decided
+        # later by the prior weight, not here.
         source = _resolve_history_source(
             self._player(),
             3,
-            cross_season=True,
+            appearances={10: [_appearance(9, minutes=70)]},
+            current_club_matches={3: []},
+            prior=self._prior(with_history=True),
+        )
+        self.assertFalse(source["is_newcomer"])
+        self.assertEqual(1, len(source["appearances"]))
+        self.assertEqual(1, len(source["prior_appearances"]))
+
+    def test_prior_season_history_is_found_by_the_shared_identity(self) -> None:
+        source = _resolve_history_source(
+            self._player(),
+            3,
             appearances={},
             current_club_matches={},
             prior=self._prior(with_history=True),
         )
-        self.assertEqual(STAT_SOURCE_PRIOR, source["stat_source"])
         self.assertFalse(source["is_newcomer"])
-        self.assertEqual(1, len(source["appearances"]))
+        self.assertEqual(1, len(source["prior_appearances"]))
         self.assertIsNone(source["newcomer_prior"])
 
-    def test_newcomer_when_cross_and_no_prior_history(self) -> None:
+    def test_newcomer_when_neither_season_knows_the_player(self) -> None:
         # A player id the prior season never saw -> newcomer with role priors.
         source = _resolve_history_source(
             self._player(player_id=999),
             3,
-            cross_season=True,
             appearances={},
             current_club_matches={},
             prior=self._prior(with_history=True),
         )
-        self.assertEqual(STAT_SOURCE_PRIOR, source["stat_source"])
         self.assertTrue(source["is_newcomer"])
         self.assertEqual([], source["appearances"])
+        self.assertEqual([], source["prior_appearances"])
         self.assertIsNotNone(source["newcomer_prior"])
+
+
+class BlendedHistoryRowTest(unittest.TestCase):
+    """The two seasons meet here: what each one is worth, and when."""
+
+    CUTOFF = datetime(2027, 8, 1, tzinfo=timezone.utc)
+    PRIOR_END = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    CURRENT_END = datetime(2027, 7, 25, tzinfo=timezone.utc)
+    FIXTURE = Fixture(
+        match_id=9000,
+        scheduled_at=datetime(2027, 8, 15, tzinfo=timezone.utc),
+        club_id=1,
+        opponent_club_id=2,
+        is_home=True,
+    )
+    LEAGUE = {
+        "home_attack": 1.4,
+        "home_defense": 1.1,
+        "away_attack": 1.1,
+        "away_defense": 1.4,
+    }
+
+    def _season(
+        self,
+        count: int,
+        *,
+        ends: datetime,
+        played: int | None = None,
+        goals: int = 0,
+        points: int = 5,
+    ) -> tuple[list[Appearance], list[ClubMatch]]:
+        """A club's matches plus the player's appearances in the oldest ``played``."""
+        played = count if played is None else played
+        matches: list[ClubMatch] = []
+        appearances: list[Appearance] = []
+        for index in range(count):
+            # Index 0 is the most recent match, so the ones the player misses
+            # are the freshest — a run-in spent injured or rested.
+            when = ends - timedelta(days=7 * index)
+            match_id = ends.year * 1000 + index
+            matches.append(ClubMatch(match_id, when, index % 2 == 0, 1, 1))
+            if index >= count - played:
+                appearances.append(
+                    Appearance(
+                        match_id=match_id,
+                        scheduled_at=when,
+                        minutes=90,
+                        points=points,
+                        goals=goals,
+                        assists=0,
+                    )
+                )
+        return appearances, matches
+
+    def _row(self, *, current: tuple, prior: tuple) -> dict:
+        current_appearances, current_matches = current
+        prior_appearances, prior_matches = prior
+        return _build_row(
+            player={
+                "player_season_id": 1,
+                "player_id": 1,
+                "fantasy_player_id": "1",
+                "role": "FORWARD",
+                "player_name": "Звезда",
+            },
+            fixture=self.FIXTURE,
+            club_name="Club A",
+            opponent_name="Club B",
+            cutoff=self.CUTOFF,
+            target_match_ids=frozenset(),
+            appearances=current_appearances,
+            club_matches=current_matches,
+            prior_appearances=prior_appearances,
+            prior_club_matches=prior_matches,
+            snapshot={
+                "availability_status": "UNKNOWN",
+                "status_description": None,
+                "price": 11.5,
+                "selected_by": None,
+                "form": None,
+            },
+            strengths={},
+            league=self.LEAGUE,
+        )
+
+    def test_a_star_who_missed_the_run_in_is_not_written_off(self) -> None:
+        # The league's best players routinely miss the last matches of a season
+        # once the table is settled. Judging the new season on that window alone
+        # forecast them at exactly zero points — for every tour, all season.
+        prior = self._season(20, ends=self.PRIOR_END, played=16, goals=1, points=9)
+        row = self._row(current=([], []), prior=prior)
+
+        self.assertEqual(0.8, row["p_appearance"])
+        self.assertEqual(STAT_SOURCE_PRIOR, row["stat_source"])
+        self.assertGreater(row["expected_minutes"], 60)
+        self.assertGreater(row["goals_per90"], 0.9)
+        self.assertGreater(forecast_event_model(row)["expected_points"], 4.0)
+
+    def test_last_season_still_counts_once_the_new_one_starts(self) -> None:
+        # The plan's requirement: last season keeps informing later tours, at a
+        # weight that falls with every match of the new one.
+        prior = self._season(20, ends=self.PRIOR_END, goals=1)
+        weights = []
+        for played in (1, 3, 6, 12, 24):
+            current = self._season(played, ends=self.CURRENT_END, goals=0)
+            row = self._row(current=current, prior=prior)
+            weights.append(row["goals_per90"])
+            self.assertGreater(row["goals_per90"], 0.0)
+
+        self.assertEqual(weights, sorted(weights, reverse=True))
+        # A single match of the new season barely moves a rate; two dozen decide it.
+        self.assertGreater(weights[0], 0.8)
+        self.assertLess(weights[-1], 0.1)
+
+    def test_the_current_season_is_never_discounted(self) -> None:
+        # "Current results always take priority": with the same number of
+        # matches on both sides the new season already outweighs the old one.
+        prior = self._season(10, ends=self.PRIOR_END, goals=2)
+        current = self._season(10, ends=self.CURRENT_END, goals=0)
+        row = self._row(current=current, prior=prior)
+        self.assertLess(row["goals_per90"], 2.0 * 0.25)
+        self.assertEqual(STAT_SOURCE_CURRENT, row["stat_source"])
+
+    def test_a_benched_player_is_not_ever_present(self) -> None:
+        # Sports.ru lists every named substitute, so counting matchday rows made
+        # a permanent reserve look like a starter on half-length shifts.
+        matches = [
+            ClubMatch(i, self.CUTOFF - timedelta(days=7 * i), True, 1, 1)
+            for i in range(10)
+        ]
+        bench = [
+            Appearance(
+                match_id=i,
+                scheduled_at=self.CUTOFF - timedelta(days=7 * i),
+                minutes=0,
+                points=0,
+                goals=0,
+                assists=0,
+            )
+            for i in range(10)
+        ]
+        row = self._row(current=(bench, matches), prior=([], []))
+        self.assertEqual(0.0, row["p_appearance"])
+        self.assertEqual(0.0, row["expected_minutes"])
+        self.assertEqual(0, row["current_appearances"])
+        self.assertFalse(row["has_history"])
+
+    def test_recent_absences_weigh_more_than_old_ones(self) -> None:
+        # Within the season being played, when a player stopped featuring is the
+        # whole question, so the club's latest matches dominate.
+        recent_absence = self._row(
+            current=self._season(10, ends=self.CURRENT_END, played=6), prior=([], [])
+        )
+        old_absence_appearances, matches = self._season(10, ends=self.CURRENT_END)
+        # Drop the four *oldest* appearances instead of the four newest.
+        old_absence = self._row(
+            current=(old_absence_appearances[:6], matches), prior=([], [])
+        )
+        self.assertLess(recent_absence["p_appearance"], old_absence["p_appearance"])
+
+    def test_leakage_totals_stay_unweighted_and_current(self) -> None:
+        # The backtest's audit recomputes these, so they must be this season's
+        # raw numbers however much of last season is blended in.
+        prior = self._season(20, ends=self.PRIOR_END, points=9)
+        current = self._season(2, ends=self.CURRENT_END, points=4)
+        row = self._row(current=current, prior=prior)
+        self.assertEqual(2, row["current_appearances"])
+        self.assertEqual(8, row["current_points"])
+        self.assertEqual(180, row["current_minutes"])
+        self.assertGreater(row["total_points"], row["current_points"])
 
 
 class ApplyNewcomerPriorTest(unittest.TestCase):

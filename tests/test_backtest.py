@@ -154,9 +154,15 @@ class AuditTest(unittest.TestCase):
         row = {
             "player_season_id": 1,
             "stat_source": "current_season",
-            "total_appearances": 2,
-            "total_minutes": 150,
-            "total_points": 15,
+            # The blended totals are what the model consumes; the audit checks
+            # the unweighted current-season ones, which are the only numbers the
+            # cutoff can be held responsible for.
+            "total_appearances": 4.5,
+            "total_minutes": 320.0,
+            "total_points": 33.0,
+            "current_appearances": 2,
+            "current_minutes": 150,
+            "current_points": 15,
         }
         row.update(overrides)
         return {"cutoff": "2025-08-01T00:00:00+00:00", "rows": [row]}
@@ -206,7 +212,7 @@ class AuditTest(unittest.TestCase):
         # The row's totals include the target tour's match, which is exactly what
         # the audit must catch without trusting the feature builder.
         leaked = self._features(
-            total_appearances=3, total_minutes=240, total_points=35
+            current_appearances=3, current_minutes=240, current_points=35
         )
         audit = audit_tour(
             leaked,
@@ -214,10 +220,32 @@ class AuditTest(unittest.TestCase):
             tour_match_ids=frozenset({12}),
             first_kickoff=datetime(2025, 8, 3, tzinfo=timezone.utc),
         )
-        self.assertTrue(any("total_points" in item for item in audit["violations"]))
+        self.assertTrue(any("current_points" in item for item in audit["violations"]))
         self.assertTrue(
-            any("total_appearances" in item for item in audit["violations"])
+            any("current_appearances" in item for item in audit["violations"])
         )
+
+    def test_an_unused_substitute_does_not_count_as_history(self) -> None:
+        # A 0-minute matchday row is a bench place, not an appearance, so a row
+        # that counts it is reporting history it does not have.
+        appearances = self._appearances()
+        appearances[1].append(
+            Appearance(
+                match_id=13,
+                scheduled_at=datetime(2025, 7, 29, tzinfo=timezone.utc),
+                minutes=0,
+                points=0,
+                goals=0,
+                assists=0,
+            )
+        )
+        audit = audit_tour(
+            self._features(),
+            appearances=appearances,
+            tour_match_ids=frozenset({12}),
+            first_kickoff=datetime(2025, 8, 3, tzinfo=timezone.utc),
+        )
+        self.assertEqual([], audit["violations"])
 
     def test_cutoff_after_kickoff_is_a_warning_not_a_violation(self) -> None:
         # The source sometimes dates a deadline after kickoff; the target tour's
@@ -233,7 +261,10 @@ class AuditTest(unittest.TestCase):
             any("after the tour's first kickoff" in item for item in audit["warnings"])
         )
 
-    def test_cross_season_rows_are_counted_not_recomputed(self) -> None:
+    def test_prior_sourced_rows_are_counted_and_still_checked(self) -> None:
+        # A row leaning on last season is reported, but its current-season half
+        # is still held to the cutoff: blending in another season is not a way
+        # to smuggle this one's future in.
         audit = audit_tour(
             self._features(stat_source=STAT_SOURCE_PRIOR, total_points=999),
             appearances=self._appearances(),
@@ -241,8 +272,16 @@ class AuditTest(unittest.TestCase):
             first_kickoff=datetime(2025, 8, 3, tzinfo=timezone.utc),
         )
         self.assertEqual([], audit["violations"])
-        self.assertEqual(0, audit["rows_checked"])
+        self.assertEqual(1, audit["rows_checked"])
         self.assertEqual(1, audit["rows_cross_season"])
+
+        leaked = audit_tour(
+            self._features(stat_source=STAT_SOURCE_PRIOR, current_points=999),
+            appearances=self._appearances(),
+            tour_match_ids=frozenset({12}),
+            first_kickoff=datetime(2025, 8, 3, tzinfo=timezone.utc),
+        )
+        self.assertTrue(leaked["violations"])
 
 
 class SimulationTest(unittest.TestCase):
