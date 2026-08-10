@@ -21,7 +21,7 @@ const COLUMNS: Column[] = [
   { key: "season_score", label: "Очки", order: "season_score", numeric: true },
   // Last season is the only real evidence about a player in the opening tours,
   // when the current-season columns are still almost empty.
-  { key: "prior_points", label: "Прошлый сезон", numeric: true },
+  { key: "prior_points", label: "Прошлый сезон", order: "prior_points", numeric: true },
   { key: "selected_by", label: "Выбор", order: "selected_by", numeric: true },
   { key: "compare", label: "" },
 ];

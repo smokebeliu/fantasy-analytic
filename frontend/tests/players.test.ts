@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { sortPlayers } from "@/lib/players";
-import { makePlayer } from "./fixtures";
+import { makePlayer, makePriorSeason } from "./fixtures";
 
 describe("sortPlayers", () => {
   it("sorts by season score descending with nulls last", () => {
@@ -37,6 +37,32 @@ describe("sortPlayers", () => {
     ];
     const ids = sortPlayers(players, "name").map((p) => p.player_season_id);
     expect(ids).toEqual([6, 7, 5]);
+  });
+
+  it("sorts by prior-season points descending with nulls last", () => {
+    const players = [
+      makePlayer({
+        player_season_id: 1,
+        prior_season: makePriorSeason({ points: 40 }),
+      }),
+      makePlayer({ player_season_id: 2, prior_season: null }),
+      makePlayer({
+        player_season_id: 3,
+        prior_season: makePriorSeason({ points: 120 }),
+      }),
+    ];
+    const ids = sortPlayers(players, "prior_points").map((p) => p.player_season_id);
+    expect(ids).toEqual([3, 1, 2]);
+  });
+
+  it("sorts by ownership (Выбор) descending with nulls last", () => {
+    const players = [
+      makePlayer({ player_season_id: 1, selected_by: 12 }),
+      makePlayer({ player_season_id: 2, selected_by: null }),
+      makePlayer({ player_season_id: 3, selected_by: 45 }),
+    ];
+    const ids = sortPlayers(players, "selected_by").map((p) => p.player_season_id);
+    expect(ids).toEqual([3, 1, 2]);
   });
 
   it("does not mutate the input array", () => {

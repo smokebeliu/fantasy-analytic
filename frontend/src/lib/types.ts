@@ -11,7 +11,8 @@ export type PlayerOrder =
   | "price"
   | "name"
   | "selected_by"
-  | "season_score";
+  | "season_score"
+  | "prior_points";
 
 export interface PageMeta {
   limit: number;

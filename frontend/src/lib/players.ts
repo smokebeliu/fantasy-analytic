@@ -3,8 +3,9 @@
 // The season's player set is bounded (a few hundred rows), so the table loads
 // the full working set for the current filters once and then sorts and paginates
 // entirely on the client. This keeps re-sorting instant (no server round-trip on
-// every header click) while the server still owns filtering. The comparators
-// mirror the server order keys in read_repository.PLAYER_ORDERS.
+// every header click) while the server still owns filtering. Most comparators
+// mirror the server order keys in read_repository.PLAYER_ORDERS; prior_points is
+// client-only because last-season stats are joined after the list query.
 
 import type { PlayerModel, PlayerOrder } from "./types";
 
@@ -23,6 +24,8 @@ function numericValue(player: PlayerModel, order: NumericKey): number | null {
       return player.selected_by ?? null;
     case "season_score":
       return player.season_score ?? null;
+    case "prior_points":
+      return player.prior_season?.points ?? null;
   }
 }
 
