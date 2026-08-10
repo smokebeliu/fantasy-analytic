@@ -45,6 +45,48 @@ test.describe("Tour and players page", () => {
     expect(values).toEqual(descending);
   });
 
+  test("sorts players by prior season and ownership on header click", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByTestId("player-row").first()).toBeVisible();
+
+    const priorHeader = page.locator("thead th", { hasText: "Прошлый сезон" });
+    const ownershipHeader = page.locator("thead th", { hasText: "Выбор" });
+
+    await priorHeader.click();
+    await expect(priorHeader).toHaveAttribute("aria-sort", "descending");
+
+    // Prior-season points column (7th); treat "—" as nulls last by sorting only
+    // numeric cells as non-increasing among themselves, then nulls at the end.
+    const priorCells = await page.getByTestId("prior-points").allInnerTexts();
+    const priorValues = priorCells.map((c) => {
+      const trimmed = c.trim();
+      if (trimmed === "—" || trimmed === "") return null;
+      const n = Number(trimmed.replace(/[^\d.-]/g, ""));
+      return Number.isNaN(n) ? null : n;
+    });
+    const priorNumeric = priorValues.filter((v): v is number => v !== null);
+    const priorDescending = [...priorNumeric].sort((a, b) => b - a);
+    expect(priorNumeric).toEqual(priorDescending);
+    const firstNull = priorValues.findIndex((v) => v === null);
+    if (firstNull !== -1) {
+      expect(priorValues.slice(firstNull).every((v) => v === null)).toBe(true);
+    }
+
+    await ownershipHeader.click();
+    await expect(ownershipHeader).toHaveAttribute("aria-sort", "descending");
+
+    // Ownership column (8th).
+    const ownershipCells = await page
+      .locator('[data-testid="player-row"] td:nth-child(8)')
+      .allInnerTexts();
+    const ownershipValues = ownershipCells.map((c) => {
+      const n = Number(c.replace(/[^\d.-]/g, ""));
+      return Number.isNaN(n) ? 0 : n;
+    });
+    const ownershipDescending = [...ownershipValues].sort((a, b) => b - a);
+    expect(ownershipValues).toEqual(ownershipDescending);
+  });
+
   test("filters players by position", async ({ page }) => {
     await page.goto("/");
     await expect(page.getByTestId("player-row").first()).toBeVisible();

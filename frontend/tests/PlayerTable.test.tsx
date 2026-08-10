@@ -41,6 +41,18 @@ describe("PlayerTable", () => {
     expect(props.onOrderChange).toHaveBeenCalledWith("season_score");
   });
 
+  it("sorts by prior-season points when the Прошлый сезон header is clicked", async () => {
+    const props = setup();
+    await userEvent.click(screen.getByRole("columnheader", { name: "Прошлый сезон" }));
+    expect(props.onOrderChange).toHaveBeenCalledWith("prior_points");
+  });
+
+  it("sorts by ownership when the Выбор header is clicked", async () => {
+    const props = setup();
+    await userEvent.click(screen.getByRole("columnheader", { name: "Выбор" }));
+    expect(props.onOrderChange).toHaveBeenCalledWith("selected_by");
+  });
+
   it("opens the player card on name click", async () => {
     const props = setup();
     await userEvent.click(screen.getByText("Сперцян"));
