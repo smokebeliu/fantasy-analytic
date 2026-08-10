@@ -5,8 +5,14 @@ import a small, internally consistent synthetic season into a real PostgreSQL
 database and then inject the three fixture scenarios required by the plan
 (missing ingestion page, duplicated fixture id and a changed result) to prove
 that each is detected, that blocking issues keep a snapshot inactive and that
-the 72-hour adjustment window downgrades a stale mismatch to a warning. They are
-skipped automatically when no database is reachable.
+the 72-hour adjustment window downgrades a stale mismatch to a warning.
+
+A further set covers the discrepancies that only appear outside the RPL (step 22)
+and must *not* withhold a snapshot: history missing for a single player because
+Sports.ru returned none, a provider season wider than the fantasy calendar
+(play-offs, Champions League qualifying) and a provider aggregate whose own
+results do not add up to its own match count. They are skipped automatically when
+no database is reachable.
 """
 
 from __future__ import annotations
@@ -45,6 +51,29 @@ TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL") or os.environ.get(
 # season aggregate must equal them for reconciliation to pass.
 _MATCH_MINUTES = 78
 _MATCH_POINTS = 12
+
+# Every non-nullable statistic on both player grains, and the two values a padded
+# player is given; the rest stay zero.
+_STAT_COLUMNS = (
+    "points",
+    "goals",
+    "assists",
+    "saves",
+    "penalties_missed",
+    "penalties_post",
+    "penalties_target",
+    "penalties_saved",
+    "field_minutes",
+    "yellow_cards",
+    "red_cards",
+    "goals_conceded",
+    "penalty_goals_conceded",
+    "penalties_faced",
+    "penalty_conceded",
+    "own_goals",
+    "ball_recoveries",
+)
+_PAD_STATS = {"points": 3, "field_minutes": 45}
 
 
 def _database_available() -> bool:
@@ -131,6 +160,71 @@ class QualityGateIntegrationTest(unittest.TestCase):
             IngestionOptions(history_workers=1),
         )
         return report["run_id"]
+
+    def _pad_players_with_history(self, run_id: int, *, count: int) -> None:
+        """Register ``count`` extra players who each played one match.
+
+        The missing-history check weighs the gap against how many players played,
+        and the synthetic season has only a handful. Padding it to a realistic
+        size is what makes "one player of several hundred" expressible at all.
+        """
+        # A run only points at its season once the gate has published it, so the
+        # season is resolved through the snapshot the import wrote.
+        season_id = self._scalar(
+            """
+            SELECT sc.season_id
+            FROM season_clubs sc
+            JOIN club_season_stats css ON css.season_club_id = sc.id
+            WHERE css.ingestion_run_id = :run
+            LIMIT 1
+            """,
+            run=run_id,
+        )
+        season_club_id = self._scalar(
+            "SELECT id FROM season_clubs WHERE season_id = :s ORDER BY id LIMIT 1",
+            s=season_id,
+        )
+        match_id = self._scalar(
+            "SELECT id FROM matches WHERE season_id = :s ORDER BY id LIMIT 1",
+            s=season_id,
+        )
+        tour_id = self._scalar("SELECT tour_id FROM matches WHERE id = :m", m=match_id)
+
+        columns = ", ".join(_STAT_COLUMNS)
+        values = ", ".join(str(_PAD_STATS.get(column, 0)) for column in _STAT_COLUMNS)
+        self._exec(
+            f"""
+            WITH new_players AS (
+                INSERT INTO players (stat_player_id, canonical_name)
+                SELECT 'pad_' || g, 'Запасной ' || g
+                FROM generate_series(1, :count) AS g
+                RETURNING id
+            ), new_seasons AS (
+                INSERT INTO player_seasons
+                    (season_id, player_id, fantasy_player_id, role,
+                     current_season_club_id)
+                SELECT :season, id, 'pad' || id, 'MIDFIELDER', :season_club
+                FROM new_players
+                RETURNING id
+            ), totals AS (
+                INSERT INTO player_season_stats
+                    (player_season_id, ingestion_run_id, {columns})
+                SELECT id, :run, {values} FROM new_seasons
+                RETURNING player_season_id
+            )
+            INSERT INTO player_match_stats
+                (player_season_id, match_id, tour_id, season_club_id,
+                 ingestion_run_id, {columns})
+            SELECT player_season_id, :match, :tour, :season_club, :run, {values}
+            FROM totals
+            """,
+            count=count,
+            season=season_id,
+            season_club=season_club_id,
+            match=match_id,
+            tour=tour_id,
+            run=run_id,
+        )
 
     def _exec(self, sql: str, **params):
         with self.engine.begin() as connection:
@@ -272,6 +366,110 @@ class QualityGateIntegrationTest(unittest.TestCase):
             WARNING, recent_checks["club_result_reconciliation"]["status"]
         )
         self.assertTrue(recent["passed"])
+        self.assertTrue(self._run_is_active(run_id))
+
+    def test_isolated_missing_history_warns_and_still_publishes(self) -> None:
+        """One player without history is a provider gap, not a dropped page.
+
+        Sports.ru answers some players' history with an empty list while still
+        reporting a non-zero total (one Serie A player in 2025/2026). Refusing a
+        729-player season over that would be wrong, so the severity follows the
+        share of players affected — and here it is far below the threshold.
+        """
+        run_id = self._import()
+        # Enough players with minutes that a single gap stays under 1%.
+        self._pad_players_with_history(run_id, count=200)
+        deleted = self._exec(
+            """
+            DELETE FROM player_match_stats
+            WHERE player_season_id = (
+                SELECT ps.id FROM player_seasons ps
+                WHERE ps.fantasy_player_id = '111'
+            )
+            """
+        ).rowcount
+        self.assertGreater(deleted, 0)
+
+        report = run_quality_checks(self.session_factory, run_id=run_id)
+
+        checks = {c["name"]: c for c in report["checks"]}
+        reconciliation = checks["player_points_reconciliation"]
+        self.assertEqual(WARNING, reconciliation["status"])
+        self.assertEqual(1, reconciliation["actual"]["missing_history"])
+        self.assertFalse(reconciliation["actual"]["missing_history_is_systemic"])
+        self.assertTrue(report["passed"])
+        self.assertTrue(self._run_is_active(run_id))
+
+    def test_wider_provider_season_warns_and_still_publishes(self) -> None:
+        """Play-offs and qualifying are scored outside the fantasy calendar.
+
+        Four Eredivisie clubs report more matches than the 34 fantasy rounds, and
+        Champions League clubs report their whole European campaign against 8
+        league-phase rounds. The extra matches bring extra goals and results with
+        them, so the aggregate stays self-consistent — it just measures more.
+        """
+        run_id = self._import()
+        self._exec(
+            """
+            UPDATE club_season_stats
+            SET matches_played = matches_played + 2,
+                matches_won = matches_won + 2,
+                goals_scored = goals_scored + 5,
+                goals_conceded = goals_conceded + 1
+            WHERE ingestion_run_id = :run
+            """,
+            run=run_id,
+        )
+
+        stale_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        report = run_quality_checks(
+            self.session_factory, run_id=run_id, now=stale_now
+        )
+
+        checks = {c["name"]: c for c in report["checks"]}
+        club_check = checks["club_result_reconciliation"]
+        self.assertEqual(WARNING, club_check["status"])
+        self.assertTrue(
+            all(
+                issue["details"]["provider_season_is_wider"]
+                for issue in club_check["issues"]
+            )
+        )
+        self.assertTrue(report["passed"])
+        self.assertTrue(self._run_is_active(run_id))
+
+    def test_self_contradicting_aggregate_warns_and_still_publishes(self) -> None:
+        """A provider aggregate that disagrees with itself proves nothing.
+
+        Kairat's 2025/2026 Champions League row counts 8 matches but 16 results,
+        because the match count covers the league phase while the results include
+        qualifying. Such a row cannot be reconciled against any calendar.
+        """
+        run_id = self._import()
+        self._exec(
+            """
+            UPDATE club_season_stats
+            SET matches_won = matches_won + 3
+            WHERE ingestion_run_id = :run
+            """,
+            run=run_id,
+        )
+
+        stale_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        report = run_quality_checks(
+            self.session_factory, run_id=run_id, now=stale_now
+        )
+
+        checks = {c["name"]: c for c in report["checks"]}
+        club_check = checks["club_result_reconciliation"]
+        self.assertEqual(WARNING, club_check["status"])
+        self.assertTrue(
+            all(
+                issue["details"]["provider_aggregate_contradicts_itself"]
+                for issue in club_check["issues"]
+            )
+        )
+        self.assertTrue(report["passed"])
         self.assertTrue(self._run_is_active(run_id))
 
     def test_missing_matches_report_expected_and_actual(self) -> None:

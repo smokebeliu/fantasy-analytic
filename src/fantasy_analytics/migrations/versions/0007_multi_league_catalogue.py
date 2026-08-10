@@ -92,9 +92,32 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Restoring the UNIQUE constraint is impossible once a competition with
+    # per-phase seasons has been imported, and silently leaving it off would
+    # produce a schema that does not match revision 0006. Say which rows are in
+    # the way instead: dropping one of the two phases makes the downgrade work.
+    duplicates = op.get_bind().execute(
+        sa.text(
+            """
+            SELECT stat_season_id, count(*) AS seasons
+            FROM seasons
+            GROUP BY stat_season_id
+            HAVING count(*) > 1
+            ORDER BY stat_season_id
+            """
+        )
+    ).all()
+    if duplicates:
+        listed = ", ".join(f"{row[0]} ({row[1]} seasons)" for row in duplicates)
+        raise RuntimeError(
+            "Cannot restore the UNIQUE constraint on seasons.stat_season_id: "
+            f"{listed}. These are the per-phase seasons of a tournament such as "
+            "the Champions League; delete all but one season per stat season id "
+            "to downgrade."
+        )
+
     op.drop_index('seasons_competition_idx', table_name='seasons')
     op.drop_index('seasons_stat_season_idx', table_name='seasons')
-    # Only possible when no competition with per-phase seasons was imported.
     op.create_unique_constraint(
         'seasons_stat_season_id_key', 'seasons', ['stat_season_id']
     )
