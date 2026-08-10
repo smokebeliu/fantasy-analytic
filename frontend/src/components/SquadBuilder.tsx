@@ -280,7 +280,7 @@ export function SquadBuilder({
       .map((p) => p.fantasy_player_id)
       .filter((id): id is string => Boolean(id));
     if (currentSquad.length !== selected.length) {
-      setOptimizerError("У части выбранных игроков нет fantasy-id, трансферы недоступны.");
+      setOptimizerError("У части выбранных игроков нет fantasy-id, замены недоступны.");
       return;
     }
     setOptimizing(true);
@@ -536,7 +536,7 @@ export function SquadBuilder({
               </ul>
             ) : selected.length > 0 ? (
               <div className="valid-note" data-testid="valid-note">
-                Состав корректен — можно оптимизировать трансферы.
+                Состав корректен — можно подобрать замены.
               </div>
             ) : null}
 

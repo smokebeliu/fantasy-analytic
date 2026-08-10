@@ -24,6 +24,17 @@ function signed(value: number, digits: number): string {
   return `${value >= 0 ? "+" : "−"}${Math.abs(value).toFixed(digits)}`;
 }
 
+/**
+ * A signed number next to "budget" reads both ways — does +3.0 mean three more
+ * spent or three more left over? Say which it is instead.
+ */
+function priceChange(delta: number): string {
+  if (Math.abs(delta) < 0.05) return "цена та же";
+  return delta > 0
+    ? `дороже на ${delta.toFixed(1)}`
+    : `дешевле на ${Math.abs(delta).toFixed(1)}`;
+}
+
 function describe(player: OptimizerTransferPlayer): string {
   const club = player.club_name;
   const role = player.role ? ROLE_LABELS[player.role] : null;
@@ -98,9 +109,7 @@ function TransferPlan({
                   <span className="gain">
                     {signed(pair.delta_expected_points, 1)} очк.
                   </span>
-                  <span className="spend">
-                    {signed(pair.delta_price, 1)} к бюджету
-                  </span>
+                  <span className="spend">{priceChange(pair.delta_price)}</span>
                 </div>
               </div>
             ))}

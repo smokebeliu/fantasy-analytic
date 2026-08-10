@@ -504,7 +504,46 @@ describe("SquadBuilder", () => {
     const plan = await screen.findByTestId("transfer-plan");
     expect(plan).toHaveTextContent("Слабый");
     expect(plan).toHaveTextContent("Сильный");
+    expect(plan).toHaveTextContent("+4.2 очк.");
+    // A signed number next to "budget" reads both ways, so the direction is
+    // spelled out instead.
+    expect(plan).toHaveTextContent("дороже на 5.0");
     expect(screen.getAllByTestId("pitch-player").length).toBe(squad.length);
+  });
+
+  it("says when a suggested squad needs no changes at all", async () => {
+    const squad = makeValidSquad();
+    listPlayers.mockResolvedValue({
+      items: squad,
+      pagination: { limit: 200, offset: 0, total: squad.length, count: squad.length },
+    });
+    const response = transfersResponse();
+    response.solution.transfers = {
+      allowed: 3,
+      made: 0,
+      kept: 15,
+      in: [],
+      out: [],
+      pairs: [],
+      missing_from_pool: [],
+    };
+    optimizeTransfers.mockResolvedValue(response);
+
+    render(
+      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByTestId("pool-row").length).toBe(squad.length),
+    );
+    for (const row of screen.getAllByTestId("pool-row")) {
+      await userEvent.click(within(row).getByRole("button", { name: /Добавить/ }));
+    }
+    await userEvent.click(screen.getByTestId("optimize-transfers"));
+
+    expect(
+      await screen.findByText(/Состав уже оптимален для этого тура/),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("transfer-plan")).not.toBeInTheDocument();
   });
 
   it("limits the suggestion to the number of transfers the user picks", async () => {

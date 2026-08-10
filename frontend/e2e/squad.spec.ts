@@ -158,7 +158,7 @@ test.describe("Squad builder", () => {
     await expect(pairs.first()).toContainText("OUT");
     await expect(pairs.first()).toContainText("IN");
     await expect(pairs.first()).toContainText("очк.");
-    await expect(pairs.first()).toContainText("к бюджету");
+    await expect(pairs.first()).toContainText(/дороже на|дешевле на|цена та же/);
 
     // The user's own squad stays on the pitch to compare against.
     await expect(pitch.getByTestId("pitch-player")).toHaveCount(15);
