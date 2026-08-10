@@ -262,8 +262,11 @@ def audit_tour(
     matches by id, so no post-kickoff data can enter the history anyway — which
     is precisely what the recomputation above proves.
 
-    Cross-season rows (a not-yet-started season sourcing the previous one) are
-    counted but not recomputed: their history comes from another season's run.
+    The check is run against the ``current_*`` totals, which the feature builder
+    reports unweighted and unblended for exactly this purpose. Last season's
+    contribution comes from another season's run and is beyond this cutoff's
+    reach; the number of rows still leaning on it is reported so a tour built
+    almost entirely from last season is visible rather than silent.
     """
     cutoff = datetime.fromisoformat(features["cutoff"])
     violations: list[str] = []
@@ -277,21 +280,24 @@ def audit_tour(
         )
 
     checked = 0
-    skipped = 0
+    prior_sourced = 0
     for row in features["rows"]:
         if row.get("stat_source") != STAT_SOURCE_CURRENT:
-            skipped += 1
-            continue
+            prior_sourced += 1
         checked += 1
-        history = recent_before_cutoff(
-            appearances.get(row["player_season_id"], []),
-            cutoff,
-            exclude_match_ids=tour_match_ids,
-        )
+        history = [
+            item
+            for item in recent_before_cutoff(
+                appearances.get(row["player_season_id"], []),
+                cutoff,
+                exclude_match_ids=tour_match_ids,
+            )
+            if item.played
+        ]
         expected = {
-            "total_appearances": len(history),
-            "total_minutes": sum(item.minutes for item in history),
-            "total_points": sum(item.points for item in history),
+            "current_appearances": len(history),
+            "current_minutes": sum(item.minutes for item in history),
+            "current_points": sum(item.points for item in history),
         }
         for key, value in expected.items():
             if row.get(key) != value:
@@ -305,7 +311,7 @@ def audit_tour(
         "cutoff": features["cutoff"],
         "first_kickoff": first_kickoff.isoformat() if first_kickoff else None,
         "rows_checked": checked,
-        "rows_cross_season": skipped,
+        "rows_cross_season": prior_sourced,
         "violations": violations,
         "warnings": warnings,
     }

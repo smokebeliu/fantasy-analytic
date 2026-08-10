@@ -268,20 +268,45 @@ model are:
   model (`poisson_events`) plus two baselines (`season_mean`, `recent_form`).
 - **Scoring rules.** Sports.ru only publishes the fantasy scoring rules as an
   image, and the structured per-event breakdown (`statDetails`) is empty, so the
-  scoring table (`SCORING`, version `rpl-2025-2026.1`) was reconstructed from the
-  season's own authoritative per-match `points`. Reconstructing the 9578
-  imported player-match rows from the table reproduces 83% exactly and 96%
-  within ±1 point. The residual is dominated by the indirect "fantasy assist"
-  and late ball-recovery corrections, which are not present in the imported
-  per-match columns (see "Data quality findings" 1 and 6). Confirmed rules:
-  appearance +1 (1–59') / +2 (≥60'); goal GK/DEF +6, MID +5, FWD +4; assist +3;
-  clean sheet (full appearance, opponent scoreless) GK/DEF +4, MID +1, FWD 0;
-  goals conceded −1 per 2 (GK/DEF); ball recovery +1 per 3; goalkeeper save
-  +1 per 3; yellow −1.
+  scoring table (`SCORING`, version `rpl-2025-2026.2`) was reconstructed from the
+  season's own authoritative per-match `points`. Over the played rows it
+  reproduces 81.7% of the RPL and 84.1% of La Liga exactly, and 97.3% / 97.7%
+  within ±1 point (`fantasy-scoring-audit`). The residual is dominated by the
+  indirect "fantasy assist" and late ball-recovery corrections, which are not
+  present in the imported per-match columns (see "Data quality findings" 1
+  and 6). Confirmed rules: appearance +1 (1–59') / +2 (≥60'); goal GK/DEF +6,
+  MID +5, FWD +4; assist +3; clean sheet (full appearance, opponent scoreless)
+  GK/DEF +4, MID +1, FWD 0; goals conceded −1 per 2 (GK/DEF); ball recovery
+  +1 per 3 **for outfield players only**; goalkeeper save +1 per 3; yellow −1.
+- **Goalkeepers are not paid for ball recoveries.** Version `.1` of the table
+  gave them the outfield rate. A keeper is credited with about 8.4 recoveries
+  per 90 minutes — every claimed cross and collected back-pass — so the reward
+  handed him roughly 2.3 points he never scored, in every match. It hid in the
+  pooled accuracy figure because keepers are 6% of the rows, while making the
+  optimizer prefer a cheap goalkeeper to a forward. Dropping it moves the
+  goalkeeper reconstruction from 3.7% to 94.6% exact on the RPL and from 2.4% to
+  94.7% on La Liga; the outfield rows were re-fitted at the same time and came
+  out unchanged.
+- **Block rewards are expectations, not ratios.** A reward paid per three
+  recoveries is worth `E[floor(N / 3)]`, not `E[N] / 3`: two recoveries earn
+  nothing. Scoring them pro rata overpaid every threshold reward by about a
+  third of a point per match, which is most of a defender's edge.
 - **Team goals via Poisson.** Each club's goals for/against are Poisson means
   blended from the venue attack/defence features
   (`0.5 * (club_attack + opponent_defense)` and the mirror), and the clean-sheet
   probability is the Poisson probability that the opponent fails to score.
+- **Every match of the tour.** A fantasy tour is a slice of the calendar rather
+  than a round: the windows cannot overlap, so Sports.ru re-attaches a postponed
+  match to whichever tour its new date falls closest to, moving the deadline
+  when the match stays. A club can therefore play twice in one tour and not at
+  all in another. The forecast sums over the matches a club actually plays —
+  appearance points, goals, clean sheets and the concession penalty are counted
+  once per match, each against its own opponent and venue — and the exposures
+  the optimizer prices are reported per match, so two players who meet each
+  other twice cancel out twice. Before this, only the earliest match counted and
+  a doubled-up club was forecast at half its worth: in La Liga 2026/2027 that is
+  Real Madrid, Barcelona, Athletic, Betis, Valencia and Real Sociedad in tour 2
+  alone, the same clubs that have no fixture in tour 1.
 - **Read-only inputs.** Forecasting only reads the feature dataset (which itself
   only reads one ingestion run) and writes `player_forecasts`; it never calls the
   Sports.ru API. The computation is pure arithmetic, so recomputing on the same

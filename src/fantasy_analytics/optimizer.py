@@ -63,7 +63,7 @@ from .forecast import MODEL_EVENT, ForecastError, build_forecast_dataset
 
 # Bumped whenever the optimizer model or its constraints change so squads built
 # by different code revisions never get silently compared.
-OPTIMIZER_VERSION = "1.3.1"
+OPTIMIZER_VERSION = "1.3.2"
 
 # Search configuration, in *deterministic* time: a machine-independent measure of
 # work rather than wall clock, so the same request returns the same squad on any
@@ -135,13 +135,15 @@ class Candidate:
     club_name: str | None
     price: float
     expected_points: float
-    # The tour fixture the player is scored in. ``match_id`` and ``club_id``
-    # identify the two sides of a head-to-head clash; the two exposures say how
-    # much of the forecast rides on goals (see :func:`cancellation`).
+    # The tour fixtures the player is scored in — usually one, two when a
+    # postponement doubles his club up. ``match_id`` and ``club_id`` identify
+    # the two sides of a head-to-head clash; the two exposures say how much of
+    # the forecast rides on goals (see :func:`cancellation`).
     match_id: int | None = None
     opponent_club_id: int | None = None
     goal_upside: float = 0.0
     shutout_stake: float = 0.0
+    tour_fixtures: tuple[dict[str, Any], ...] = ()
     # Purely descriptive fields carried into the explanation.
     opponent_name: str | None = None
     is_home: bool | None = None
@@ -278,45 +280,80 @@ def cancellation(left: FixtureExposure, right: FixtureExposure) -> float:
 
 
 def fixture_conflicts(
-    exposures: Sequence[FixtureExposure],
+    exposures: Sequence[Sequence[FixtureExposure]],
 ) -> list[tuple[int, int, float]]:
     """Every opposing pair that cancels out, as ``(left, right, amount)``.
 
-    Indices refer to ``exposures`` and are always ordered ``left < right``, so
-    the result is deterministic and each pair is reported once.
+    Each entry of ``exposures`` is one player's exposures across the tour, which
+    is a list because a club doubled up by a postponement plays twice. Indices
+    refer to that outer sequence and are always ordered ``left < right``, so the
+    result is deterministic and each pair of *players* is reported once, with
+    the cancellation summed over every match they meet in.
     """
-    conflicts: list[tuple[int, int, float]] = []
-    by_match: dict[int, list[int]] = {}
-    for index, exposure in enumerate(exposures):
-        if exposure.match_id is not None:
-            by_match.setdefault(exposure.match_id, []).append(index)
-    for indices in by_match.values():
-        for position, left in enumerate(indices):
-            for right in indices[position + 1 :]:
-                amount = cancellation(exposures[left], exposures[right])
-                if amount > 0.0:
-                    conflicts.append((left, right, amount))
-    conflicts.sort(key=lambda item: (item[0], item[1]))
-    return conflicts
+    amounts: dict[tuple[int, int], float] = {}
+    by_match: dict[int, list[tuple[int, FixtureExposure]]] = {}
+    for index, player in enumerate(exposures):
+        for exposure in player:
+            if exposure.match_id is not None:
+                by_match.setdefault(exposure.match_id, []).append((index, exposure))
+    for entries in by_match.values():
+        for position, (left, left_exposure) in enumerate(entries):
+            for right, right_exposure in entries[position + 1 :]:
+                if left == right:
+                    continue
+                amount = cancellation(left_exposure, right_exposure)
+                if amount <= 0.0:
+                    continue
+                key = (left, right) if left < right else (right, left)
+                amounts[key] = amounts.get(key, 0.0) + amount
+    return [
+        (left, right, round(amount, 6))
+        for (left, right), amount in sorted(amounts.items())
+    ]
 
 
-def _exposure_from_candidate(candidate: Candidate) -> FixtureExposure:
-    return FixtureExposure(
-        match_id=candidate.match_id,
-        club_id=candidate.club_id,
-        goal_upside=candidate.goal_upside,
-        shutout_stake=candidate.shutout_stake,
-    )
+def _exposures_from_candidate(candidate: Candidate) -> list[FixtureExposure]:
+    if candidate.tour_fixtures:
+        return [
+            FixtureExposure(
+                match_id=fixture.get("match_id"),
+                club_id=candidate.club_id,
+                goal_upside=float(fixture.get("goal_upside") or 0.0),
+                shutout_stake=float(fixture.get("shutout_stake") or 0.0),
+            )
+            for fixture in candidate.tour_fixtures
+        ]
+    return [
+        FixtureExposure(
+            match_id=candidate.match_id,
+            club_id=candidate.club_id,
+            goal_upside=candidate.goal_upside,
+            shutout_stake=candidate.shutout_stake,
+        )
+    ]
 
 
-def _exposure_from_entry(entry: dict[str, Any]) -> FixtureExposure:
-    """Rebuild an exposure from a squad entry of a produced solution."""
-    return FixtureExposure(
-        match_id=entry.get("match_id"),
-        club_id=entry["club_id"],
-        goal_upside=float(entry.get("goal_upside") or 0.0),
-        shutout_stake=float(entry.get("shutout_stake") or 0.0),
-    )
+def _exposures_from_entry(entry: dict[str, Any]) -> list[FixtureExposure]:
+    """Rebuild a player's exposures from a squad entry of a produced solution."""
+    fixtures = entry.get("tour_fixtures")
+    if fixtures:
+        return [
+            FixtureExposure(
+                match_id=fixture.get("match_id"),
+                club_id=entry["club_id"],
+                goal_upside=float(fixture.get("goal_upside") or 0.0),
+                shutout_stake=float(fixture.get("shutout_stake") or 0.0),
+            )
+            for fixture in fixtures
+        ]
+    return [
+        FixtureExposure(
+            match_id=entry.get("match_id"),
+            club_id=entry["club_id"],
+            goal_upside=float(entry.get("goal_upside") or 0.0),
+            shutout_stake=float(entry.get("shutout_stake") or 0.0),
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +386,9 @@ def candidates_from_forecast(
         if psid in seen:
             continue
         seen.add(psid)
-        fixture = (row.get("params") or {}).get("fixture") or {}
+        params = row.get("params") or {}
+        fixture = params.get("fixture") or {}
+        tour_fixtures = tuple(params.get("fixtures") or ())
         candidates.append(
             Candidate(
                 player_season_id=int(psid),
@@ -364,6 +403,7 @@ def candidates_from_forecast(
                 opponent_club_id=row.get("opponent_club_id"),
                 goal_upside=float(fixture.get("goal_upside") or 0.0),
                 shutout_stake=float(fixture.get("shutout_stake") or 0.0),
+                tour_fixtures=tour_fixtures,
                 opponent_name=row.get("opponent_name"),
                 is_home=row.get("is_home"),
                 p_appearance=row.get("p_appearance"),
@@ -398,6 +438,9 @@ def _candidate_public(candidate: Candidate) -> dict[str, Any]:
         "opponent_club_id": candidate.opponent_club_id,
         "goal_upside": round(candidate.goal_upside, 4),
         "shutout_stake": round(candidate.shutout_stake, 4),
+        # Every match of the tour; the flat fields above describe the first one.
+        "tour_fixtures": [dict(fixture) for fixture in candidate.tour_fixtures],
+        "fixture_count": max(1, len(candidate.tour_fixtures)),
         "p_appearance": candidate.p_appearance,
         "expected_minutes": candidate.expected_minutes,
         "stat_source": candidate.stat_source,
@@ -669,7 +712,7 @@ def _fixture_report(
     it next to the expected points.
     """
     ordered = sorted(starters_idx)
-    exposures = [_exposure_from_candidate(candidates[i]) for i in ordered]
+    exposures = [_exposures_from_candidate(candidates[i]) for i in ordered]
 
     clashes: list[dict[str, Any]] = []
     total = 0.0
@@ -871,7 +914,7 @@ def solve_squad(
     # pair is only chosen when it wins on expected points by more than the
     # charge. Only starters can score, so the bench is never charged, and the
     # captain's doubled points are deliberately not doubled in the charge.
-    exposures = [_exposure_from_candidate(candidate) for candidate in candidates]
+    exposures = [_exposures_from_candidate(candidate) for candidate in candidates]
     clash_terms: list[tuple[cp_model.IntVar, int]] = []
     if weight > 0:
         for left, right, amount in fixture_conflicts(exposures):
@@ -879,9 +922,15 @@ def solve_squad(
             if charge <= 0:
                 continue
             together = model.NewBoolVar(f"clash_{left}_{right}")
+            # Only the lower bound is stated. ``together`` appears nowhere else
+            # and is *subtracted* from a maximised objective, so the solver
+            # always pushes it to the smallest value this constraint allows,
+            # which is exactly ``start[left] and start[right]``. Adding the two
+            # upper bounds would restate that at the cost of two thirds of the
+            # model: there are tens of thousands of these pairs once a tour
+            # doubles a few clubs up, and with them the search could no longer
+            # even find a valid squad inside its budget.
             model.Add(together >= start[left] + start[right] - 1)
-            model.Add(together <= start[left])
-            model.Add(together <= start[right])
             clash_terms.append((together, charge))
 
     # Objective: maximise starting + captain points less the fixture charge, then
@@ -1179,17 +1228,20 @@ def validate_squad(
     fixtures = solution.get("fixtures")
     if fixtures is not None:
         weight = float(fixtures.get("conflict_weight") or 0.0)
-        exposures = [_exposure_from_entry(player) for player in starters]
-        recomputed = round(
-            sum(amount for _, _, amount in fixture_conflicts(exposures)), 4
-        )
+        exposures = [_exposures_from_entry(player) for player in starters]
+        cancellation = sum(amount for _, _, amount in fixture_conflicts(exposures))
+        recomputed = round(cancellation, 4)
         reported = round(float(fixtures.get("cancellation") or 0.0), 4)
         if abs(recomputed - reported) > 1e-4:
             violations.append(
                 f"fixture cancellation {reported} does not match the "
                 f"recomputed {recomputed}"
             )
-        penalty = round(weight * recomputed, 4)
+        # Priced from the full sum, not from its rounded display value: rounding
+        # first and multiplying after can land a whole least-significant digit
+        # away from what the report shows, which read as a rule violation and
+        # aborted an otherwise valid squad.
+        penalty = round(weight * cancellation, 4)
         reported_penalty = round(float(solution.get("fixture_penalty") or 0.0), 4)
         if abs(penalty - reported_penalty) > 1e-4:
             violations.append(

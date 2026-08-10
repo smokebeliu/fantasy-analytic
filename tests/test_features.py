@@ -31,9 +31,14 @@ from fantasy_analytics.features import (
     FeaturesError,
     _club_strengths,
     _venue_strength,
+    blend,
     build_feature_dataset,
+    decayed_share,
     per90,
+    played_before_cutoff,
+    prior_season_weight,
     recent_before_cutoff,
+    share_blend_weights,
 )
 from fantasy_analytics.ingestion import IngestionOptions, run_ingestion
 from fantasy_analytics.quality import run_quality_checks
@@ -117,11 +122,11 @@ class PureHelperTest(unittest.TestCase):
     def test_club_strengths_and_venue_fallback(self) -> None:
         club_matches = {
             1: [
-                ClubMatch(1, datetime(2025, 7, 1, tzinfo=timezone.utc), True, 3, 0),
-                ClubMatch(2, datetime(2025, 7, 8, tzinfo=timezone.utc), False, 1, 2),
+                (ClubMatch(1, datetime(2025, 7, 1, tzinfo=timezone.utc), True, 3, 0), 1.0),
+                (ClubMatch(2, datetime(2025, 7, 8, tzinfo=timezone.utc), False, 1, 2), 1.0),
             ],
             2: [
-                ClubMatch(3, datetime(2025, 7, 1, tzinfo=timezone.utc), False, 0, 3),
+                (ClubMatch(3, datetime(2025, 7, 1, tzinfo=timezone.utc), False, 0, 3), 1.0),
             ],
         }
         strengths, league = _club_strengths(club_matches)
@@ -142,9 +147,73 @@ class PureHelperTest(unittest.TestCase):
         self.assertEqual(league["away_attack"], attack)
         self.assertEqual(league["away_defense"], defense)
 
+    def test_a_weighted_match_counts_less_than_a_full_one(self) -> None:
+        # Last season's matches arrive discounted, so a club that has scored
+        # once this season is not suddenly a one-goal-a-game side.
+        now = ClubMatch(1, datetime(2025, 8, 1, tzinfo=timezone.utc), True, 1, 0)
+        then = ClubMatch(2, datetime(2025, 5, 1, tzinfo=timezone.utc), True, 3, 0)
+        strengths, _ = _club_strengths({1: [(now, 1.0), (then, 1.0)]})
+        self.assertEqual(2.0, strengths[1]["home_attack"])
+        discounted, _ = _club_strengths({1: [(now, 1.0), (then, 0.25)]})
+        self.assertEqual(1.4, discounted[1]["home_attack"])
+
     def test_injury_is_an_unavailable_status(self) -> None:
         self.assertIn("INJURY", UNAVAILABLE_STATUSES)
         self.assertNotIn("FIERY", UNAVAILABLE_STATUSES)
+
+
+class HistoryBlendTest(unittest.TestCase):
+    """Step 14 revisited: last season fades, it does not vanish."""
+
+    def test_prior_weight_starts_whole_and_halves_every_half_life(self) -> None:
+        self.assertEqual(1.0, prior_season_weight(0))
+        self.assertAlmostEqual(0.5, prior_season_weight(5), places=6)
+        self.assertAlmostEqual(0.25, prior_season_weight(10), places=6)
+        self.assertLess(prior_season_weight(30), 0.02)
+
+    def test_prior_weight_is_strictly_decreasing(self) -> None:
+        weights = [prior_season_weight(n) for n in range(0, 20)]
+        self.assertEqual(weights, sorted(weights, reverse=True))
+        self.assertEqual(len(set(weights)), len(weights))
+
+    def test_the_current_season_outgrows_the_prior_one(self) -> None:
+        # The point of the blend: whatever last season said, the new one wins
+        # once it has said enough. Here last season claims a rate of 10 and the
+        # new one a rate of 0.
+        def blended(played: int) -> float:
+            now_weight, prior_weight = share_blend_weights(
+                played, prior_season_weight(played)
+            )
+            return blend(0.0, now_weight, 10.0, prior_weight)
+
+        drifting = [blended(played) for played in (0, 1, 5, 10, 20)]
+        self.assertEqual(10.0, drifting[0])
+        self.assertEqual(drifting, sorted(drifting, reverse=True))
+        self.assertLess(drifting[-1], 1.0)
+
+    def test_share_weights_cap_both_seasons_at_the_same_size(self) -> None:
+        # A finished 38-match season must not outvote the new one just by being
+        # longer, so each side contributes at most SHARE_BLEND_WINDOW matches.
+        current, prior = share_blend_weights(38, 1.0)
+        self.assertEqual(current, prior)
+
+    def test_decayed_share_weights_recent_matches_more(self) -> None:
+        # Missing the two most recent matches hurts more than missing the two
+        # oldest ones.
+        recent_absence, total = decayed_share([False, False, True, True], 0.5)
+        old_absence, _ = decayed_share([True, True, False, False], 0.5)
+        self.assertLess(recent_absence / total, old_absence / total)
+        # A decay of 1 makes every match count the same.
+        flat, flat_total = decayed_share([True, False, True, False], 1.0)
+        self.assertEqual(0.5, flat / flat_total)
+
+    def test_an_unused_substitute_is_not_an_appearance(self) -> None:
+        # Sports.ru returns a row for every named squad member, so a 0-minute
+        # row means the player sat on the bench and never came on.
+        history = [_appearance(10, 5, minutes=90), _appearance(20, 0, minutes=0)]
+        self.assertEqual(2, len(recent_before_cutoff(history, _CUTOFF)))
+        played = played_before_cutoff(history, _CUTOFF)
+        self.assertEqual([10], [a.match_id for a in played])
 
 
 @requires_database
@@ -208,8 +277,87 @@ class FeatureDatasetIntegrationTest(unittest.TestCase):
             away=club_b,
         )
 
+    def _add_second_match_to_future_tour(self) -> None:
+        """Move a third match into the future tour, doubling both clubs up."""
+        season_id = self._scalar("SELECT id FROM seasons LIMIT 1")
+        tour_id = self._scalar(
+            "SELECT id FROM fantasy_tours WHERE fantasy_tour_id = '1773'"
+        )
+        club_a = self._scalar(
+            "SELECT club_id FROM season_clubs WHERE fantasy_team_id = '10'"
+        )
+        club_b = self._scalar(
+            "SELECT club_id FROM season_clubs WHERE fantasy_team_id = '20'"
+        )
+        self._exec(
+            """
+            INSERT INTO matches
+                (season_id, tour_id, stat_match_id, scheduled_at,
+                 home_club_id, away_club_id, home_score, away_score)
+            VALUES (:season, :tour, '900003', '2025-07-28T16:00:00Z',
+                    :home, :away, NULL, NULL)
+            """,
+            season=season_id,
+            tour=tour_id,
+            home=club_b,
+            away=club_a,
+        )
+
     def _rows_by_player(self, report: dict) -> dict[str, dict]:
         return {row["fantasy_player_id"]: row for row in report["rows"]}
+
+    def test_a_club_doubled_up_by_a_postponement_gets_both_matches(self) -> None:
+        # Fantasy tours are time windows that cannot overlap, so a postponed
+        # match is re-attached to whichever tour it now falls in and a club can
+        # end up playing twice inside one.
+        self._add_future_tour()
+        self._add_second_match_to_future_tour()
+
+        report = build_feature_dataset(self.session_factory, tour_ref="1773")
+
+        self.assertEqual(2, report["counts"]["double_fixture_clubs"])
+        self.assertEqual(2, report["counts"]["double_fixture_rows"])
+        home = self._rows_by_player(report)["111"]
+        self.assertEqual(2, home["fixture_count"])
+        # Reported in kickoff order, and the club hosts one and visits the other.
+        self.assertEqual([True, False], [f["is_home"] for f in home["tour_fixtures"]])
+        # The flat fields still describe the first match, for readers that never
+        # had to think about a club playing twice.
+        self.assertEqual(home["tour_fixtures"][0]["match_id"], home["match_id"])
+        self.assertTrue(home["is_home"])
+
+    def test_a_club_without_a_fixture_produces_no_row(self) -> None:
+        # The mirror image: the tour a match was moved *out* of has a blank for
+        # that club, and a player who cannot score has nothing to forecast.
+        self._add_future_tour()
+        club_c = self._exec(
+            "INSERT INTO clubs (stat_team_id, canonical_name) "
+            "VALUES ('club_c', 'Клуб C') RETURNING id"
+        ).scalar_one()
+        self._exec(
+            "UPDATE matches SET away_club_id = :c WHERE stat_match_id = '900002'",
+            c=club_c,
+        )
+
+        report = build_feature_dataset(self.session_factory, tour_ref="1773")
+
+        self.assertEqual(1, report["counts"]["rows"])
+        self.assertEqual(1, report["counts"]["players_without_fixture"])
+        self.assertNotIn("222", self._rows_by_player(report))
+
+    def test_the_cutoff_never_outlives_the_tours_first_kickoff(self) -> None:
+        # A moved match takes the deadline with it, and the source does not
+        # always move it back far enough. A deadline after a kickoff would let
+        # the tour's own results into the club strengths that predict it.
+        self._add_future_tour()
+        self._exec(
+            "UPDATE fantasy_tours SET transfers_deadline_at = "
+            "'2025-07-25T18:00:00Z' WHERE fantasy_tour_id = '1773'"
+        )
+
+        report = build_feature_dataset(self.session_factory, tour_ref="1773")
+
+        self.assertEqual("2025-07-25T16:00:00+00:00", report["cutoff"])
 
     def test_dataset_uses_only_pre_cutoff_history(self) -> None:
         self._add_future_tour()

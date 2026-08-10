@@ -10,13 +10,20 @@ deliberately an *interpretable* baseline, not a black box:
   Poisson rates derived from venue attack/defence, and the clean-sheet
   probability is the Poisson probability that the opponent fails to score.
 * **Event contributions.** Goals, assists, saves, ball recoveries and cards are
-  projected from the player's per-90 rates and expected minutes.
+  projected from the player's per-90 rates and expected minutes. Rewards that
+  the rules pay per completed block (per three saves or recoveries, per two
+  goals conceded) are scored as the expected number of whole blocks, not as the
+  count divided by the block size.
 * **Rules, not constants.** Each projected event is converted into points with a
   versioned scoring table (:data:`SCORING`), reconstructed from the season's
   own per-match points, so ``expected_points`` is the exact sum of its
   ``components``.
+* **Every match of the tour.** A fantasy tour is a slice of the calendar, not a
+  round, so a postponed match is re-attached to whichever tour it now falls in.
+  A club can therefore play twice in one tour and not at all in another, and the
+  forecast is the sum over the matches it actually plays.
 * **Fixture-linked exposures.** Alongside the components, each event forecast
-  reports how much of it rides on the player's own club scoring
+  reports per match how much of it rides on the player's own club scoring
   (``goal_upside``) and how much is lost per goal their opponent scores
   (``shutout_stake``). The squad optimizer (step 16) uses the pair to price the
   anti-correlation between a defence and the attack it faces.
@@ -48,7 +55,11 @@ from .features import FEATURE_VERSION, build_feature_dataset
 
 # Bumped whenever the model or its parameters change so forecasts from different
 # code revisions never get silently mixed.
-MODEL_VERSION = "1.0.0"
+# 1.1.0 corrected the goalkeeper scoring row and replaced the linear
+#   approximation of the per-N thresholds with their exact Poisson expectation.
+# 1.2.0 scores every match a club plays in the target tour rather than only the
+#   first, so a club doubled up by a postponement is no longer forecast at half.
+MODEL_VERSION = "1.2.0"
 
 # Model names persisted alongside every forecast row.
 MODEL_EVENT = "poisson_events"
@@ -58,18 +69,38 @@ MODEL_RECENT = "recent_form"
 # Version of the scoring table below. It is empirically reconstructed from the
 # 2025/2026 RPL season's per-match ``points`` (the authoritative fantasy score),
 # because Sports.ru only publishes the scoring rules as an image and the
-# structured per-event breakdown (``statDetails``) is empty. Reconstructing the
-# 9578 imported player-match rows from these rules reproduces 83% exactly and
-# 96% within +/-1 point; the residual is dominated by the indirect "fantasy
-# assist" and late ball-recovery adjustments that are not present in the
-# imported per-match columns (documented in docs/data-model.md).
-SCORING_VERSION = "rpl-2025-2026.1"
+# structured per-event breakdown (``statDetails``) is empty.
+#
+# ``.2`` corrected the goalkeeper row: keepers are *not* paid for ball
+# recoveries. They record ~8.4 of them per 90 minutes — every claimed cross and
+# collected back-pass — so paying the outfield rate of 1 point per 3 credited a
+# keeper with roughly 2.3 points he never scored, in every single match. The
+# error was invisible in the pooled accuracy figure because keepers are 6% of
+# the rows, and it made the optimizer buy cheap goalkeepers instead of forwards.
+# Dropping the reward moves the goalkeeper reconstruction from 3.7% to 94.6%
+# exact on the RPL and from 2.4% to 94.7% on La Liga; the outfield rows were
+# re-fitted at the same time and came out unchanged (see
+# :mod:`fantasy_analytics.scoring_audit`).
+SCORING_VERSION = "rpl-2025-2026.2"
 
 # Minutes threshold for a "full" appearance (a start): clean sheets and the
 # 2-point appearance bonus require it.
 START_MINUTES = 60
 
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
+
+# The additive breakdown every event forecast reports, in a fixed order so a
+# tour with no fixture at all still produces the same shape.
+_COMPONENT_KEYS = (
+    "appearance",
+    "goals",
+    "assists",
+    "clean_sheet",
+    "conceded",
+    "saves",
+    "recoveries",
+    "yellow_cards",
+)
 
 
 @dataclass(frozen=True)
@@ -88,7 +119,8 @@ class RoleScoring:
 
 
 # The versioned scoring table. Rewards/penalties that are role-independent
-# (assist +3, recovery +1 per 3, yellow -1) are repeated per role for clarity.
+# (assist +3, yellow -1) are repeated per role for clarity. The ball-recovery
+# reward is *not* role-independent: only outfield players are paid for it.
 SCORING: dict[str, RoleScoring] = {
     "GOALKEEPER": RoleScoring(
         appearance_sub=1,
@@ -98,7 +130,7 @@ SCORING: dict[str, RoleScoring] = {
         clean_sheet=4,
         conceded_per_two=-1,
         save_per_three=1,
-        recovery_per_three=1,
+        recovery_per_three=0,
         yellow_card=-1,
     ),
     "DEFENDER": RoleScoring(
@@ -199,6 +231,34 @@ def clean_sheet_probability(opponent_goals_mean: float) -> float:
     return poisson_pmf(0, max(0.0, opponent_goals_mean))
 
 
+def expected_threshold_count(mean: float, step: int) -> float:
+    """``E[floor(N / step)]`` for a Poisson count ``N`` with the given mean.
+
+    Several rewards are paid in whole blocks rather than per event: one point
+    per *three* recoveries or saves, one penalty per *two* goals conceded. Two
+    recoveries are therefore worth nothing, and scoring them as ``2 / 3`` of a
+    point is not a rounding detail — averaged over a season it overpays every
+    threshold reward by roughly a third of a point per match, which is most of a
+    goalkeeper's or a defender's whole edge.
+
+    The expectation is summed directly from the Poisson probability mass, whose
+    tail is cut where it can no longer move the result.
+    """
+    if step <= 0:
+        raise ValueError("Threshold step must be positive")
+    lam = max(0.0, float(mean))
+    if lam == 0.0:
+        return 0.0
+    limit = int(lam + 12.0 * math.sqrt(lam)) + 4 * step + 12
+    total = 0.0
+    pmf = math.exp(-lam)
+    for count in range(limit + 1):
+        if count:
+            pmf *= lam / count
+        total += pmf * (count // step)
+    return total
+
+
 def team_goal_means(
     club_attack: float,
     club_defense: float,
@@ -246,14 +306,45 @@ def _expected_from_rate(per90: float, expected_minutes: float) -> float:
 # ---------------------------------------------------------------------------
 
 
+def tour_fixtures(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every match of the target tour a feature row covers.
+
+    Feature version 1.4.0 reports them in ``tour_fixtures``; an older row (or a
+    hand-built one in a test) carries a single fixture flattened onto the row
+    itself, which is read as a one-match tour.
+    """
+    fixtures = row.get("tour_fixtures")
+    if fixtures:
+        return list(fixtures)
+    return [
+        {
+            "match_id": row.get("match_id"),
+            "is_home": row.get("is_home"),
+            "opponent_club_id": row.get("opponent_club_id"),
+            "opponent_name": row.get("opponent_name"),
+            "club_attack": row.get("club_attack"),
+            "club_defense": row.get("club_defense"),
+            "opponent_attack": row.get("opponent_attack"),
+            "opponent_defense": row.get("opponent_defense"),
+        }
+    ]
+
+
 def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
     """Interpretable event-based forecast for one feature row.
 
     Returns a dict with ``expected_points`` (the exact sum of ``components``),
-    an ``uncertainty`` standard deviation, the ``fixture`` exposures the
-    optimizer prices and the intermediate expectations. An unavailable player
-    (``is_available`` false or ``p_appearance`` 0) scores a flat zero so it never
-    enters a squad.
+    an ``uncertainty`` standard deviation, the per-match ``fixtures`` exposures
+    the optimizer prices and the intermediate expectations. An unavailable
+    player (``is_available`` false or ``p_appearance`` 0) scores a flat zero so
+    it never enters a squad.
+
+    A tour is a slice of the calendar rather than a round, so a club whose
+    postponed match was re-attached here plays *twice* and its players are
+    scored for both matches. Everything that is a property of the player — the
+    per-90 rates, how likely he is to feature, how long he stays on — is shared
+    between them; everything that is a property of the match — the opponent, the
+    venue, the clean sheet — is computed per fixture and the results are added.
     """
     role = row["role"]
     scoring = SCORING.get(role)
@@ -270,14 +361,7 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
         float(row.get("appearance_share") or 0.0),
     )
 
-    goals_for, goals_against = team_goal_means(
-        float(row.get("club_attack") or 0.0),
-        float(row.get("club_defense") or 0.0),
-        float(row.get("opponent_attack") or 0.0),
-        float(row.get("opponent_defense") or 0.0),
-    )
-    p_clean_sheet = clean_sheet_probability(goals_against)
-
+    # Per-match event counts, which do not depend on which match it is.
     exp_goals = _expected_from_rate(float(row.get("goals_per90") or 0.0), expected_minutes)
     exp_assists = _expected_from_rate(
         float(row.get("assists_per90") or 0.0), expected_minutes
@@ -295,103 +379,175 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
     appearance_pts = scoring.appearance_full * p_full + scoring.appearance_sub * p_sub
     goal_pts = scoring.goal * exp_goals
     assist_pts = scoring.assist * exp_assists
-    # A clean sheet only counts for a full appearance.
-    clean_sheet_pts = scoring.clean_sheet * p_full * p_clean_sheet
-    # -1 per 2 conceded ~= -0.5 per conceded goal, weighted by playing at all.
-    conceded_pts = (scoring.conceded_per_two / 2.0) * goals_against * p_appearance
-    save_pts = (scoring.save_per_three / 3.0) * exp_saves
-    recovery_pts = (scoring.recovery_per_three / 3.0) * exp_recoveries
+    # The three block rewards are paid per completed threshold, so each one is
+    # the expected number of *whole* blocks rather than the count divided by the
+    # block size.
+    save_pts = scoring.save_per_three * expected_threshold_count(exp_saves, 3)
+    recovery_pts = scoring.recovery_per_three * expected_threshold_count(
+        exp_recoveries, 3
+    )
     yellow_pts = scoring.yellow_card * exp_yellows
 
-    components = {
-        "appearance": round(appearance_pts, 4),
-        "goals": round(goal_pts, 4),
-        "assists": round(assist_pts, 4),
-        "clean_sheet": round(clean_sheet_pts, 4),
-        "conceded": round(conceded_pts, 4),
-        "saves": round(save_pts, 4),
-        "recoveries": round(recovery_pts, 4),
-        "yellow_cards": round(yellow_pts, 4),
-    }
-
     playing = is_available and p_appearance > 0.0
-    if not playing:
-        components = {key: 0.0 for key in components}
 
-    expected_points = round(sum(components.values()), 4)
-
-    # Fixture-linked exposures (step 16). ``goal_upside`` is the part of the
-    # forecast that only materialises when the player's own club scores, and
-    # ``shutout_stake`` is what the player forfeits per goal their opponent
-    # scores: the clean sheet they lose plus the concession penalty. For two
-    # players on opposite sides of one fixture, ``goal_upside * shutout_stake``
-    # (both ways round) is exactly the magnitude of the covariance of their two
-    # forecasts under this Poisson goal model, because the Poisson mean cancels
-    # out of ``Cov(1{G=0}, G) = -P(G=0) * lambda`` and ``Var(G) = lambda``.
+    components = {key: 0.0 for key in _COMPONENT_KEYS}
+    fixtures: list[dict[str, Any]] = []
+    per_fixture: list[dict[str, Any]] = []
+    variance = 0.0
+    # ``shutout_stake`` prices what a goal against costs; the marginal rate is
+    # the concession penalty per goal, which is the same in every match.
     conceded_per_goal = (
         (-scoring.conceded_per_two / 2.0) * p_appearance if playing else 0.0
     )
-    fixture = {
-        "goal_upside": round(components["goals"] + components["assists"], 4),
-        "shutout_stake": round(components["clean_sheet"] + conceded_per_goal, 4),
-    }
 
-    # Uncertainty: standard deviation from independent component variances.
-    # Counts are treated as Poisson (Var = mean); the two Bernoulli terms use
-    # p(1-p). This is a documented approximation, not a calibrated interval.
-    if not playing:
-        uncertainty = 0.0
-    else:
-        variance = (
-            scoring.goal**2 * exp_goals
-            + scoring.assist**2 * exp_assists
-            + (scoring.save_per_three / 3.0) ** 2 * exp_saves
-            + (scoring.recovery_per_three / 3.0) ** 2 * exp_recoveries
-            + scoring.yellow_card**2 * exp_yellows
-            + (scoring.clean_sheet * p_full) ** 2
-            * p_clean_sheet
-            * (1.0 - p_clean_sheet)
-            + (scoring.appearance_full - scoring.appearance_sub) ** 2
-            * p_full
-            * (1.0 - p_full)
+    for fixture in tour_fixtures(row):
+        goals_for, goals_against = team_goal_means(
+            float(fixture.get("club_attack") or 0.0),
+            float(fixture.get("club_defense") or 0.0),
+            float(fixture.get("opponent_attack") or 0.0),
+            float(fixture.get("opponent_defense") or 0.0),
         )
-        uncertainty = round(math.sqrt(max(0.0, variance)), 4)
+        p_clean_sheet = clean_sheet_probability(goals_against)
+        # A clean sheet only counts for a full appearance.
+        clean_sheet_pts = scoring.clean_sheet * p_full * p_clean_sheet
+        # The concession penalty is weighted by playing at all, since a player
+        # who never comes on concedes nothing.
+        conceded_pts = (
+            scoring.conceded_per_two
+            * expected_threshold_count(goals_against, 2)
+            * p_appearance
+        )
+        match = {
+            "appearance": round(appearance_pts, 4),
+            "goals": round(goal_pts, 4),
+            "assists": round(assist_pts, 4),
+            "clean_sheet": round(clean_sheet_pts, 4),
+            "conceded": round(conceded_pts, 4),
+            "saves": round(save_pts, 4),
+            "recoveries": round(recovery_pts, 4),
+            "yellow_cards": round(yellow_pts, 4),
+        }
+        if not playing:
+            match = {key: 0.0 for key in match}
+        for key, value in match.items():
+            components[key] = round(components[key] + value, 4)
+
+        # Fixture-linked exposures (step 16). ``goal_upside`` is the part of the
+        # forecast that only materialises when the player's own club scores, and
+        # ``shutout_stake`` is what the player forfeits per goal their opponent
+        # scores: the clean sheet they lose plus the concession penalty. For two
+        # players on opposite sides of one fixture, ``goal_upside *
+        # shutout_stake`` (both ways round) is exactly the magnitude of the
+        # covariance of their two forecasts under this Poisson goal model,
+        # because the Poisson mean cancels out of
+        # ``Cov(1{G=0}, G) = -P(G=0) * lambda`` and ``Var(G) = lambda``.
+        fixtures.append(
+            {
+                "match_id": fixture.get("match_id"),
+                "opponent_club_id": fixture.get("opponent_club_id"),
+                "opponent_name": fixture.get("opponent_name"),
+                "is_home": fixture.get("is_home"),
+                "goal_upside": round(match["goals"] + match["assists"], 4),
+                "shutout_stake": round(match["clean_sheet"] + conceded_per_goal, 4)
+                if playing
+                else 0.0,
+            }
+        )
+        per_fixture.append(
+            {
+                "match_id": fixture.get("match_id"),
+                "expected_points": round(sum(match.values()), 4),
+                "team_goals_for": goals_for,
+                "team_goals_against": goals_against,
+                "clean_sheet_probability": round(p_clean_sheet, 4),
+            }
+        )
+
+        # Uncertainty: standard deviation from independent component variances.
+        # Counts are treated as Poisson (Var = mean); the two Bernoulli terms
+        # use p(1-p). This is a documented approximation, not a calibrated
+        # interval. Matches are treated as independent, so variances add.
+        if playing:
+            variance += (
+                scoring.goal**2 * exp_goals
+                + scoring.assist**2 * exp_assists
+                + (scoring.save_per_three / 3.0) ** 2 * exp_saves
+                + (scoring.recovery_per_three / 3.0) ** 2 * exp_recoveries
+                + scoring.yellow_card**2 * exp_yellows
+                + (scoring.clean_sheet * p_full) ** 2
+                * p_clean_sheet
+                * (1.0 - p_clean_sheet)
+                + (scoring.appearance_full - scoring.appearance_sub) ** 2
+                * p_full
+                * (1.0 - p_full)
+            )
+
+    expected_points = round(sum(components.values()), 4)
+    uncertainty = round(math.sqrt(max(0.0, variance)), 4) if playing else 0.0
+    matches = len(fixtures)
 
     return {
         "expected_points": expected_points,
         "uncertainty": uncertainty,
         "components": components,
-        "fixture": fixture,
+        "fixtures": fixtures,
+        # The exposure of the tour as a whole, kept for readers that never had
+        # to think about a club playing twice.
+        "fixture": {
+            "goal_upside": round(sum(f["goal_upside"] for f in fixtures), 4),
+            "shutout_stake": round(sum(f["shutout_stake"] for f in fixtures), 4),
+        },
         "expected": {
-            "goals": round(exp_goals, 4),
-            "assists": round(exp_assists, 4),
-            "saves": round(exp_saves, 4),
-            "recoveries": round(exp_recoveries, 4),
-            "yellow_cards": round(exp_yellows, 4),
-            "team_goals_for": goals_for,
-            "team_goals_against": goals_against,
-            "clean_sheet_probability": round(p_clean_sheet, 4),
+            "fixture_count": matches,
+            "goals": round(exp_goals * matches, 4),
+            "assists": round(exp_assists * matches, 4),
+            "saves": round(exp_saves * matches, 4),
+            "recoveries": round(exp_recoveries * matches, 4),
+            "yellow_cards": round(exp_yellows * matches, 4),
+            "team_goals_for": per_fixture[0]["team_goals_for"] if per_fixture else 0.0,
+            "team_goals_against": (
+                per_fixture[0]["team_goals_against"] if per_fixture else 0.0
+            ),
+            "clean_sheet_probability": (
+                per_fixture[0]["clean_sheet_probability"] if per_fixture else 0.0
+            ),
             "p_full_appearance": p_full,
             "p_sub_appearance": p_sub,
+            "per_fixture": per_fixture,
         },
     }
 
 
+def _fixture_count(row: dict[str, Any]) -> int:
+    """How many matches of the target tour the row's club plays."""
+    count = row.get("fixture_count")
+    if count is not None:
+        return max(0, int(count))
+    return len(tour_fixtures(row))
+
+
 def forecast_mean_baseline(row: dict[str, Any]) -> dict[str, Any]:
-    """Baseline: season mean points per appearance scaled by play probability."""
+    """Baseline: season mean points per appearance scaled by play probability.
+
+    The totals are the feature builder's blended ones, so early in a season they
+    are fractional: last season's matches are still in there, at the weight the
+    blend gives them. A club playing twice in the tour scores twice.
+    """
     p_appearance = float(row.get("p_appearance") or 0.0)
-    total_appearances = int(row.get("total_appearances") or 0)
+    total_appearances = float(row.get("total_appearances") or 0.0)
     total_points = float(row.get("total_points") or 0.0)
     is_available = bool(row.get("is_available", True))
+    matches = _fixture_count(row)
 
     mean_points = total_points / total_appearances if total_appearances else 0.0
-    expected_points = mean_points * p_appearance if is_available else 0.0
+    expected_points = mean_points * p_appearance * matches if is_available else 0.0
     return {
         "expected_points": round(expected_points, 4),
         "uncertainty": None,
         "components": {
             "mean_points_per_appearance": round(mean_points, 4),
             "p_appearance": round(p_appearance, 4),
+            "fixture_count": matches,
         },
     }
 
@@ -401,14 +557,16 @@ def forecast_recent_baseline(row: dict[str, Any]) -> dict[str, Any]:
     p_appearance = float(row.get("p_appearance") or 0.0)
     points_avg_5 = float(row.get("points_avg_5") or 0.0)
     is_available = bool(row.get("is_available", True))
+    matches = _fixture_count(row)
 
-    expected_points = points_avg_5 * p_appearance if is_available else 0.0
+    expected_points = points_avg_5 * p_appearance * matches if is_available else 0.0
     return {
         "expected_points": round(expected_points, 4),
         "uncertainty": None,
         "components": {
             "points_avg_5": round(points_avg_5, 4),
             "p_appearance": round(p_appearance, 4),
+            "fixture_count": matches,
         },
     }
 
@@ -436,6 +594,11 @@ _IDENTITY_FIELDS = (
     "stat_source",
     "has_history",
     "is_newcomer",
+    # A tour is a slice of the calendar, so a club can play twice in it. The
+    # flat ``match_id`` above names the first of those matches; the list names
+    # all of them.
+    "tour_fixtures",
+    "fixture_count",
 )
 
 
@@ -465,7 +628,11 @@ def _forecast_rows_for_player(
             "expected_points": event["expected_points"],
             "uncertainty": event["uncertainty"],
             "components": event["components"],
-            "params": {"expected": event["expected"], "fixture": event["fixture"]},
+            "params": {
+                "expected": event["expected"],
+                "fixture": event["fixture"],
+                "fixtures": event["fixtures"],
+            },
         },
         {
             **common,
@@ -519,6 +686,9 @@ def forecast_from_features(
     available_players = sum(
         1 for r in features["rows"] if r.get("is_available", True)
     )
+    double_fixture_rows = sum(
+        1 for r in features["rows"] if (r.get("fixture_count") or 1) > 1
+    )
 
     return {
         "model_version": MODEL_VERSION,
@@ -548,6 +718,7 @@ def forecast_from_features(
             "fixtures": features["counts"]["fixtures"],
             "prior_sourced": features["counts"].get("prior_sourced", 0),
             "newcomers": features["counts"].get("newcomers", 0),
+            "double_fixture_rows": double_fixture_rows,
         },
         "rows": rows,
     }
@@ -636,8 +807,10 @@ __all__ = [
     "reconstruct_points",
     "poisson_pmf",
     "clean_sheet_probability",
+    "expected_threshold_count",
     "team_goal_means",
     "appearance_probabilities",
+    "tour_fixtures",
     "forecast_event_model",
     "forecast_mean_baseline",
     "forecast_recent_baseline",

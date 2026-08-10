@@ -197,6 +197,25 @@ class CandidatesFromForecastTest(unittest.TestCase):
         cands = candidates_from_forecast(rows, MODEL_EVENT)
         self.assertEqual([c.player_season_id for c in cands], [2, 5])
 
+    def test_carries_every_fixture_of_a_doubled_tour(self) -> None:
+        row = self._row(
+            params={
+                "fixture": {"goal_upside": 3.0, "shutout_stake": 0.0},
+                "fixtures": [
+                    {"match_id": 10, "goal_upside": 1.5, "shutout_stake": 0.0},
+                    {"match_id": 11, "goal_upside": 1.5, "shutout_stake": 0.0},
+                ],
+            }
+        )
+        candidate = candidates_from_forecast([row], MODEL_EVENT)[0]
+        self.assertEqual(2, len(candidate.tour_fixtures))
+        self.assertEqual(
+            [10, 11], [f["match_id"] for f in candidate.tour_fixtures]
+        )
+        # The scalar exposure stays the tour total, so a reader that only knows
+        # about one match sees the whole of it rather than half.
+        self.assertEqual(3.0, candidate.goal_upside)
+
 
 class SolveSquadTest(unittest.TestCase):
     def test_normal_tour_builds_a_valid_squad(self) -> None:
@@ -773,15 +792,39 @@ class CancellationTest(unittest.TestCase):
 
     def test_conflicts_are_ordered_and_reported_once(self) -> None:
         exposures = [
-            FixtureExposure(match_id=1, club_id=1, goal_upside=0.0, shutout_stake=2.0),
-            FixtureExposure(match_id=1, club_id=2, goal_upside=3.0, shutout_stake=0.0),
-            FixtureExposure(match_id=1, club_id=2, goal_upside=1.0, shutout_stake=0.0),
-            FixtureExposure(match_id=2, club_id=3, goal_upside=1.0, shutout_stake=1.0),
+            [FixtureExposure(match_id=1, club_id=1, goal_upside=0.0, shutout_stake=2.0)],
+            [FixtureExposure(match_id=1, club_id=2, goal_upside=3.0, shutout_stake=0.0)],
+            [FixtureExposure(match_id=1, club_id=2, goal_upside=1.0, shutout_stake=0.0)],
+            [FixtureExposure(match_id=2, club_id=3, goal_upside=1.0, shutout_stake=1.0)],
         ]
         conflicts = fixture_conflicts(exposures)
         self.assertEqual([(left, right) for left, right, _ in conflicts], [(0, 1), (0, 2)])
         self.assertAlmostEqual(conflicts[0][2], 6.0, places=6)
         self.assertAlmostEqual(conflicts[1][2], 2.0, places=6)
+
+    def test_two_players_meeting_twice_cancel_in_both_matches(self) -> None:
+        # A postponement can double a club up, so the same pair of players can
+        # face each other twice inside one tour. The pair is still reported once
+        # and the cancellation is the sum over the matches they meet in.
+        defender = [
+            FixtureExposure(match_id=1, club_id=1, goal_upside=0.0, shutout_stake=2.0),
+            FixtureExposure(match_id=2, club_id=1, goal_upside=0.0, shutout_stake=1.0),
+        ]
+        striker = [
+            FixtureExposure(match_id=1, club_id=2, goal_upside=3.0, shutout_stake=0.0),
+            FixtureExposure(match_id=2, club_id=2, goal_upside=3.0, shutout_stake=0.0),
+        ]
+        conflicts = fixture_conflicts([defender, striker])
+        self.assertEqual(1, len(conflicts))
+        self.assertEqual((0, 1), conflicts[0][:2])
+        self.assertAlmostEqual(conflicts[0][2], 6.0 + 3.0, places=6)
+
+    def test_a_player_never_clashes_with_himself(self) -> None:
+        both_sides = [
+            FixtureExposure(match_id=1, club_id=1, goal_upside=3.0, shutout_stake=2.0),
+            FixtureExposure(match_id=1, club_id=1, goal_upside=3.0, shutout_stake=2.0),
+        ]
+        self.assertEqual([], fixture_conflicts([both_sides]))
 
 
 # The two fixtures of a synthetic tour: club 1 hosts club 2, club 3 hosts club 4.
@@ -977,6 +1020,42 @@ class FixtureAwareOptimizerTest(unittest.TestCase):
         violations = validate_squad(solution, self.rules)
         self.assertTrue(any("fixture cancellation" in v for v in violations))
 
+    def test_validator_prices_the_cancellation_from_the_unrounded_sum(self) -> None:
+        # round(w * round(x, 4), 4) can land a whole least-significant digit
+        # away from round(w * x, 4). The validator used to do the former and the
+        # report the latter, so a perfectly legal squad was rejected as invalid
+        # and took a whole backtest run down with it.
+        starters = [
+            {
+                "player_season_id": index,
+                "role": role,
+                "club_id": club,
+                "price": 5.0,
+                "expected_points": 4.0,
+                "is_starter": True,
+                "match_id": 77,
+                "goal_upside": upside,
+                "shutout_stake": stake,
+            }
+            for index, (role, club, upside, stake) in enumerate(
+                (
+                    ("FORWARD", 1, 2.385049, 0.0),
+                    ("DEFENDER", 2, 0.0, 1.0),
+                ),
+                start=1,
+            )
+        ]
+        weight = 0.25
+        solution = {
+            "squad": starters,
+            "fixture_penalty": round(weight * 2.385049, 4),
+            "objective_expected_points": 8.0,
+            "objective_score": round(8.0 - round(weight * 2.385049, 4), 4),
+            "fixtures": {"conflict_weight": weight, "cancellation": 2.385049},
+        }
+        violations = validate_squad(solution, self.rules)
+        self.assertFalse([v for v in violations if "fixture" in v])
+
     def test_validator_catches_a_wrong_objective_score(self) -> None:
         solution = solve_squad(_duel_pool(7.0), self.rules)
         solution["objective_score"] = solution["objective_expected_points"]
@@ -1017,6 +1096,93 @@ class FixtureAwareOptimizerTest(unittest.TestCase):
         # A model without a fixture breakdown simply has no exposure.
         self.assertEqual(candidates[1].goal_upside, 0.0)
         self.assertEqual(candidates[1].shutout_stake, 0.0)
+
+
+class DoubleGameweekSquadTest(unittest.TestCase):
+    """A club doubled up by a postponement is worth owning twice over."""
+
+    def _pool(self) -> list[Candidate]:
+        # Two forwards of equal price. The neutral one plays once for 5 points;
+        # the doubled one plays twice for 4 each, which is the better buy.
+        return [
+            Candidate(
+                player_season_id=1,
+                fantasy_player_id="1",
+                player_name="Defender",
+                role="DEFENDER",
+                club_id=1,
+                club_name="Club1",
+                price=5.0,
+                expected_points=4.0,
+                match_id=_DUEL_MATCH,
+                opponent_club_id=2,
+                goal_upside=0.0,
+                shutout_stake=1.5,
+                tour_fixtures=(
+                    {"match_id": _DUEL_MATCH, "goal_upside": 0.0, "shutout_stake": 0.75},
+                    {"match_id": _OTHER_MATCH, "goal_upside": 0.0, "shutout_stake": 0.75},
+                ),
+            ),
+            Candidate(
+                player_season_id=2,
+                fantasy_player_id="2",
+                player_name="Doubled striker",
+                role="FORWARD",
+                club_id=2,
+                club_name="Club2",
+                price=5.0,
+                expected_points=8.0,
+                match_id=_DUEL_MATCH,
+                opponent_club_id=1,
+                goal_upside=4.0,
+                shutout_stake=0.0,
+                tour_fixtures=(
+                    {"match_id": _DUEL_MATCH, "goal_upside": 2.0, "shutout_stake": 0.0},
+                    {"match_id": _OTHER_MATCH, "goal_upside": 2.0, "shutout_stake": 0.0},
+                ),
+            ),
+            Candidate(
+                player_season_id=3,
+                fantasy_player_id="3",
+                player_name="Single striker",
+                role="FORWARD",
+                club_id=3,
+                club_name="Club3",
+                price=5.0,
+                expected_points=5.0,
+                match_id=503,
+                opponent_club_id=4,
+                goal_upside=2.0,
+                shutout_stake=0.0,
+                tour_fixtures=(
+                    {"match_id": 503, "goal_upside": 2.0, "shutout_stake": 0.0},
+                ),
+            ),
+        ]
+
+    def test_the_doubled_player_wins_the_slot(self) -> None:
+        solution = solve_squad(self._pool(), _duel_rules(), fixture_conflict_weight=0.0)
+        self.assertEqual(
+            {2}, {p["player_season_id"] for p in solution["squad"] if p["role"] == "FORWARD"}
+        )
+
+    def test_meeting_the_same_opponent_twice_is_priced_twice(self) -> None:
+        # The defender and the striker face each other in both matches of the
+        # tour, so the pair cancels out twice over.
+        solution = solve_squad(self._pool(), _duel_rules())
+        clashes = solution["fixtures"]["clashes"]
+        self.assertEqual(1, len(clashes))
+        self.assertAlmostEqual(2 * 2.0 * 0.75, clashes[0]["cancellation"], places=4)
+        self.assertEqual([], validate_squad(solution, _duel_rules()))
+
+    def test_the_squad_entry_carries_every_match(self) -> None:
+        solution = solve_squad(self._pool(), _duel_rules())
+        striker = next(p for p in solution["squad"] if p["player_season_id"] == 2)
+        self.assertEqual(2, striker["fixture_count"])
+        self.assertEqual(
+            [_DUEL_MATCH, _OTHER_MATCH],
+            [f["match_id"] for f in striker["tour_fixtures"]],
+        )
 
 
 class ValidatorTest(unittest.TestCase):

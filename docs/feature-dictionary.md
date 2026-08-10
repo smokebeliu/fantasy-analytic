@@ -6,10 +6,15 @@ the `fantasy-features` CLI. It turns the *active* snapshot published by the
 quality gate (step 4) into a reproducible, leakage-free table with one row per
 player whose club plays a target tour.
 
-The current `feature_version` is `1.2.0`. Version `1.1.0` added the
+The current `feature_version` is `1.4.0`. Version `1.1.0` added the
 `saves_per90`, `recoveries_per90` and `yellows_per90` rates that the step-7
 event forecast consumes; version `1.2.0` added cross-season sourcing (step 14),
-the `stat_source` / `is_newcomer` labels and newcomer priors.
+the `stat_source` / `is_newcomer` labels and newcomer priors; version `1.3.0`
+turned that sourcing into a decaying **blend** of the two seasons, stopped
+counting 0-minute matchday rows as appearances and estimates the appearance
+probability from the whole sourced season instead of a five-match window;
+version `1.4.0` reports every match a club plays in the target tour rather than
+only the earliest.
 
 ## Reproducibility and leakage guarantees
 
@@ -35,10 +40,10 @@ tour, cutoff time and feature version" requirement.
 
 | Situation | Fill |
 | --- | --- |
-| Fewer than *N* appearances for a rolling window | Aggregate over the appearances that exist; means default to `0.0` and `appearances_{N}` records the true count |
-| No appearances at all before cutoff | All rolling/per-90 features are `0.0` and `has_history` is `false` |
+| Fewer than *N* appearances for a rolling window | The window is topped up from last season; if there are still fewer, aggregate over what exists, means default to `0.0` and `appearances_{N}` records the true count |
+| No appearances at all in either season | All rolling/per-90 features are `0.0` and `has_history` is `false` |
 | No minutes played | Per-90 rates are `0.0` |
-| Club has no matches before cutoff | `appearance_share` / `start_share` are `0.0`; strength falls back to the league mean |
+| Club has no matches in either season | `appearance_share` / `start_share` are `0.0`; strength falls back to the league mean |
 | Club has no matches at the fixture venue | Venue attack/defence falls back to the league mean for that venue |
 | No previous club match | `rest_days` is `null` |
 | Player marked out (`availability_status` in the unavailable set) | `p_appearance` and `expected_minutes` are `0.0` |
@@ -49,38 +54,97 @@ Availability is unavailable when `availability_status` is one of
 `SUSPENSION`, `OUT`, `LEFT`. Any other value (including `FIERY` and `UNKNOWN`)
 is treated as available so a new status never silently zeroes a player.
 
-## Cross-season sourcing (step 14)
+## Cross-season blending
 
-Before the target season has played a single match, a pure current-season
-dataset would be all zeros (there is no history yet). To forecast the first tour
-of a new tournament, the builder falls back to the **prior season** by the
-shared cross-season identities (`players.stat_player_id`,
-`clubs.stat_team_id`), while the fixture, venue and opponent still come from the
-active season.
+Last season is part of the history of **every** tour, not a fallback for the
+opening one. A player is matched across seasons by the shared cross-season
+identities (`players.stat_player_id`, `clubs.stat_team_id`), while the fixture,
+venue and opponent always come from the active season.
 
-- **When it activates.** Cross-season sourcing turns on only when the target
-  season has no club match before the cutoff *and* a prior season of the same
-  competition has its own published (active) snapshot. As soon as the season
-  produces a played match, the builder switches back to the pure current-season
-  path, so backtesting a finished season is never affected. `cross_season` and
-  `prior_run_id` are reported in the dataset metadata.
-- **Returning players.** A player registered in both seasons is sourced from the
-  prior season by the shared `player_id`. Their appearances and appearance/start
-  shares use the club they actually played for last season, so a transfer keeps
-  its real track record, while the venue and opponent come from the active club.
+- **How much it counts.** One prior-season observation is worth
+  `0.5 ** (matches / PRIOR_SEASON_HALF_LIFE)` with a half-life of 5 matches: the
+  whole story before a ball is kicked, the larger half after four matches, a
+  fifth after ten, noise by the winter break. The current season is never
+  discounted, so it wins as soon as it has anything to say. Below
+  `PRIOR_SEASON_MIN_WEIGHT` (0.01) the prior season is not even loaded, which is
+  why backtesting a fully played season is unaffected. `prior_season_weight`
+  is reported per row and in the dataset metadata, next to `prior_run_id`.
+- **Rates versus availability.** Per-90 rates and totals decay against the
+  *player's* own matches, so a signing who has not played yet keeps last
+  season's profile intact. The appearance and start shares decay against his
+  *club's* matches, because eight matches spent on the bench are precisely the
+  evidence that matters there. The two shares additionally cap each season at
+  `SHARE_BLEND_WINDOW` (5) effective matches, so a finished 38-match season
+  cannot outvote the one being played merely by being longer.
+- **Rolling windows.** `points_avg_{3,5,10}` and friends run across the season
+  boundary: while this season is shorter than the window it is topped up from
+  last one, and each new appearance pushes one of last season's out.
+- **Returning players.** A player registered in both seasons keeps the club he
+  actually played for last season as the denominator of his prior shares, so a
+  transfer carries its real track record rather than inheriting the new club's.
 - **Departed players.** A player who is not registered in the active season has
   no `player_season` there and simply produces no row (and no optimizer
   candidate).
-- **Newcomers.** A player registered in the active season with no prior-season
-  history is a newcomer: `is_newcomer` is `true`, `has_history` is `false`, and
-  the event rates are filled from documented **role priors** — the prior
-  season's per-90 role averages discounted by `NEWCOMER_RATE_FACTOR` (0.7),
-  with a conservative `NEWCOMER_P_APPEARANCE` (0.5) play probability. These
-  priors are position-based; refining them by price/club is left to step 18.
+- **Newcomers.** A player with no appearance in *either* season is a newcomer:
+  `is_newcomer` is `true`, `has_history` is `false`, and the event rates are
+  filled from documented **role priors** — the prior season's per-90 role
+  averages discounted by `NEWCOMER_RATE_FACTOR` (0.7), with a conservative
+  `NEWCOMER_P_APPEARANCE` (0.5) play probability that itself fades as his club
+  plays matches he does not. These priors are position-based; refining them by
+  price/club is left to step 18.
 - **Provenance label.** Every row carries `stat_source` (`current_season` or
   `prior_season`), so the frontend can visually separate last season's numbers
-  from the ones collected this season (steps 12–13). `rest_days` is `null` in
-  cross-season mode because the active club has not played yet.
+  from the ones collected this season (steps 12–13). It means "these numbers are
+  last season's", so it flips to `current_season` on the player's first
+  appearance however much last season still weighs. `rest_days` is `null` until
+  the active club has played.
+
+## A tour is a slice of the calendar, not a round
+
+Fantasy tours are time windows that cannot overlap, unlike league rounds, which
+keep a postponed match no matter when it is eventually played. Sports.ru
+therefore re-attaches a moved match to whichever tour its new date falls closest
+to: it stays in its own tour (and moves the deadline) when the new date is still
+nearer to it, joins the next tour when it is nearer to that one, and joins the
+*previous* tour when it is brought forward past the midpoint — a Wednesday match
+after a tour that ended on Monday belongs to that tour. Ties keep the original
+calendar rather than creating a double.
+
+Two consequences reach the feature builder, and both are carried through:
+
+- **Double gameweeks.** A club can play **twice** in one tour. Every one of its
+  matches is reported in `tour_fixtures` (`fixture_count` says how many), and
+  the forecast is the sum over them: appearance points, goals, clean sheets and
+  the concession penalty are all counted once per match, each against its own
+  opponent and venue. The flat `match_id` / `opponent_name` / `is_home` /
+  `club_attack` fields describe the *first* of them, so a reader that only ever
+  expected one keeps working.
+- **Blank gameweeks.** A club can play **none**, which is what the tour the
+  match was moved out of looks like. Its players produce no row and no optimizer
+  candidate for that tour, and are counted in `players_without_fixture`.
+
+The `cutoff` is never later than the tour's own first kickoff, whatever the
+recorded deadline says. A moved match can leave the deadline sitting after a
+kickoff, and while the target tour's matches are excluded from a player's
+history by id, the club-strength aggregates have no player to exclude them by —
+so a tour would end up predicted partly from itself.
+
+## Appearances are matches played
+
+Sports.ru returns a per-match row for every **named matchday squad member**, so
+an unused substitute arrives as a 0-minute, 0-point row. Only rows with minutes
+count as appearances; counting the rest made a permanent reserve look
+ever-present on half-length shifts.
+
+The appearance probability is the recency-weighted share of the club's matches
+the player was on the pitch for, over the whole sourced history rather than a
+five-match window. Within the current season the club's latest match counts 1,
+the one before it `CURRENT_RECENCY_DECAY` (0.85) and so on, because *when* a
+player stopped featuring is the question. Last season is weighted flat: whether
+he was rested in April or in October says nothing about a match three months
+after the season ended, and decaying it would hand the entire prior weight to
+the handful of dead rubbers the league's best players are routinely rested for —
+which used to forecast them at exactly zero for the whole following season.
 
 ## Fields
 
@@ -100,25 +164,28 @@ active season.
 | `availability_status`, `status_description` | From the active snapshot. |
 | `is_available` | `false` when the status marks the player out. |
 | `price`, `selected_by`, `form` | Fantasy snapshot values (`null` when absent). |
-| `points_avg_{3,5,10}` | Mean fantasy points over the last *N* appearances. |
+| `points_avg_{3,5,10}` | Mean fantasy points over the last *N* appearances, spilling into last season while this one is shorter. |
 | `points_sum_{3,5,10}` | Total fantasy points over the last *N* appearances. |
 | `goals_sum_{3,5,10}` | Goals over the last *N* appearances. |
 | `assists_sum_{3,5,10}` | Assists over the last *N* appearances. |
 | `minutes_avg_{3,5,10}` | Mean minutes over the last *N* appearances. |
 | `appearances_{3,5,10}` | Appearances actually found in the last-*N* window. |
-| `total_appearances`, `total_minutes`, `total_points` | Season-to-date totals before cutoff. |
-| `points_per90`, `goals_per90`, `assists_per90` | Season-to-date per-90 rates. |
-| `saves_per90`, `recoveries_per90`, `yellows_per90` | Season-to-date goalkeeper-save, ball-recovery and yellow-card per-90 rates (consumed by the step-7 event forecast). |
-| `club_matches_before` | Club matches played before cutoff (share denominator). |
-| `appearance_share` | Share of club matches the player appeared in. |
-| `start_share` | Share of club matches the player started (>= 60 minutes). |
-| `p_appearance` | Estimated probability of playing the fixture (last 5 club matches). |
-| `expected_minutes` | `p_appearance` x recent mean minutes when appearing. |
-| `club_attack`, `club_defense` | Club goals scored/conceded per match at the fixture venue. |
+| `total_appearances`, `total_minutes`, `total_points` | Blended totals: this season's plus last season's at the prior weight, so they are fractional early in a season. |
+| `current_appearances`, `current_minutes`, `current_points` | The target season's own totals before the cutoff, unweighted — what the backtest's leakage audit recomputes. |
+| `points_per90`, `goals_per90`, `assists_per90` | Blended per-90 rates. |
+| `saves_per90`, `recoveries_per90`, `yellows_per90` | Blended goalkeeper-save, ball-recovery and yellow-card per-90 rates (consumed by the step-7 event forecast). |
+| `club_matches_before` | Target-season club matches before the cutoff (how far the prior weight has decayed). |
+| `prior_club_matches` | Prior-season matches of the club the player played for last season. |
+| `prior_season_weight` | What one prior-season appearance of this player is still worth (1.0 before the season starts, down to 0). |
+| `appearance_share` | Blended, recency-weighted share of club matches the player was on the pitch for. |
+| `start_share` | Blended share of club matches the player started (>= 60 minutes). |
+| `p_appearance` | Probability of playing the fixture — the appearance share above; `0.0` when unavailable. |
+| `expected_minutes` | `p_appearance` x blended mean minutes when appearing. |
+| `club_attack`, `club_defense` | Club goals scored/conceded per match at the fixture venue, blended across seasons. |
 | `opponent_attack`, `opponent_defense` | Opponent goals scored/conceded per match at their venue. |
-| `has_history` | `true` when at least one appearance exists in the sourced history. |
-| `stat_source` | `current_season` or `prior_season` (cross-season backfill while the target season has not started). |
-| `is_newcomer` | `true` when the player has no prior-season history and is scored from role priors. |
+| `has_history` | `true` when at least one appearance exists in either season. |
+| `stat_source` | `current_season` once the player has played this season, otherwise `prior_season`. |
+| `is_newcomer` | `true` when the player has no appearance in either season and is scored from role priors. |
 
 ## Command
 
