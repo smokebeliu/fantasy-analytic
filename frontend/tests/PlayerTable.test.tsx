@@ -37,7 +37,7 @@ describe("PlayerTable", () => {
 
   it("sorts by season points when the Очки header is clicked", async () => {
     const props = setup();
-    await userEvent.click(screen.getByText(/Очки/));
+    await userEvent.click(screen.getByRole("columnheader", { name: "Очки" }));
     expect(props.onOrderChange).toHaveBeenCalledWith("season_score");
   });
 

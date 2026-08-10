@@ -40,6 +40,7 @@ STAGES: tuple[tuple[str, int], ...] = (
     ("fetch_history", 45),
     ("persist", 75),
     ("quality_gate", 90),
+    ("forecast", 95),
     ("finished", 100),
 )
 
@@ -66,6 +67,9 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^Upserted\b", re.I), "persist"),
     (re.compile(r"^Ingestion run marked succeeded\b", re.I), "quality_gate"),
     (re.compile(r"^Running quality checks\b", re.I), "quality_gate"),
+    (re.compile(r"^Forecasting the next tour\b", re.I), "forecast"),
+    (re.compile(r"^Stored \d+ forecast rows\b", re.I), "forecast"),
+    (re.compile(r"^Forecast for tour\b", re.I), "forecast"),
     (re.compile(r"^Job \d+ succeeded\b", re.I), "finished"),
 )
 

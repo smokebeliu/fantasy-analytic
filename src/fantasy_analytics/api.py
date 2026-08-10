@@ -65,6 +65,7 @@ from .db import (
 )
 from .db.job_repository import ACTIVE_STATUSES
 from .db.models import IngestionJob
+from .forecast_service import ensure_tour_forecasts
 from .ingestion_progress import STAGES
 from .optimizer import OptimizerError, build_squad_optimization
 from .read_repository import ReadRepository
@@ -73,6 +74,10 @@ from .read_repository import ReadRepository
 RPL_TOURNAMENT_SLUG = "russia"
 
 SpawnWorker = Callable[[int], None]
+
+# Materialises the projections of one (run, tour) pair before a player read is
+# answered; see :mod:`fantasy_analytics.forecast_service`.
+EnsureForecasts = Callable[..., int]
 
 _STATUS_ERROR_TYPES = {
     400: "bad_request",
@@ -217,13 +222,15 @@ def create_app(
     *,
     session_factory: sessionmaker | None = None,
     spawn_worker: SpawnWorker | None = None,
+    ensure_forecasts: EnsureForecasts = ensure_tour_forecasts,
     database_url: str | None = None,
     endpoint: str = DEFAULT_ENDPOINT,
 ) -> FastAPI:
     """Build the combined admin + user API.
 
-    ``session_factory`` and ``spawn_worker`` are injectable so tests can use a
-    transactional session and a synchronous/fake worker instead of a subprocess.
+    ``session_factory``, ``spawn_worker`` and ``ensure_forecasts`` are injectable
+    so tests can use a transactional session, a synchronous/fake worker and a
+    no-op forecast materialiser instead of a subprocess and a real solver run.
     """
     if session_factory is None:
         engine = create_db_engine(database_url)
@@ -244,6 +251,7 @@ def create_app(
     )
     app.state.session_factory = session_factory
     app.state.spawn_worker = spawn_worker
+    app.state.ensure_forecasts = ensure_forecasts
 
     # ------------------------------------------------------------------
     # Unified error envelope.
@@ -416,6 +424,17 @@ def create_app(
             _require_season(repo, season_id)
             active_run = repo.resolve_active_run(season_id)
             run_id = active_run.id if active_run is not None else None
+
+        # A snapshot published before this tour was forecast would answer with
+        # an empty «Прогноз» column; materialise it once, then read normally.
+        if tour_id is not None:
+            app.state.ensure_forecasts(
+                app.state.session_factory, run_id=run_id, tour_id=tour_id
+            )
+
+        with session_scope(app.state.session_factory) as session:
+            repo = ReadRepository(session)
+            active_run = repo.resolve_active_run(season_id)
             total, items = repo.list_players(
                 season_id=season_id,
                 run_id=run_id,
@@ -459,6 +478,15 @@ def create_app(
                 raise api_error(404, f"Player {player_season_id} not found")
             active_run = repo.resolve_active_run(probe["season_id"])
             run_id = active_run.id if active_run is not None else None
+
+        if tour_id is not None:
+            app.state.ensure_forecasts(
+                app.state.session_factory, run_id=run_id, tour_id=tour_id
+            )
+
+        with session_scope(app.state.session_factory) as session:
+            repo = ReadRepository(session)
+            active_run = repo.resolve_active_run(probe["season_id"])
             player = repo.get_player(
                 player_season_id=player_season_id,
                 run_id=run_id,

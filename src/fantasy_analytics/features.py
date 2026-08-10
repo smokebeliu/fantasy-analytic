@@ -593,14 +593,20 @@ def _role_priors(
     return priors
 
 
-def _resolve_prior_run(session, season: Season):
+def resolve_prior_run(session, season: Season, *, require_earlier: bool = False):
     """Return the active run of the season preceding ``season``, if any.
 
     A "prior season" is another season of the same competition with its own
-    published (active) snapshot. The immediately-preceding season (the latest
-    one starting before the target) is preferred; when none starts earlier the
-    latest other season is used as a fallback. Returns ``None`` when the target
-    season is the only one imported, which disables cross-season sourcing.
+    published (active) snapshot; the immediately-preceding one (the latest
+    starting before the target) is chosen. Returns ``None`` when the target
+    season is the only one imported.
+
+    The two callers want different things when *nothing* starts earlier.
+    Cross-season forecasting (the default) falls back to the latest other
+    season: it only runs when the target season has no played match, so any
+    other season's history beats forecasting from nothing. Presenting a player's
+    "previous season" has no such excuse — labelling a *later* season as last
+    season would simply be wrong — so it passes ``require_earlier``.
     """
     from .db.models import IngestionRun
 
@@ -624,7 +630,12 @@ def _resolve_prior_run(session, season: Season):
         and target_start is not None
         and item[1] < target_start
     ]
-    pool = earlier or rows
+    if require_earlier:
+        pool = earlier
+    else:
+        pool = earlier or rows
+    if not pool:
+        return None
 
     def _key(item):
         run, starts_at = item
@@ -1001,7 +1012,7 @@ def build_feature_dataset(
         # of returning an all-zero forecast. Once the season starts (any club
         # match exists before the cutoff) the pure current-season path is used,
         # so backtesting a finished season is unaffected.
-        prior_run = _resolve_prior_run(session, season) if season else None
+        prior_run = resolve_prior_run(session, season) if season else None
         cross_season = prior_run is not None and not club_matches
         prior = (
             _load_prior_context(session, prior_run, cutoff) if cross_season else None
@@ -1122,6 +1133,7 @@ __all__ = [
     "recent_before_cutoff",
     "per90",
     "load_appearances",
+    "resolve_prior_run",
     "resolve_run",
     "resolve_target_tour",
     "build_feature_dataset",

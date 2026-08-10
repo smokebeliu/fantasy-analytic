@@ -101,6 +101,25 @@ class ForecastRepository:
         query = query.order_by(PlayerForecast.expected_points.desc())
         return list(self._session.execute(query).scalars())
 
+    def has_forecasts(self, *, run_id: int, tour_id: int) -> bool:
+        """Whether the run/tour pair has any stored forecast at all.
+
+        Cheaper than :meth:`count_forecasts` because it stops at the first row;
+        callers that only need to know "was this tour ever forecast" use it on
+        the read path.
+        """
+        return (
+            self._session.execute(
+                select(PlayerForecast.id)
+                .where(
+                    PlayerForecast.ingestion_run_id == run_id,
+                    PlayerForecast.tour_id == tour_id,
+                )
+                .limit(1)
+            ).first()
+            is not None
+        )
+
     def count_forecasts(self, *, run_id: int, tour_id: int) -> int:
         return len(
             self._session.execute(

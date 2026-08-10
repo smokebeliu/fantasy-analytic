@@ -23,13 +23,24 @@ import {
 import { formatPoints, formatPrice } from "@/lib/format";
 import { RoleBadge } from "./badges";
 import { OptimizerPitch } from "./OptimizerPitch";
+import { usePlayerHoverCard } from "./PlayerHoverCard";
 import { SquadPitch } from "./SquadPitch";
 import { EmptyState, ErrorState, TableSkeleton } from "./StateBlocks";
 
 const MODELS: ForecastModel[] = ["poisson_events", "season_mean", "recent_form"];
 
+// The players endpoint caps a page at 200, and a season has a few hundred
+// players; the pool is loaded whole so searching and the hover cards can reach
+// every player rather than only the current position filter.
+const FETCH_PAGE = 200;
+
 type SquadView = "pitch" | "list";
 
+// A solver candidate carries only what the objective needed: a price and a
+// projection, never the season history. Loading a suggested squad into the
+// builder therefore resolves each pick against the players already fetched, so
+// the pitch and its hover cards keep the same numbers as the pool. The synthetic
+// fallback only matters for a pick the pool does not contain.
 function candidateToPlayer(c: OptimizerCandidate): PlayerModel {
   return {
     player_season_id: c.player_season_id,
@@ -61,6 +72,7 @@ export function SquadBuilder({
   const [view, setView] = useState<SquadView>("pitch");
   const [formation, setFormation] = useState("");
   const [locked, setLocked] = useState<Set<number>>(new Set());
+  const [maxTransfers, setMaxTransfers] = useState<number | null>(null);
 
   const [pool, setPool] = useState<PlayerModel[]>([]);
   const [poolLoading, setPoolLoading] = useState(true);
@@ -72,6 +84,8 @@ export function SquadBuilder({
   const [result, setResult] = useState<OptimizerResponse | null>(null);
   const [optimizing, setOptimizing] = useState(false);
   const [optimizerError, setOptimizerError] = useState<string | null>(null);
+
+  const poolHover = usePlayerHoverCard();
 
   const selectedTour = useMemo(
     () => tours.find((t) => t.tour_id === tourId),
@@ -90,6 +104,17 @@ export function SquadBuilder({
 
   const formations = useMemo(() => formationOptions(limits), [limits]);
 
+  // The tour's own free-transfer allowance is the default and the maximum: the
+  // solver does not price the penalty the game charges for extra transfers, so
+  // suggesting more of them than the tour gives away would be misleading.
+  const allowedTransfers = selectedTour?.total_transfers ?? 3;
+  const transferLimit = Math.min(maxTransfers ?? allowedTransfers, allowedTransfers);
+
+  // With nothing pinned and no formation chosen there is nothing for the
+  // constrained run to preserve, so it would return the same squad as the
+  // from-scratch one. Saying so is clearer than offering two identical buttons.
+  const hasConstraints = locked.size > 0 || formation !== "";
+
   // The optimizer takes fantasy ids when they exist and internal ids otherwise.
   const lockedRefs = useMemo(
     () =>
@@ -103,17 +128,28 @@ export function SquadBuilder({
     let active = true;
     setPoolLoading(true);
     setPoolError(null);
-    api
-      .listPlayers({
-        season_id: seasonId,
-        tour_id: tourId,
-        model,
-        role: roleFilter || undefined,
-        order: "projection",
-        limit: 200,
-      })
-      .then((res) => {
-        if (active) setPool(res.items);
+
+    const loadEveryPlayer = async () => {
+      const all: PlayerModel[] = [];
+      for (let page = 0; ; page += 1) {
+        const res = await api.listPlayers({
+          season_id: seasonId,
+          tour_id: tourId,
+          model,
+          order: "projection",
+          limit: FETCH_PAGE,
+          offset: page * FETCH_PAGE,
+        });
+        all.push(...res.items);
+        if (res.items.length < FETCH_PAGE || all.length >= res.pagination.total) {
+          return all;
+        }
+      }
+    };
+
+    loadEveryPlayer()
+      .then((items) => {
+        if (active) setPool(items);
       })
       .catch((err: unknown) => {
         if (active)
@@ -125,14 +161,37 @@ export function SquadBuilder({
     return () => {
       active = false;
     };
-  }, [seasonId, tourId, model, roleFilter, reloadKey]);
+  }, [seasonId, tourId, model, reloadKey]);
+
+  // Every loaded player by id: the source of the hover cards, which have to
+  // describe optimizer picks and transfer candidates too, not just pool rows.
+  const playerIndex = useMemo(
+    () => new Map(pool.map((p) => [p.player_season_id, p])),
+    [pool],
+  );
+
+  // The pool arrives asynchronously and reloads whenever the tour or the model
+  // changes. Re-resolving the squad against it keeps the pitch and its hover
+  // cards on the same numbers as the rest of the screen, instead of freezing
+  // whatever happened to be known when the squad was assembled — a squad
+  // generated before the pool finished loading would otherwise have no history at
+  // all.
+  useEffect(() => {
+    if (playerIndex.size === 0) return;
+    setSelected((prev) => {
+      const next = prev.map((p) => playerIndex.get(p.player_season_id) ?? p);
+      return next.some((p, i) => p !== prev[i]) ? next : prev;
+    });
+  }, [playerIndex]);
 
   const visiblePool = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return pool.filter((p) =>
-      q ? (p.player_name ?? "").toLowerCase().includes(q) : true,
+    return pool.filter(
+      (p) =>
+        (roleFilter ? p.role === roleFilter : true) &&
+        (q ? (p.player_name ?? "").toLowerCase().includes(q) : true),
     );
-  }, [pool, search]);
+  }, [pool, search, roleFilter]);
 
   const addPlayer = (player: PlayerModel) => {
     const check = canAddPlayer(player, selected, limits);
@@ -156,11 +215,17 @@ export function SquadBuilder({
       return next;
     });
 
+  const asPlayers = (squad: OptimizerCandidate[]) =>
+    squad.map(
+      (candidate) =>
+        playerIndex.get(candidate.player_season_id) ?? candidateToPlayer(candidate),
+    );
+
   // Keep the optimizer result loaded into the builder, preserving the pins that
   // survived (locked players always do) so the user can iterate.
   const applySolution = (res: OptimizerResponse) => {
     setResult(res);
-    const players = res.solution.squad.map(candidateToPlayer);
+    const players = asPlayers(res.solution.squad);
     setSelected(players);
     const stillPresent = new Set(players.map((p) => p.player_season_id));
     setLocked((prev) => new Set([...prev].filter((id) => stillPresent.has(id))));
@@ -178,7 +243,7 @@ export function SquadBuilder({
       });
       setResult(res);
       // Load the optimal roster into the builder so the summary stays in sync.
-      setSelected(res.solution.squad.map(candidateToPlayer));
+      setSelected(asPlayers(res.solution.squad));
       setLocked(new Set());
     } catch (err) {
       setOptimizerError(err instanceof ApiError ? err.message : "Ошибка оптимизатора");
@@ -215,7 +280,7 @@ export function SquadBuilder({
       .map((p) => p.fantasy_player_id)
       .filter((id): id is string => Boolean(id));
     if (currentSquad.length !== selected.length) {
-      setOptimizerError("У части выбранных игроков нет fantasy-id, трансферы недоступны.");
+      setOptimizerError("У части выбранных игроков нет fantasy-id, замены недоступны.");
       return;
     }
     setOptimizing(true);
@@ -226,10 +291,14 @@ export function SquadBuilder({
         current_squad: currentSquad,
         tour: selectedTour.fantasy_tour_id,
         model,
+        max_transfers: transferLimit,
         ...(lockedRefs.length > 0 ? { locked: lockedRefs } : {}),
         ...(formation ? { formation } : {}),
       });
-      applySolution(res);
+      // The suggested squad is *not* loaded into the builder: the point of a
+      // transfer plan is to compare it with the squad the user actually owns, and
+      // overwriting that squad would erase the left-hand side of the comparison.
+      setResult(res);
     } catch (err) {
       setOptimizerError(err instanceof ApiError ? err.message : "Ошибка оптимизатора");
     } finally {
@@ -284,23 +353,55 @@ export function SquadBuilder({
             ))}
           </select>
         </div>
+        <div className="field">
+          <label htmlFor="sq-transfers">Замен</label>
+          <select
+            id="sq-transfers"
+            value={transferLimit}
+            onChange={(e) => setMaxTransfers(Number(e.target.value))}
+            data-testid="transfers-select"
+          >
+            {Array.from({ length: allowedTransfers }, (_, i) => i + 1).map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </div>
         <button
           className="btn btn--primary"
           onClick={runAutoSquad}
           disabled={optimizing || !selectedTour}
+          data-testid="optimize-from-scratch"
+          title="Полностью новый состав: текущий состав, закрепления и схема не учитываются"
         >
-          {optimizing ? "Оптимизация…" : "Автосостав (оптимизатор)"}
+          {optimizing ? "Оптимизация…" : "Собрать состав с нуля"}
         </button>
         <button
           className="btn btn--primary"
           onClick={runFillAroundLocked}
-          disabled={optimizing || !selectedTour}
+          disabled={optimizing || !selectedTour || !hasConstraints}
           data-testid="optimize-locked"
-          title="Оставить закреплённых игроков и добрать остальных оптимально"
+          title={
+            hasConstraints
+              ? "Оставить закреплённых игроков и выбранную схему, остальные места заполнить оптимально"
+              : "Закрепите игроков 📌 или выберите схему — иначе результат совпадёт с «Собрать состав с нуля»"
+          }
         >
           Подобрать под мою схему
         </button>
       </div>
+
+      {/* The two optimizer buttons differ only in what they are allowed to keep,
+          which is impossible to guess from their labels alone. */}
+      <p className="inline-note" style={{ margin: "0 0 14px" }} data-testid="optimizer-help">
+        <strong>«Собрать состав с нуля»</strong> строит лучший состав тура заново и
+        игнорирует всё, что вы выбрали.{" "}
+        <strong>«Подобрать под мою схему»</strong> сохраняет закреплённых 📌 игроков
+        и выбранную схему, а остальные места заполняет оптимально.{" "}
+        <strong>«Оптимизировать замены»</strong> оставляет ваш состав и предлагает
+        не больше {transferLimit} замен на тур, показывая кого на кого менять.
+      </p>
 
       <div className="squad-layout">
         {/* Left column: the current squad as an editable pitch / list. */}
@@ -420,6 +521,12 @@ export function SquadBuilder({
                 ? `Закреплено ${locked.size} из ${limits.totalPlayers} — «Подобрать под мою схему» оставит их и добёрет остальных.`
                 : "Закрепите игроков «пином», чтобы оптимизатор оставил их и подобрал остальных."}
             </div>
+            {selected.length > 0 && (
+              <div className="inline-note" style={{ marginTop: 6 }}>
+                Наведите курсор на игрока, чтобы увидеть его карточку: клуб, очки,
+                среднее и прошлый сезон.
+              </div>
+            )}
 
             {validation.violations.length > 0 ? (
               <ul className="violations" data-testid="violations">
@@ -429,7 +536,7 @@ export function SquadBuilder({
               </ul>
             ) : selected.length > 0 ? (
               <div className="valid-note" data-testid="valid-note">
-                Состав корректен — можно оптимизировать трансферы.
+                Состав корректен — можно подобрать замены.
               </div>
             ) : null}
 
@@ -439,8 +546,11 @@ export function SquadBuilder({
                 onClick={runTransfers}
                 disabled={!validation.valid || optimizing}
                 data-testid="optimize-transfers"
+                title={`Оставить ваш состав и предложить не больше ${transferLimit} замен`}
               >
-                Оптимизировать трансферы
+                {optimizing
+                  ? "Оптимизация…"
+                  : `Оптимизировать замены (${transferLimit})`}
               </button>
               {selected.length > 0 && (
                 <button
@@ -507,7 +617,12 @@ export function SquadBuilder({
                 {visiblePool.slice(0, 80).map((p) => {
                   const check = canAddPlayer(p, selected, limits);
                   return (
-                    <div key={p.player_season_id} className="pool-item" data-testid="pool-row">
+                    <div
+                      key={p.player_season_id}
+                      className="pool-item"
+                      data-testid="pool-row"
+                      {...poolHover.bind(p)}
+                    >
                       <RoleBadge role={p.role} />
                       <div className="pool-item__main">
                         <span className="pool-item__name">
@@ -531,6 +646,7 @@ export function SquadBuilder({
                     </div>
                   );
                 })}
+                {poolHover.overlay}
               </div>
             )}
           </div>
@@ -543,7 +659,7 @@ export function SquadBuilder({
             Результат оптимизатора
           </div>
           {optimizerError && <div className="error-inline">{optimizerError}</div>}
-          {result && <OptimizerPitch result={result} />}
+          {result && <OptimizerPitch result={result} playerIndex={playerIndex} />}
         </div>
       )}
     </div>

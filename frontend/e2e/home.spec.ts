@@ -55,12 +55,39 @@ test.describe("Tour and players page", () => {
     await expect(badges.first()).toHaveText("ВРТ");
   });
 
+  test("fills the forecast column from the published snapshot", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByTestId("player-row").first()).toBeVisible();
+
+    // The forecast column used to be empty because nothing ever persisted the
+    // projections; at least some rows must now carry a number.
+    const projections = await page
+      .locator('[data-testid="player-row"] td:nth-child(4)')
+      .allInnerTexts();
+    expect(projections.some((cell) => /\d/.test(cell))).toBe(true);
+  });
+
+  test("shows last season's points and a card on hover", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByTestId("player-row").first()).toBeVisible();
+
+    await expect(page.locator("thead th", { hasText: "Прошлый сезон" })).toBeVisible();
+    const priorCells = await page.getByTestId("prior-points").allInnerTexts();
+    expect(priorCells.some((cell) => /\d/.test(cell))).toBe(true);
+
+    await page.getByTestId("player-row").first().locator("td").first().hover();
+    const card = page.getByTestId("player-hover-card");
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("Прошлый сезон");
+  });
+
   test("opens a player card with the forecast explanation", async ({ page }) => {
     await page.goto("/");
     await page.getByTestId("player-row").first().getByRole("button").first().click();
     await expect(page.getByTestId("player-card")).toBeVisible();
     await expect(page.getByTestId("forecast-explanation")).toBeVisible();
     await expect(page.getByText("Из чего складывается прогноз")).toBeVisible();
+    await expect(page.getByTestId("prior-season")).toBeVisible();
   });
 
   test("compares two players", async ({ page }) => {

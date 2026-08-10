@@ -170,6 +170,54 @@ class WorkerIntegrationTest(unittest.TestCase):
             ).scalar_one()
         self.assertTrue(active)
 
+    def test_published_snapshot_gets_its_forecasts(self) -> None:
+        """A fresh import must arrive with projections, not an empty column."""
+        job_id = self._enqueue()
+        calls: list[dict] = []
+
+        def record(session_factory, *, run_id, on_progress=None):
+            calls.append({"run_id": run_id})
+            return 42
+
+        status = execute_job(
+            self.engine,
+            self.session_factory,
+            job_id,
+            client=FakeClient(_build_fixture()),
+            build_forecasts_fn=record,
+        )
+
+        self.assertEqual("succeeded", status)
+        job = self._job(job_id)
+        self.assertEqual([{"run_id": job.ingestion_run_id}], calls)
+        self.assertEqual(42, job.result["forecast_rows"])
+
+    def test_blocked_snapshot_is_not_forecast(self) -> None:
+        # Nothing reads a snapshot the quality gate refused, so projecting it
+        # would attach numbers to a run no endpoint will ever serve.
+        job_id = self._enqueue()
+        calls: list[int] = []
+
+        def record(session_factory, *, run_id, on_progress=None):
+            calls.append(run_id)
+            return 0
+
+        def blocked(session_factory, *, run_id):
+            return {"run_id": run_id, "is_active": False, "passed": False}
+
+        status = execute_job(
+            self.engine,
+            self.session_factory,
+            job_id,
+            client=FakeClient(_build_fixture()),
+            run_quality_fn=blocked,
+            build_forecasts_fn=record,
+        )
+
+        self.assertEqual("succeeded", status)
+        self.assertEqual([], calls)
+        self.assertEqual(0, self._job(job_id).result["forecast_rows"])
+
     def test_failed_job_records_safe_message_and_no_partial_data(self) -> None:
         job_id = self._enqueue()
 

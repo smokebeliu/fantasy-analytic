@@ -4,11 +4,14 @@ import type { PlayerModel, Role } from "@/lib/types";
 import type { SquadLimits } from "@/lib/squad";
 import { ROLES, ROLE_SHORT } from "@/lib/squad";
 import { formatPoints, formatPrice } from "@/lib/format";
+import { usePlayerHoverCard } from "./PlayerHoverCard";
 
 // Editable formation view of the manually assembled squad. Players are laid out
 // on the pitch by role (GK -> DEF -> MID -> FWD); empty role slots act as
 // shortcuts that focus the pool on the missing position. Pinning a player marks
-// them as locked so the optimizer has to keep them.
+// them as locked so the optimizer has to keep them. A card with the player's
+// season and previous-season numbers opens on hover, since a pitch card only has
+// room for a name, a price and a projection.
 export function SquadPitch({
   selected,
   limits,
@@ -24,6 +27,7 @@ export function SquadPitch({
   locked?: ReadonlySet<number>;
   onToggleLock?: (id: number) => void;
 }) {
+  const hover = usePlayerHoverCard();
   const byRole: Record<Role, PlayerModel[]> = {
     GOALKEEPER: [],
     DEFENDER: [],
@@ -53,8 +57,9 @@ export function SquadPitch({
                 <div
                   className={`pitch-player${isLocked ? " pitch-player--locked" : ""}`}
                   key={p.player_season_id}
-                  title={p.club_name ?? ""}
                   data-testid="pitch-player"
+                  tabIndex={0}
+                  {...hover.bind(p)}
                 >
                   {onToggleLock && (
                     <button
@@ -102,6 +107,7 @@ export function SquadPitch({
           </div>
         );
       })}
+      {hover.overlay}
     </div>
   );
 }

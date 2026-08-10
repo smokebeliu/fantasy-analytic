@@ -1074,6 +1074,133 @@ table.players th.num {
   margin-top: 8px;
 }
 
+/* Hover card: the numbers a manager judges a player by, without leaving the
+   pitch or the table. Fixed positioning keeps it clear of the scrolling panels
+   it is opened from. */
+.hover-card {
+  position: fixed;
+  z-index: 60;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  padding: 10px 12px 12px;
+  pointer-events: none;
+  font-size: 13px;
+  line-height: 1.35;
+}
+.hover-card__head {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+}
+.hover-card__name {
+  font-weight: 700;
+  font-size: 14px;
+}
+.hover-card__meta {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-top: 3px;
+}
+.hover-card__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 12px;
+}
+.hover-card__grid > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.hover-card__grid .k {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.hover-card__grid .v {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.hover-card__grid .v--good {
+  color: var(--success);
+}
+.hover-card__section {
+  margin: 10px 0 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.hover-card__empty {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* Transfer plan: one row per swap so "who for whom" is readable at a glance. */
+.transfer-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.transfer-pair {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+.transfer-pair__side {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.transfer-pair__name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.transfer-pair__sub {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.transfer-pair__arrow {
+  color: var(--text-dim);
+  font-size: 18px;
+}
+.transfer-pair__delta {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.transfer-pair__delta .gain {
+  display: block;
+  color: var(--success);
+  font-weight: 700;
+}
+.transfer-pair__delta .spend {
+  display: block;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+@media (max-width: 720px) {
+  .transfer-pair {
+    grid-template-columns: 1fr;
+  }
+  .transfer-pair__arrow {
+    display: none;
+  }
+  .transfer-pair__delta {
+    text-align: left;
+  }
+}
+
 .tag {
   display: inline-block;
   font-size: 11px;

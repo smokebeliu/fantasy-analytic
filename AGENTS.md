@@ -3,10 +3,11 @@
 ## Cursor Cloud specific instructions
 
 This VM is provisioned for the full pipeline: PostgreSQL 16 plus SQLAlchemy 2,
-Alembic, psycopg 3, and a FastAPI/uvicorn admin control plane. The project is a
-CLI + API toolkit (no browser UI): discovery, ingestion, quality gate, feature
-builder and a manual-ingestion FastAPI app. See `README.md` for the full command
-reference — the notes below only cover non-obvious cloud caveats.
+Alembic, psycopg 3, and a FastAPI/uvicorn admin control plane. The project has
+both a Python CLI + API backend (discovery, ingestion, quality gate, feature
+builder, forecast, optimizer, backtest, read API) **and** a Next.js browser UI in
+`frontend/`. See `README.md` for the full command reference — the notes below only
+cover non-obvious cloud caveats.
 
 ### PostgreSQL (local, not Docker)
 
@@ -64,12 +65,30 @@ tests should target `TEST_DATABASE_URL` (safe to drop/recreate `public`).
   `PYTHONPATH=src python3 -m fantasy_analytics.backtest_cli --output data/backtest`
   (~50s for a full 30-tour season; add `--no-optimize` or `--tour <id>` while
   iterating). It exits `3` when its leakage audit finds a violation.
-- Frontend e2e (`cd frontend && BACKEND_URL=http://127.0.0.1:8000 npm run e2e`)
-  needs both the API and `npm run start` up, plus a tour whose projections are
-  persisted (`fantasy-forecast --tour <fantasy_tour_id>`), otherwise the player-card
-  test has no forecast to show. One admin test runs a *real* season import through
-  the UI and stays skipped unless `RUN_LIVE_REFRESH_E2E=1` (needs outbound network
-  and publishes a new snapshot).
+- Frontend unit tests: `cd frontend && npm test` (Vitest, jsdom, no network or DB).
+  `npm run typecheck` is the real static gate; `npm run lint` only prompts to
+  configure ESLint and never runs, so ignore it.
+- Frontend e2e: `cd frontend && npm run build`, then
+  `BACKEND_URL=http://127.0.0.1:8000 npm run e2e` with the API up. Projections no
+  longer have to be prepared by hand — the player endpoints materialise the
+  requested tour on first access. Playwright browsers may be missing on a fresh
+  VM: `npx playwright install chromium`. One admin test runs a *real* season
+  import through the UI and stays skipped unless `RUN_LIVE_REFRESH_E2E=1` (needs
+  outbound network and publishes a new snapshot).
+- To browse the UI manually, do **not** use `npm run start`: `next.config.mjs`
+  sets `output: "standalone"`, so that command warns and serves no static assets
+  (every CSS/JS request 404s and the page renders unstyled). Build, copy the
+  assets the standalone bundle expects, then run its own server:
+
+  ```bash
+  cd frontend && BACKEND_URL=http://127.0.0.1:8000 npm run build
+  cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/
+  cd .next/standalone && BACKEND_URL=http://127.0.0.1:8000 HOSTNAME=0.0.0.0 \
+    PORT=3000 node server.js
+  ```
+
+  Rebuilding invalidates the hashed chunk names, so hard-reload the browser
+  (Ctrl+Shift+R) after a rebuild or it keeps running the previous bundle.
 - The admin API is `PYTHONPATH=src python3 -m fantasy_analytics.api --host
  127.0.0.1 --port 8000`. `POST /admin/ingestion/rpl/refresh` returns `202` and a
  job id immediately, then a detached worker subprocess runs the import + quality

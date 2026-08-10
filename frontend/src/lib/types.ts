@@ -92,6 +92,30 @@ export interface ProjectionModel {
   components?: Record<string, number> | null;
 }
 
+// What the same player did in the previous season. Early in a new season the
+// current-season columns are still empty, so this is what a manager judges a
+// player by; it is absent when only one season has been imported.
+export interface PriorSeasonModel {
+  season_id: number;
+  season_name?: string | null;
+  player_season_id: number;
+  role?: Role | null;
+  club_name?: string | null;
+  points?: number | null;
+  average_points?: number | null;
+  rank?: number | null;
+  price?: number | null;
+  matches?: number | null;
+  minutes?: number | null;
+  goals?: number | null;
+  assists?: number | null;
+  saves?: number | null;
+  ball_recoveries?: number | null;
+  yellow_cards?: number | null;
+  red_cards?: number | null;
+  goals_conceded?: number | null;
+}
+
 export interface PlayerModel {
   player_season_id: number;
   role: Role;
@@ -109,6 +133,7 @@ export interface PlayerModel {
   last_tour_score?: number | null;
   rank?: number | null;
   projection?: ProjectionModel | null;
+  prior_season?: PriorSeasonModel | null;
 }
 
 export interface PlayerListResponse {
@@ -168,12 +193,37 @@ export interface OptimizerConstraints {
   formation?: string | null;
 }
 
+// One side of a swap. Arriving players always carry full details; a departing one
+// may be `unavailable` — he has no candidate row for the tour because he left the
+// league or his club has no fixture — in which case only his id is known.
+export interface OptimizerTransferPlayer {
+  player_season_id: number;
+  fantasy_player_id?: string | null;
+  player_name?: string | null;
+  role?: Role | null;
+  club_id?: number | null;
+  club_name?: string | null;
+  price?: number | null;
+  expected_points?: number | null;
+  unavailable?: boolean;
+}
+
+// One swap: the player leaving and the player arriving in his place, with what
+// the change costs in money and gains in expected points.
+export interface OptimizerTransferPair {
+  out: OptimizerTransferPlayer;
+  in: OptimizerTransferPlayer;
+  delta_expected_points: number;
+  delta_price: number;
+}
+
 export interface OptimizerTransfers {
   allowed: number;
   made: number;
   kept: number;
-  in: OptimizerCandidate[];
-  out: number[];
+  in: OptimizerTransferPlayer[];
+  out: OptimizerTransferPlayer[];
+  pairs: OptimizerTransferPair[];
   missing_from_pool: number[];
 }
 
@@ -202,6 +252,9 @@ export interface OptimizerFixtures {
 
 export interface OptimizerSolution {
   status: string;
+  // False when the search budget ran out first: the squad is valid and the best
+  // one found, but a better one may exist.
+  proven_optimal?: boolean;
   objective_expected_points: number;
   // Expected points less the head-to-head penalty the objective paid (step 16).
   objective_score?: number;
