@@ -579,10 +579,10 @@ class BacktestIntegrationTest(unittest.TestCase):
         self.assertTrue(report["cutoff_audit"]["passed"])
         self.assertEqual([], report["cutoff_audit"]["violations"])
         self.assertGreater(report["cutoff_audit"]["rows_checked"], 0)
-        # The fixture dates tour 1's deadline 20 minutes after kickoff, which is
-        # reported as a warning while the recomputed history stays clean.
-        self.assertEqual(1, len(report["cutoff_audit"]["warnings"]))
-        self.assertEqual("1 тур", report["cutoff_audit"]["warnings"][0]["name"])
+        # The fixture dates tour 1's deadline 20 minutes after its own kickoff.
+        # The cutoff is pulled back to the kickoff, so nothing of the tour can
+        # reach the history that predicts it and no warning is raised.
+        self.assertEqual([], report["cutoff_audit"]["warnings"])
 
         # Every requested model produced pooled metrics and a per-tour series.
         for model in (MODEL_EVENT, MODEL_MEAN, MODEL_RECENT):

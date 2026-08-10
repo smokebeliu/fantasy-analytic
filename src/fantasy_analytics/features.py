@@ -22,6 +22,11 @@ Design guarantees
   ``PRIOR_SEASON_HALF_LIFE`` matches of the new season. The current season is
   never discounted, so it takes over as soon as it has anything to say, and a
   league's best players do not spend August looking like they have never played.
+* **A tour is a slice of the calendar, not a round.** Fantasy tours cannot
+  overlap, so Sports.ru re-attaches a postponed match to whichever tour its new
+  date falls in. A club can therefore play *twice* in one tour and not at all in
+  another, and both cases are carried through: every one of a club's matches in
+  the target tour is reported in ``tour_fixtures``.
 
 The module only reads domain data; it never calls the Sports.ru API and never
 writes to the database. The final ML algorithm is deliberately out of scope
@@ -63,7 +68,10 @@ from .db.models import (
 #   takes over as soon as it says anything. The same revision stopped counting a
 #   0-minute matchday row as an appearance and estimates the appearance
 #   probability from the whole sourced season rather than a five-match window.
-FEATURE_VERSION = "1.3.0"
+# 1.4.0 reports every match a club plays in the target tour (``tour_fixtures``)
+#   instead of only the earliest, because a fantasy tour is a slice of the
+#   calendar and a postponement can leave a club playing twice inside one.
+FEATURE_VERSION = "1.4.0"
 
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
 
@@ -327,6 +335,18 @@ def blend(
     return (current_value * current_weight + prior_value * prior_weight) / total
 
 
+def decayed_mean(values: list[float], decay: float) -> float:
+    """Recency-weighted mean; index 0 is the most recent value."""
+    total = 0.0
+    weight = 1.0
+    weighted = 0.0
+    for value in values:
+        weighted += value * weight
+        total += weight
+        weight *= decay
+    return weighted / total if total else 0.0
+
+
 def decayed_share(
     flags: list[bool], decay: float
 ) -> tuple[float, float]:
@@ -372,6 +392,8 @@ FEATURE_DICTIONARY: tuple[dict[str, str], ...] = (
     {"name": "opponent_club_id", "description": "Internal club id of the target-tour opponent."},
     {"name": "opponent_name", "description": "Opponent club display name."},
     {"name": "match_scheduled_at", "description": "Kickoff of the target-tour fixture (ISO 8601)."},
+    {"name": "tour_fixtures", "description": "Every match the club plays in the target tour, in kickoff order, each with its opponent and venue strengths. Usually one; two when a postponement doubles the club up."},
+    {"name": "fixture_count", "description": "How many matches the club plays in the target tour."},
     {"name": "rest_days", "description": "Days between the club's last match before cutoff and the fixture; null when the club has no prior match."},
     {"name": "availability_status", "description": "Fantasy availability status from the active snapshot."},
     {"name": "is_available", "description": "False when availability_status marks the player out (see UNAVAILABLE_STATUSES)."},
@@ -525,16 +547,30 @@ def resolve_target_tour(
 
 
 def _tour_cutoff(tour: FantasyTour, fixtures: list[Fixture]) -> datetime:
-    """Cutoff before which data may be used: deadline, else start, else kickoff."""
-    if tour.transfers_deadline_at is not None:
-        return tour.transfers_deadline_at
-    if tour.starts_at is not None:
-        return tour.starts_at
-    if fixtures:
-        return min(fixture.scheduled_at for fixture in fixtures)
-    raise FeaturesError(
-        f"Tour {tour.fantasy_tour_id} has no deadline, start or scheduled match"
-    )
+    """Cutoff before which data may be used: deadline, else start, else kickoff.
+
+    Never later than the tour's own first kickoff. A fantasy tour is a slice of
+    the calendar, not a round, so a postponed match is re-attached to whichever
+    tour it now falls in and the deadline moves with it. The source does not
+    always move the deadline back far enough, and a deadline sitting after a
+    kickoff would let matches of the tour being predicted into the history that
+    predicts it — through the club-strength aggregates, which have no player to
+    exclude them by.
+    """
+    candidates = [
+        moment
+        for moment in (
+            tour.transfers_deadline_at,
+            tour.starts_at,
+            min((fixture.scheduled_at for fixture in fixtures), default=None),
+        )
+        if moment is not None
+    ]
+    if not candidates:
+        raise FeaturesError(
+            f"Tour {tour.fantasy_tour_id} has no deadline, start or scheduled match"
+        )
+    return min(candidates)
 
 
 def _load_fixtures(session, tour_id: int) -> list[Fixture]:
@@ -570,8 +606,19 @@ def _load_fixtures(session, tour_id: int) -> list[Fixture]:
 
 
 def _load_club_matches(
-    session, season_id: int, run_id: int, cutoff: datetime
+    session,
+    season_id: int,
+    run_id: int,
+    cutoff: datetime,
+    exclude_match_ids: frozenset[int] = frozenset(),
 ) -> dict[int, list[ClubMatch]]:
+    """Club results before the cutoff, excluding the tour being predicted.
+
+    The exclusion is the same second line of defence the player history gets:
+    a fantasy tour is a slice of the calendar, so a moved match can land inside
+    a tour whose deadline has already passed, and a club strength computed from
+    it would be describing the very fixtures it is used to predict.
+    """
     rows = session.execute(
         select(
             ClubMatchStats.club_id,
@@ -592,6 +639,8 @@ def _load_club_matches(
     ).all()
     by_club: dict[int, list[ClubMatch]] = {}
     for club_id, match_id, scheduled_at, is_home, gf, ga in rows:
+        if match_id in exclude_match_ids:
+            continue
         by_club.setdefault(club_id, []).append(
             ClubMatch(
                 match_id=match_id,
@@ -1041,12 +1090,39 @@ def _club_participation(
     }
 
 
+def _fixture_context(
+    fixture: Fixture,
+    *,
+    opponent_name: str,
+    strengths: dict[int, dict[str, float]],
+    league: dict[str, float],
+) -> dict[str, Any]:
+    """One match of the target tour, with the venue strengths it is played at."""
+    club_attack, club_defense = _venue_strength(
+        fixture.club_id, fixture.is_home, strengths, league
+    )
+    opponent_attack, opponent_defense = _venue_strength(
+        fixture.opponent_club_id, not fixture.is_home, strengths, league
+    )
+    return {
+        "match_id": fixture.match_id,
+        "match_scheduled_at": fixture.scheduled_at.isoformat(),
+        "is_home": fixture.is_home,
+        "opponent_club_id": fixture.opponent_club_id,
+        "opponent_name": opponent_name,
+        "club_attack": club_attack,
+        "club_defense": club_defense,
+        "opponent_attack": opponent_attack,
+        "opponent_defense": opponent_defense,
+    }
+
+
 def _build_row(
     *,
     player: dict[str, Any],
-    fixture: Fixture,
+    fixtures: list[Fixture],
     club_name: str,
-    opponent_name: str,
+    opponent_names: dict[int, str],
     cutoff: datetime,
     target_match_ids: frozenset[int],
     appearances: list[Appearance],
@@ -1066,7 +1142,23 @@ def _build_row(
     season counts in full, what happened last season counts less with every
     match played (:func:`prior_season_weight`). Only matches actually played
     count as appearances, so a permanent substitute never looks ever-present.
+
+    ``fixtures`` is every match the club plays in the target tour, in kickoff
+    order — normally one, but a fantasy tour is a slice of the calendar rather
+    than a round, so a postponed match can leave a club with two of them (and
+    the tour it was moved out of with none). The whole list is reported; the
+    flat fixture fields describe the first one.
     """
+    primary = fixtures[0]
+    fixture_contexts = [
+        _fixture_context(
+            fixture,
+            opponent_name=opponent_names.get(fixture.opponent_club_id, ""),
+            strengths=strengths,
+            league=league,
+        )
+        for fixture in fixtures
+    ]
     current = played_before_cutoff(
         appearances, cutoff, exclude_match_ids=target_match_ids
     )
@@ -1089,7 +1181,7 @@ def _build_row(
         "fantasy_player_id": player["fantasy_player_id"],
         "player_name": player["player_name"],
         "role": player["role"],
-        "club_id": fixture.club_id,
+        "club_id": primary.club_id,
         "club_name": club_name,
         "tour_cutoff": cutoff.isoformat(),
         # The label is what the frontend separates the two seasons by, so it
@@ -1103,11 +1195,15 @@ def _build_row(
         ),
         "prior_season_weight": rate_prior_weight if prior else 0.0,
         "is_newcomer": is_newcomer,
-        "is_home": fixture.is_home,
-        "opponent_club_id": fixture.opponent_club_id,
-        "opponent_name": opponent_name,
-        "match_id": fixture.match_id,
-        "match_scheduled_at": fixture.scheduled_at.isoformat(),
+        # Every match of the tour, plus the first one flattened onto the row so
+        # a consumer that only ever expected one keeps working.
+        "tour_fixtures": fixture_contexts,
+        "fixture_count": len(fixture_contexts),
+        "is_home": primary.is_home,
+        "opponent_club_id": primary.opponent_club_id,
+        "opponent_name": fixture_contexts[0]["opponent_name"],
+        "match_id": primary.match_id,
+        "match_scheduled_at": primary.scheduled_at.isoformat(),
     }
 
     # Rolling form windows run across the season boundary: while this season is
@@ -1197,8 +1293,15 @@ def _build_row(
     # settled — used to be forecast at exactly zero for the whole next season.
     p_appearance = round(appearance_share, 4) if is_available else 0.0
     row["p_appearance"] = p_appearance
-    blended_appearances = row["total_appearances"]
-    mean_minutes = total_minutes / blended_appearances if blended_appearances else 0.0
+    # Minutes when he does play are a *current* fact — a squad player promoted
+    # to the eleven in October plays 90 minutes now whatever he averaged in
+    # August — so they are recency-weighted the same way the share is.
+    mean_minutes = blend(
+        decayed_mean([a.minutes for a in current], CURRENT_RECENCY_DECAY),
+        share_now_weight if current else 0.0,
+        _mean([a.minutes for a in prior]),
+        carry_weight if prior else 0.0,
+    )
     row["expected_minutes"] = round(p_appearance * mean_minutes, 2)
 
     # Rest days since the club's previous match of *this* season. Before the
@@ -1206,21 +1309,14 @@ def _build_row(
     # since last May would be meaningless, so it stays null.
     if current_clubs:
         last_match = max(current_clubs, key=lambda m: m.scheduled_at)
-        row["rest_days"] = (fixture.scheduled_at - last_match.scheduled_at).days
+        row["rest_days"] = (primary.scheduled_at - last_match.scheduled_at).days
     else:
         row["rest_days"] = None
 
-    # Club and opponent strength at the relevant venue.
-    club_attack, club_defense = _venue_strength(
-        fixture.club_id, fixture.is_home, strengths, league
-    )
-    opponent_attack, opponent_defense = _venue_strength(
-        fixture.opponent_club_id, not fixture.is_home, strengths, league
-    )
-    row["club_attack"] = club_attack
-    row["club_defense"] = club_defense
-    row["opponent_attack"] = opponent_attack
-    row["opponent_defense"] = opponent_defense
+    # Club and opponent strength at the venue of the first fixture; the rest are
+    # in ``tour_fixtures``, each with the venue it is actually played at.
+    for key in ("club_attack", "club_defense", "opponent_attack", "opponent_defense"):
+        row[key] = fixture_contexts[0][key]
 
     if is_newcomer and newcomer_prior is not None:
         _apply_newcomer_prior(
@@ -1305,7 +1401,9 @@ def build_feature_dataset(
         cutoff = _tour_cutoff(tour, fixtures)
         target_match_ids = frozenset(f.match_id for f in fixtures)
 
-        club_matches = _load_club_matches(session, season_id, run.id, cutoff)
+        club_matches = _load_club_matches(
+            session, season_id, run.id, cutoff, exclude_match_ids=target_match_ids
+        )
         appearances = load_appearances(session, season_id, run.id)
         snapshots = _load_snapshots(session, run.id)
         players = _load_players(session, season_id)
@@ -1334,26 +1432,35 @@ def build_feature_dataset(
         for info in season_clubs.values():
             club_names.setdefault(info["club_id"], info["display_name"])
 
-        # Index fixtures by the club that plays in them.
-        fixtures_by_club: dict[int, Fixture] = {}
-        for fixture in fixtures:
-            # A club appears once per tour; keep the earliest kickoff if not.
-            existing = fixtures_by_club.get(fixture.club_id)
-            if existing is None or fixture.scheduled_at < existing.scheduled_at:
-                fixtures_by_club[fixture.club_id] = fixture
+        # Index fixtures by the club that plays in them, in kickoff order. A
+        # club normally has exactly one, but a fantasy tour is a slice of the
+        # calendar rather than a round: a postponed match is re-attached to
+        # whichever tour it now falls in, which leaves that tour with two
+        # matches for the club and the tour it came from with none.
+        fixtures_by_club: dict[int, list[Fixture]] = {}
+        for fixture in sorted(fixtures, key=lambda f: (f.scheduled_at, f.match_id)):
+            fixtures_by_club.setdefault(fixture.club_id, []).append(fixture)
+        double_fixture_clubs = sum(
+            1 for club in fixtures_by_club.values() if len(club) > 1
+        )
 
         rows: list[dict[str, Any]] = []
         players_without_fixture = 0
         newcomers = 0
         prior_sourced = 0
+        double_fixture_rows = 0
         for player in players:
             season_club_id = player["current_season_club_id"]
             club_info = season_clubs.get(season_club_id) if season_club_id else None
             club_id = club_info["club_id"] if club_info else None
-            fixture = fixtures_by_club.get(club_id) if club_id is not None else None
-            if fixture is None:
+            club_fixtures = (
+                fixtures_by_club.get(club_id) if club_id is not None else None
+            )
+            if not club_fixtures:
                 players_without_fixture += 1
                 continue
+            if len(club_fixtures) > 1:
+                double_fixture_rows += 1
             source = _resolve_history_source(
                 player,
                 club_id,
@@ -1365,9 +1472,9 @@ def build_feature_dataset(
                 newcomers += 1
             row = _build_row(
                 player=player,
-                fixture=fixture,
+                fixtures=club_fixtures,
                 club_name=club_names.get(club_id, ""),
-                opponent_name=club_names.get(fixture.opponent_club_id, ""),
+                opponent_names=club_names,
                 cutoff=cutoff,
                 target_match_ids=target_match_ids,
                 appearances=source["appearances"],
@@ -1412,6 +1519,9 @@ def build_feature_dataset(
                 "clubs_with_history": len(strengths),
                 "prior_sourced": prior_sourced,
                 "newcomers": newcomers,
+                "clubs_with_fixture": len(fixtures_by_club),
+                "double_fixture_clubs": double_fixture_clubs,
+                "double_fixture_rows": double_fixture_rows,
             },
             "feature_dictionary": list(FEATURE_DICTIONARY),
             "rows": rows,
@@ -1442,6 +1552,7 @@ __all__ = [
     "PriorPlayer",
     "PriorContext",
     "blend",
+    "decayed_mean",
     "decayed_share",
     "prior_season_weight",
     "share_blend_weights",

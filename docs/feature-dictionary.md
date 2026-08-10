@@ -6,13 +6,15 @@ the `fantasy-features` CLI. It turns the *active* snapshot published by the
 quality gate (step 4) into a reproducible, leakage-free table with one row per
 player whose club plays a target tour.
 
-The current `feature_version` is `1.3.0`. Version `1.1.0` added the
+The current `feature_version` is `1.4.0`. Version `1.1.0` added the
 `saves_per90`, `recoveries_per90` and `yellows_per90` rates that the step-7
 event forecast consumes; version `1.2.0` added cross-season sourcing (step 14),
 the `stat_source` / `is_newcomer` labels and newcomer priors; version `1.3.0`
 turned that sourcing into a decaying **blend** of the two seasons, stopped
 counting 0-minute matchday rows as appearances and estimates the appearance
-probability from the whole sourced season instead of a five-match window.
+probability from the whole sourced season instead of a five-match window;
+version `1.4.0` reports every match a club plays in the target tour rather than
+only the earliest.
 
 ## Reproducibility and leakage guarantees
 
@@ -96,6 +98,36 @@ venue and opponent always come from the active season.
   last season's", so it flips to `current_season` on the player's first
   appearance however much last season still weighs. `rest_days` is `null` until
   the active club has played.
+
+## A tour is a slice of the calendar, not a round
+
+Fantasy tours are time windows that cannot overlap, unlike league rounds, which
+keep a postponed match no matter when it is eventually played. Sports.ru
+therefore re-attaches a moved match to whichever tour its new date falls closest
+to: it stays in its own tour (and moves the deadline) when the new date is still
+nearer to it, joins the next tour when it is nearer to that one, and joins the
+*previous* tour when it is brought forward past the midpoint — a Wednesday match
+after a tour that ended on Monday belongs to that tour. Ties keep the original
+calendar rather than creating a double.
+
+Two consequences reach the feature builder, and both are carried through:
+
+- **Double gameweeks.** A club can play **twice** in one tour. Every one of its
+  matches is reported in `tour_fixtures` (`fixture_count` says how many), and
+  the forecast is the sum over them: appearance points, goals, clean sheets and
+  the concession penalty are all counted once per match, each against its own
+  opponent and venue. The flat `match_id` / `opponent_name` / `is_home` /
+  `club_attack` fields describe the *first* of them, so a reader that only ever
+  expected one keeps working.
+- **Blank gameweeks.** A club can play **none**, which is what the tour the
+  match was moved out of looks like. Its players produce no row and no optimizer
+  candidate for that tour, and are counted in `players_without_fixture`.
+
+The `cutoff` is never later than the tour's own first kickoff, whatever the
+recorded deadline says. A moved match can leave the deadline sitting after a
+kickoff, and while the target tour's matches are excluded from a player's
+history by id, the club-strength aggregates have no player to exclude them by —
+so a tour would end up predicted partly from itself.
 
 ## Appearances are matches played
 

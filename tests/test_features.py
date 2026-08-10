@@ -277,8 +277,87 @@ class FeatureDatasetIntegrationTest(unittest.TestCase):
             away=club_b,
         )
 
+    def _add_second_match_to_future_tour(self) -> None:
+        """Move a third match into the future tour, doubling both clubs up."""
+        season_id = self._scalar("SELECT id FROM seasons LIMIT 1")
+        tour_id = self._scalar(
+            "SELECT id FROM fantasy_tours WHERE fantasy_tour_id = '1773'"
+        )
+        club_a = self._scalar(
+            "SELECT club_id FROM season_clubs WHERE fantasy_team_id = '10'"
+        )
+        club_b = self._scalar(
+            "SELECT club_id FROM season_clubs WHERE fantasy_team_id = '20'"
+        )
+        self._exec(
+            """
+            INSERT INTO matches
+                (season_id, tour_id, stat_match_id, scheduled_at,
+                 home_club_id, away_club_id, home_score, away_score)
+            VALUES (:season, :tour, '900003', '2025-07-28T16:00:00Z',
+                    :home, :away, NULL, NULL)
+            """,
+            season=season_id,
+            tour=tour_id,
+            home=club_b,
+            away=club_a,
+        )
+
     def _rows_by_player(self, report: dict) -> dict[str, dict]:
         return {row["fantasy_player_id"]: row for row in report["rows"]}
+
+    def test_a_club_doubled_up_by_a_postponement_gets_both_matches(self) -> None:
+        # Fantasy tours are time windows that cannot overlap, so a postponed
+        # match is re-attached to whichever tour it now falls in and a club can
+        # end up playing twice inside one.
+        self._add_future_tour()
+        self._add_second_match_to_future_tour()
+
+        report = build_feature_dataset(self.session_factory, tour_ref="1773")
+
+        self.assertEqual(2, report["counts"]["double_fixture_clubs"])
+        self.assertEqual(2, report["counts"]["double_fixture_rows"])
+        home = self._rows_by_player(report)["111"]
+        self.assertEqual(2, home["fixture_count"])
+        # Reported in kickoff order, and the club hosts one and visits the other.
+        self.assertEqual([True, False], [f["is_home"] for f in home["tour_fixtures"]])
+        # The flat fields still describe the first match, for readers that never
+        # had to think about a club playing twice.
+        self.assertEqual(home["tour_fixtures"][0]["match_id"], home["match_id"])
+        self.assertTrue(home["is_home"])
+
+    def test_a_club_without_a_fixture_produces_no_row(self) -> None:
+        # The mirror image: the tour a match was moved *out* of has a blank for
+        # that club, and a player who cannot score has nothing to forecast.
+        self._add_future_tour()
+        club_c = self._exec(
+            "INSERT INTO clubs (stat_team_id, canonical_name) "
+            "VALUES ('club_c', 'Клуб C') RETURNING id"
+        ).scalar_one()
+        self._exec(
+            "UPDATE matches SET away_club_id = :c WHERE stat_match_id = '900002'",
+            c=club_c,
+        )
+
+        report = build_feature_dataset(self.session_factory, tour_ref="1773")
+
+        self.assertEqual(1, report["counts"]["rows"])
+        self.assertEqual(1, report["counts"]["players_without_fixture"])
+        self.assertNotIn("222", self._rows_by_player(report))
+
+    def test_the_cutoff_never_outlives_the_tours_first_kickoff(self) -> None:
+        # A moved match takes the deadline with it, and the source does not
+        # always move it back far enough. A deadline after a kickoff would let
+        # the tour's own results into the club strengths that predict it.
+        self._add_future_tour()
+        self._exec(
+            "UPDATE fantasy_tours SET transfers_deadline_at = "
+            "'2025-07-25T18:00:00Z' WHERE fantasy_tour_id = '1773'"
+        )
+
+        report = build_feature_dataset(self.session_factory, tour_ref="1773")
+
+        self.assertEqual("2025-07-25T16:00:00+00:00", report["cutoff"])
 
     def test_dataset_uses_only_pre_cutoff_history(self) -> None:
         self._add_future_tour()

@@ -45,6 +45,7 @@ from fantasy_analytics.forecast import (
     poisson_pmf,
     run_forecast,
     team_goal_means,
+    tour_fixtures,
 )
 from fantasy_analytics.ingestion import IngestionOptions, run_ingestion
 from fantasy_analytics.quality import run_quality_checks
@@ -314,6 +315,106 @@ class FixtureExposureTest(unittest.TestCase):
         for row in rows:
             if row["model_name"] != MODEL_EVENT:
                 self.assertIsNone(row["params"])
+
+
+class DoubleGameweekTest(unittest.TestCase):
+    """A fantasy tour is a slice of the calendar, so a club can play twice."""
+
+    def _double(self, **overrides) -> dict:
+        row = _feature_row(**overrides)
+        row["tour_fixtures"] = [
+            {
+                "match_id": 10,
+                "is_home": True,
+                "opponent_club_id": 2,
+                "opponent_name": "Club B",
+                "club_attack": row["club_attack"],
+                "club_defense": row["club_defense"],
+                "opponent_attack": row["opponent_attack"],
+                "opponent_defense": row["opponent_defense"],
+            },
+            {
+                "match_id": 11,
+                "is_home": False,
+                "opponent_club_id": 3,
+                "opponent_name": "Club C",
+                "club_attack": row["club_attack"],
+                "club_defense": row["club_defense"],
+                "opponent_attack": row["opponent_attack"],
+                "opponent_defense": row["opponent_defense"],
+            },
+        ]
+        row["fixture_count"] = 2
+        return row
+
+    def test_two_identical_fixtures_score_exactly_twice(self) -> None:
+        single = forecast_event_model(_feature_row(goals_per90=0.5, assists_per90=0.25))
+        double = forecast_event_model(self._double(goals_per90=0.5, assists_per90=0.25))
+        self.assertAlmostEqual(
+            2 * single["expected_points"], double["expected_points"], places=3
+        )
+        for key, value in single["components"].items():
+            self.assertAlmostEqual(2 * value, double["components"][key], places=3)
+
+    def test_a_row_without_the_list_is_a_one_match_tour(self) -> None:
+        # Older rows, and every hand-built one, carry a single flattened fixture.
+        row = _feature_row(goals_per90=0.5)
+        self.assertEqual(1, len(forecast_event_model(row)["fixtures"]))
+        self.assertEqual([10], [f["match_id"] for f in tour_fixtures(row)])
+
+    def test_each_match_is_scored_against_its_own_opponent(self) -> None:
+        row = self._double(role="DEFENDER")
+        # A shutout is a near-certainty in the first match and hopeless in the
+        # second, so the two clean sheets must differ.
+        row["tour_fixtures"][0]["opponent_attack"] = 0.0
+        row["tour_fixtures"][0]["club_defense"] = 0.0
+        row["tour_fixtures"][1]["opponent_attack"] = 6.0
+        row["tour_fixtures"][1]["club_defense"] = 6.0
+        result = forecast_event_model(row)
+        first, second = result["expected"]["per_fixture"]
+        self.assertGreater(first["clean_sheet_probability"], 0.9)
+        self.assertLess(second["clean_sheet_probability"], 0.01)
+        self.assertGreater(first["expected_points"], second["expected_points"])
+
+    def test_the_exposures_are_reported_per_match(self) -> None:
+        result = forecast_event_model(self._double(goals_per90=1.0))
+        exposures = result["fixtures"]
+        self.assertEqual([10, 11], [f["match_id"] for f in exposures])
+        self.assertAlmostEqual(
+            result["fixture"]["goal_upside"],
+            sum(f["goal_upside"] for f in exposures),
+            places=4,
+        )
+
+    def test_the_uncertainty_grows_with_the_second_match(self) -> None:
+        single = forecast_event_model(_feature_row(goals_per90=0.5))
+        double = forecast_event_model(self._double(goals_per90=0.5))
+        self.assertAlmostEqual(
+            double["uncertainty"], math.sqrt(2) * single["uncertainty"], places=3
+        )
+
+    def test_both_baselines_double_up_too(self) -> None:
+        single = _feature_row(total_appearances=5, total_points=25.0, points_avg_5=6.0)
+        double = self._double(
+            total_appearances=5, total_points=25.0, points_avg_5=6.0
+        )
+        self.assertAlmostEqual(
+            2 * forecast_mean_baseline(single)["expected_points"],
+            forecast_mean_baseline(double)["expected_points"],
+            places=4,
+        )
+        self.assertAlmostEqual(
+            2 * forecast_recent_baseline(single)["expected_points"],
+            forecast_recent_baseline(double)["expected_points"],
+            places=4,
+        )
+
+    def test_an_unavailable_player_still_scores_zero_twice_over(self) -> None:
+        row = self._double(is_available=False, goals_per90=1.0)
+        result = forecast_event_model(row)
+        self.assertEqual(0.0, result["expected_points"])
+        self.assertEqual(0.0, result["uncertainty"])
+        self.assertTrue(all(f["goal_upside"] == 0.0 for f in result["fixtures"]))
 
 
 class BaselineTest(unittest.TestCase):

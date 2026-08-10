@@ -295,6 +295,18 @@ model are:
   blended from the venue attack/defence features
   (`0.5 * (club_attack + opponent_defense)` and the mirror), and the clean-sheet
   probability is the Poisson probability that the opponent fails to score.
+- **Every match of the tour.** A fantasy tour is a slice of the calendar rather
+  than a round: the windows cannot overlap, so Sports.ru re-attaches a postponed
+  match to whichever tour its new date falls closest to, moving the deadline
+  when the match stays. A club can therefore play twice in one tour and not at
+  all in another. The forecast sums over the matches a club actually plays —
+  appearance points, goals, clean sheets and the concession penalty are counted
+  once per match, each against its own opponent and venue — and the exposures
+  the optimizer prices are reported per match, so two players who meet each
+  other twice cancel out twice. Before this, only the earliest match counted and
+  a doubled-up club was forecast at half its worth: in La Liga 2026/2027 that is
+  Real Madrid, Barcelona, Athletic, Betis, Valencia and Real Sociedad in tour 2
+  alone, the same clubs that have no fixture in tour 1.
 - **Read-only inputs.** Forecasting only reads the feature dataset (which itself
   only reads one ingestion run) and writes `player_forecasts`; it never calls the
   Sports.ru API. The computation is pure arithmetic, so recomputing on the same
