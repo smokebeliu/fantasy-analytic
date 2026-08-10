@@ -40,6 +40,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Ingestion run to forecast from (default: the active snapshot)",
     )
     parser.add_argument(
+        "--competition",
+        dest="competition_ref",
+        help=(
+            "League to select the active snapshot from: tournament slug (russia, "
+            "spain, italy, ...) or fantasy tournament id"
+        ),
+    )
+    parser.add_argument(
         "--season",
         dest="season_ref",
         help="Season fantasy id, stat id or name to select the active snapshot",
@@ -148,6 +156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = run_forecast(
             session_factory,
             run_id=args.run_id,
+            competition_ref=args.competition_ref,
             season_ref=args.season_ref,
             tour_ref=args.tour_ref,
             persist=not args.no_persist,

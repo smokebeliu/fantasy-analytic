@@ -1,4 +1,5 @@
 import { api, ApiError } from "@/lib/api";
+import { leagueSeasonId, loadLeagueContext } from "@/lib/league";
 import { SquadBuilder } from "@/components/SquadBuilder";
 import type { SeasonDetailModel, TourModel } from "@/lib/types";
 
@@ -10,23 +11,29 @@ function pickDefaultTour(tours: TourModel[]): TourModel | null {
 }
 
 export default async function SquadPage() {
+  const { competition, error } = await loadLeagueContext();
+  const seasonId = leagueSeasonId(competition);
   let season: SeasonDetailModel | null = null;
   let tours: TourModel[] = [];
-  let loadError: string | null = null;
+  let loadError: string | null = error;
 
-  try {
-    const seasons = await api.listSeasons({ limit: 1 });
-    const seasonId = seasons.items[0]?.season_id ?? null;
-    if (seasonId != null) {
+  if (loadError === null && seasonId != null) {
+    try {
+      // The roster limits and budget come from the season itself, so each league
+      // is optimized against its own rules (Süper Lig allows 2 players per club
+      // where the RPL allows 3).
       season = await api.getSeason(seasonId);
-      const tourResponse = await api.listTours({ season_id: seasonId, limit: 200 });
+      const tourResponse = await api.listTours({
+        season_id: seasonId,
+        limit: 200,
+      });
       tours = tourResponse.items;
+    } catch (cause) {
+      loadError =
+        cause instanceof ApiError
+          ? cause.message
+          : "Не удалось получить данные от API аналитики.";
     }
-  } catch (error) {
-    loadError =
-      error instanceof ApiError
-        ? error.message
-        : "Не удалось получить данные от API аналитики.";
   }
 
   const defaultTour = pickDefaultTour(tours);
@@ -37,7 +44,8 @@ export default async function SquadPage() {
         <h1>Конструктор состава</h1>
         <p>
           Соберите состав вручную с проверкой всех ограничений или получите
-          оптимальный состав от солвера.
+          оптимальный состав от солвера
+          {competition ? ` для ${competition.name}` : ""}.
         </p>
       </div>
 
@@ -60,6 +68,7 @@ export default async function SquadPage() {
       {!loadError && season != null && defaultTour != null && (
         <SquadBuilder
           seasonId={season.season_id}
+          fantasySeasonId={season.fantasy_season_id}
           tours={tours}
           defaultTourId={defaultTour.tour_id}
           rules={season.rules ?? null}

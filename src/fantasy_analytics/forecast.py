@@ -137,6 +137,45 @@ SCORING: dict[str, RoleScoring] = {
 }
 
 
+def reconstruct_points(
+    *,
+    role: str,
+    minutes: int,
+    goals: int,
+    assists: int,
+    saves: int,
+    ball_recoveries: int,
+    yellow_cards: int,
+    goals_conceded: int,
+) -> int:
+    """Score one played match from its events using :data:`SCORING`.
+
+    This is the scoring table's definition made executable: the same rules the
+    event model applies in expectation, applied to what actually happened. It is
+    what :mod:`fantasy_analytics.scoring_audit` compares against the authoritative
+    ``points`` column, which is how ``SCORING_VERSION`` is justified — and how a
+    league whose point values differ from the RPL's would be caught.
+
+    Deliberately incomplete: red cards, own goals, conceded penalties, missed
+    penalties and the indirect "fantasy assist" are not modelled, because the
+    imported per-match columns do not carry the events behind them.
+    """
+    if minutes <= 0:
+        return 0
+    scoring = SCORING[role]
+    full = minutes >= START_MINUTES
+    total = scoring.appearance_full if full else scoring.appearance_sub
+    total += goals * scoring.goal
+    total += assists * scoring.assist
+    if full and goals_conceded == 0:
+        total += scoring.clean_sheet
+    total += (goals_conceded // 2) * scoring.conceded_per_two
+    total += (saves // 3) * scoring.save_per_three
+    total += (ball_recoveries // 3) * scoring.recovery_per_three
+    total += yellow_cards * scoring.yellow_card
+    return total
+
+
 class ForecastError(RuntimeError):
     """Raised when a forecast cannot be built (propagates feature errors)."""
 
@@ -520,6 +559,7 @@ def build_forecast_dataset(
     run_id: int | None = None,
     season_ref: str | None = None,
     tour_ref: str | None = None,
+    competition_ref: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build forecasts for every player whose club plays the target tour.
@@ -535,6 +575,7 @@ def build_forecast_dataset(
             run_id=run_id,
             season_ref=season_ref,
             tour_ref=tour_ref,
+            competition_ref=competition_ref,
             now=generated_at,
         )
     except Exception as error:  # noqa: BLE001 - normalise to a forecast error
@@ -548,6 +589,7 @@ def run_forecast(
     run_id: int | None = None,
     season_ref: str | None = None,
     tour_ref: str | None = None,
+    competition_ref: str | None = None,
     now: datetime | None = None,
     persist: bool = True,
 ) -> dict[str, Any]:
@@ -562,6 +604,7 @@ def run_forecast(
         run_id=run_id,
         season_ref=season_ref,
         tour_ref=tour_ref,
+        competition_ref=competition_ref,
         now=now,
     )
     if persist and report["rows"]:
@@ -590,6 +633,7 @@ __all__ = [
     "SCORING",
     "RoleScoring",
     "ForecastError",
+    "reconstruct_points",
     "poisson_pmf",
     "clean_sheet_probability",
     "team_goal_means",

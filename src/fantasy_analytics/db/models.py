@@ -205,6 +205,15 @@ class RawApiResponse(Base):
 
 
 class Competition(Base):
+    """One fantasy competition, e.g. the RPL, La Liga or the Champions League.
+
+    Besides identity, the row carries the *catalogue* of what Sports.ru offers
+    for this competition (step 22): the display order the site itself uses and
+    every season it exposes, imported or not. Storing the catalogue here is what
+    lets the admin UI offer a league and season picker without a read path ever
+    calling the GraphQL API; the seasons actually imported live in ``seasons``.
+    """
+
     __tablename__ = "competitions"
 
     id: Mapped[int] = _identity_pk()
@@ -213,17 +222,34 @@ class Competition(Base):
     )
     slug: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    available_seasons: Mapped[Any] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    catalogue_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
 
 
 class Season(Base):
     __tablename__ = "seasons"
+    __table_args__ = (
+        # A stat season is *not* unique across fantasy seasons: the Champions and
+        # Europa League each publish two fantasy seasons per year (league phase
+        # and knockout stage) that share one stat season id. The fantasy season
+        # id stays globally unique, which is what identifies a season anyway.
+        Index("seasons_stat_season_idx", "stat_season_id"),
+        Index("seasons_competition_idx", "competition_id"),
+    )
 
     id: Mapped[int] = _identity_pk()
     competition_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("competitions.id"), nullable=False
     )
     fantasy_season_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    stat_season_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    stat_season_id: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False)
     starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

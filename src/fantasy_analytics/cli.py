@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .client import ClientConfig, DEFAULT_ENDPOINT, SportsGraphQLClient
+from .competitions import DEFAULT_TOURNAMENT_SLUG
 from .discovery import DiscoveryOptions, run_discovery
 
 
@@ -23,7 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fantasy-discover",
         description=(
-            "Fetch Sports.ru Fantasy RPL data and create model-discovery artifacts."
+            "Fetch Sports.ru fantasy data for one league and create "
+            "model-discovery artifacts."
         ),
     )
     parser.add_argument(
@@ -39,8 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--tournament",
-        default="russia",
-        help="Fantasy tournament slug (default: russia)",
+        default=DEFAULT_TOURNAMENT_SLUG,
+        help=f"Fantasy tournament slug (default: {DEFAULT_TOURNAMENT_SLUG})",
     )
     season_group = parser.add_mutually_exclusive_group()
     season_group.add_argument("--season-id", help="Exact fantasy season ID")

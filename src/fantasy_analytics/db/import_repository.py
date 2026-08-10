@@ -85,19 +85,39 @@ class DomainImportRepository:
             self._session.execute(pg_insert(model), list(chunk))
 
     def upsert_competition(
-        self, *, fantasy_tournament_id: str, slug: str, name: str
+        self,
+        *,
+        fantasy_tournament_id: str,
+        slug: str,
+        name: str,
+        sort_order: int | None = None,
+        available_seasons: Any | None = None,
+        catalogue_synced_at: Any | None = None,
     ) -> int:
+        """Upsert a competition keyed by its fantasy tournament id.
+
+        The catalogue fields are optional because a season import knows the
+        league's identity but not the site-wide season list; only the catalogue
+        sync (:mod:`fantasy_analytics.competitions`) supplies them, and it must
+        not clear them when they are absent.
+        """
+        row: dict[str, Any] = {
+            "fantasy_tournament_id": fantasy_tournament_id,
+            "slug": slug,
+            "name": name,
+        }
+        if sort_order is not None:
+            row["sort_order"] = sort_order
+        if available_seasons is not None:
+            row["available_seasons"] = available_seasons
+        if catalogue_synced_at is not None:
+            row["catalogue_synced_at"] = catalogue_synced_at
+
         mapping = self._bulk_upsert(
             models.Competition,
-            [
-                {
-                    "fantasy_tournament_id": fantasy_tournament_id,
-                    "slug": slug,
-                    "name": name,
-                }
-            ],
+            [row],
             conflict=["fantasy_tournament_id"],
-            update=["slug", "name"],
+            update=[key for key in row if key != "fantasy_tournament_id"],
             returning=["fantasy_tournament_id"],
         )
         return mapping[(fantasy_tournament_id,)]

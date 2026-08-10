@@ -6,12 +6,16 @@ steps read. It runs a fixed set of checks, each split into ``blocking`` and
 ``warning`` severities:
 
 * **blocking** — structural problems that make the snapshot unusable
-  (empty catalog, unresolved references, duplicated fixtures, a player with
-  minutes but no match history). A run with any blocking issue never becomes
-  active.
+  (empty catalog, unresolved references, duplicated fixtures, match history
+  missing for a large share of the players who played). A run with any blocking
+  issue never becomes active.
 * **warning** — numeric discrepancies that the 72-hour Sports.ru statistics
   adjustment window (or provider gaps) can still explain. They are recorded but
   do not block publication.
+
+The checks are league-agnostic: they compare a snapshot against itself rather
+than against expected club or tour counts, so the same gate evaluates a 30-tour
+RPL season and a 9-tour Champions League knockout stage.
 
 Every issue records the expected and actual value behind the comparison, and
 all issues are persisted to ``data_quality_issues`` scoped to the run. The gate
@@ -54,6 +58,20 @@ STAT_ADJUSTMENT_WINDOW = timedelta(hours=72)
 # systemic discrepancy cannot flood the table; the true total is kept in the
 # check summary.
 MAX_ISSUES_PER_CHECK = 200
+
+# Share of the players who recorded minutes that may lack match history before
+# the snapshot is refused.
+#
+# A player with season minutes but no per-match rows used to be treated as proof
+# that the collector had dropped a page. Across leagues that turned out to be too
+# strict: Sports.ru itself sometimes answers a player's history with an empty list
+# while reporting a non-zero ``totalCount`` (one Serie A player in 2025/2026), and
+# a single provider gap must not withhold a 729-player season. What the check is
+# really guarding against is *systemic* loss, which affects a large share of the
+# squad at once — so the severity follows the scale: an isolated gap is a warning,
+# a widespread one still blocks. Such a player simply gets no form features and is
+# projected at zero, so he is never selected.
+MISSING_HISTORY_BLOCKING_SHARE = 0.01
 
 
 class QualityError(RuntimeError):
@@ -350,7 +368,30 @@ def _clubs_within_window(ctx: QualityContext) -> set[int]:
 
 
 def check_club_result_reconciliation(ctx: QualityContext) -> CheckResult:
-    """Club season aggregates must match results derived from their matches."""
+    """Club season aggregates must match results derived from their matches.
+
+    The two sides measure the same clubs but not always the same set of matches,
+    and only some of the ways they can disagree say anything about the snapshot.
+    Two of them are properties of the provider's data rather than defects in the
+    import, so they are recorded as warnings:
+
+    * **The provider's season is wider than the fantasy calendar.** Fantasy scores
+      only the rounds it lists, while the provider's season covers the whole
+      competition. Four Eredivisie clubs in 2025/2026 report 35-36 matches against
+      34 fixtures (exactly the play-off participants), and Champions League clubs
+      report 10-17 against the 8 league-phase rounds, because qualifying and the
+      knockout stage are separate fantasy seasons.
+    * **The provider's aggregate contradicts itself.** For some clubs the wins,
+      draws and losses do not add up to the same aggregate's own match count —
+      Kairat's 2025/2026 Champions League row counts 8 matches but 16 results, and
+      two Ligue 1 clubs are missing one draw each. Such a row cannot be reconciled
+      against anything, so comparing it proves nothing either way.
+
+    What still blocks is a self-consistent aggregate that covers the same matches
+    as the calendar and disagrees anyway: that means the imported scores are
+    wrong. ``club_season_stats`` feeds nothing but this check, so a warning here
+    never reaches a projection.
+    """
     s = ctx.session
     recent_clubs = _clubs_within_window(ctx)
 
@@ -433,22 +474,55 @@ def check_club_result_reconciliation(ctx: QualityContext) -> CheckResult:
         if not diffs:
             continue
         mismatched += 1
-        severity = WARNING if club_id in recent_clubs else BLOCKING
+        recent = club_id in recent_clubs
+        wider_provider_season = (
+            stored["matches_played"] > derived_agg["matches_played"]
+        )
+        aggregate_contradicts_itself = (
+            stored["matches_won"] + stored["matches_drawn"] + stored["matches_lost"]
+            != stored["matches_played"]
+        )
+        severity = (
+            WARNING
+            if recent or wider_provider_season or aggregate_contradicts_itself
+            else BLOCKING
+        )
         detail_str = ", ".join(
             f"{metric}: matches={d}/aggregate={a}"
             for metric, (d, a) in diffs.items()
         )
+        if aggregate_contradicts_itself:
+            reason = (
+                "; the provider's own results do not add up to its match count, "
+                "so the aggregate cannot be reconciled with any calendar"
+            )
+        elif wider_provider_season:
+            reason = (
+                "; the provider's season covers more matches than the fantasy "
+                "calendar (qualifying and play-offs are scored separately)"
+            )
+        elif recent:
+            reason = "; may reflect the 72h adjustment window"
+        else:
+            reason = ""
         issues.append(
             QualityIssue(
                 check_name="club_result_reconciliation",
                 severity=severity,
                 entity_type="club",
                 entity_ref=row.display_name,
-                message=f"Club aggregate disagrees with match results ({detail_str})",
+                message=(
+                    f"Club aggregate disagrees with match results ({detail_str})"
+                    f"{reason}"
+                ),
                 expected=str({m: derived_agg[m] for m in diffs}),
                 actual=str({m: stored[m] for m in diffs}),
                 details={
-                    "within_adjustment_window": club_id in recent_clubs,
+                    "within_adjustment_window": recent,
+                    "provider_season_is_wider": wider_provider_season,
+                    "provider_aggregate_contradicts_itself": (
+                        aggregate_contradicts_itself
+                    ),
                     "diffs": {m: {"matches": d, "aggregate": a} for m, (d, a) in diffs.items()},
                 },
             )
@@ -511,30 +585,16 @@ def check_player_points_reconciliation(ctx: QualityContext) -> CheckResult:
 
     metrics = ("points", "goals", "assists", "field_minutes")
     issues: list[QualityIssue] = []
-    missing_history = 0
+    # Collected before their severity is known: it depends on how many players
+    # are affected relative to how many played at all.
+    missing_history_players: list[Any] = []
     mismatched = 0
     for row in aggregate_rows:
         summed = match_sums.get(row.id)
         match_count = summed.matches if summed else 0
         if match_count == 0:
-            # A player who accumulated minutes must have match history; its
-            # absence signals a dropped page during ingestion.
             if row.field_minutes and row.field_minutes > 0:
-                missing_history += 1
-                issues.append(
-                    QualityIssue(
-                        check_name="player_points_reconciliation",
-                        severity=BLOCKING,
-                        entity_type="player_season",
-                        entity_ref=str(row.fantasy_player_id),
-                        message=(
-                            "Player has season minutes but no match history "
-                            "(likely a missing ingestion page)"
-                        ),
-                        expected=f"match history for {row.field_minutes} minutes",
-                        actual="0 matches",
-                    )
-                )
+                missing_history_players.append(row)
             continue
         diffs = {
             metric: (getattr(row, metric), getattr(summed, metric))
@@ -562,12 +622,47 @@ def check_player_points_reconciliation(ctx: QualityContext) -> CheckResult:
                 details={"diffs": {m: {"aggregate": a, "matches": v} for m, (a, v) in diffs.items()}},
             )
         )
+
+    played = sum(
+        1 for row in aggregate_rows if row.field_minutes and row.field_minutes > 0
+    )
+    tolerated = played * MISSING_HISTORY_BLOCKING_SHARE
+    systemic = len(missing_history_players) > tolerated
+    for row in missing_history_players:
+        issues.append(
+            QualityIssue(
+                check_name="player_points_reconciliation",
+                severity=BLOCKING if systemic else WARNING,
+                entity_type="player_season",
+                entity_ref=str(row.fantasy_player_id),
+                message=(
+                    "Player has season minutes but no match history; "
+                    + (
+                        "history is missing for too many players to trust the "
+                        "snapshot (likely dropped ingestion pages)"
+                        if systemic
+                        else "Sports.ru returned no per-match rows for him, so he "
+                        "gets no form features and is projected at zero"
+                    )
+                ),
+                expected=f"match history for {row.field_minutes} minutes",
+                actual="0 matches",
+                details={
+                    "players_with_minutes": played,
+                    "missing_history": len(missing_history_players),
+                    "blocking_share": MISSING_HISTORY_BLOCKING_SHARE,
+                },
+            )
+        )
+
     return CheckResult(
         name="player_points_reconciliation",
         expected="season fantasy aggregates equal the sum of match stats",
         actual={
             "players_compared": len(aggregate_rows),
-            "missing_history": missing_history,
+            "players_with_minutes": played,
+            "missing_history": len(missing_history_players),
+            "missing_history_is_systemic": systemic,
             "mismatched": mismatched,
         },
         issues=_cap(issues),
@@ -647,6 +742,7 @@ def run_quality_checks(
 
 __all__ = [
     "BLOCKING",
+    "MISSING_HISTORY_BLOCKING_SHARE",
     "WARNING",
     "STAT_ADJUSTMENT_WINDOW",
     "QualityError",

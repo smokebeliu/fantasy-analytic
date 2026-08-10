@@ -1,4 +1,7 @@
 import type {
+  CatalogueSyncResponse,
+  CompetitionListResponse,
+  CompetitionModel,
   ForecastModel,
   IngestionJob,
   IngestionStatusResponse,
@@ -116,8 +119,19 @@ export interface PlayerQuery {
 }
 
 export const api = {
-  listSeasons: (params: { limit?: number; offset?: number } = {}) =>
-    request<SeasonListResponse>("/seasons", { params }),
+  // Leagues. `imported_only` narrows the catalogue to what the read API can
+  // serve, which is what the league switcher offers; the admin screen wants the
+  // full catalogue so a league can be imported for the first time.
+  listCompetitions: (
+    params: { imported_only?: boolean; limit?: number; offset?: number } = {},
+  ) => request<CompetitionListResponse>("/competitions", { params }),
+
+  getCompetition: (slug: string) =>
+    request<CompetitionModel>(`/competitions/${encodeURIComponent(slug)}`),
+
+  listSeasons: (
+    params: { competition_id?: number; limit?: number; offset?: number } = {},
+  ) => request<SeasonListResponse>("/seasons", { params }),
 
   getSeason: (seasonId: number) =>
     request<SeasonDetailModel>(`/seasons/${seasonId}`),
@@ -139,7 +153,10 @@ export const api = {
 
   optimizeSquad: (body: {
     tour?: string;
+    // Naming the season (or the league) is what keeps a tour id unambiguous
+    // once several leagues are imported.
     season?: string;
+    competition?: string;
     model?: ForecastModel;
     run_id?: number;
     locked?: string[];
@@ -155,6 +172,7 @@ export const api = {
     current_squad: string[];
     tour?: string;
     season?: string;
+    competition?: string;
     model?: ForecastModel;
     max_transfers?: number | null;
     run_id?: number;
@@ -167,18 +185,30 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  // Admin ingestion (step 17). The refresh call only enqueues a job: a 202
-  // carries the new job, a 409 (thrown as an ApiError with type "conflict")
-  // means a refresh is already running.
-  getIngestionStatus: () =>
-    request<IngestionStatusResponse>("/admin/ingestion/rpl/status"),
+  // Admin ingestion (steps 17 and 22). Both calls are scoped to one league by
+  // its tournament slug, so refreshing La Liga never touches the RPL snapshot.
+  // The refresh call only enqueues a job: a 202 carries the new job, a 409
+  // (thrown as an ApiError with type "conflict") means a refresh of that same
+  // league is already running.
+  getIngestionStatus: (slug: string) =>
+    request<IngestionStatusResponse>(
+      `/admin/ingestion/${encodeURIComponent(slug)}/status`,
+    ),
 
   getIngestionJob: (jobId: number) =>
     request<IngestionJob>(`/admin/ingestion/runs/${jobId}`),
 
-  refreshIngestion: (body: RefreshRequestBody = {}) =>
-    request<IngestionJob>("/admin/ingestion/rpl/refresh", {
+  refreshIngestion: (slug: string, body: RefreshRequestBody = {}) =>
+    request<IngestionJob>(
+      `/admin/ingestion/${encodeURIComponent(slug)}/refresh`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    ),
+
+  syncCompetitions: () =>
+    request<CatalogueSyncResponse>("/admin/competitions/sync", {
       method: "POST",
-      body: JSON.stringify(body),
     }),
 };

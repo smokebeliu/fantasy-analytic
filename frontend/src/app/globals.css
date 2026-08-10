@@ -111,6 +111,42 @@ button {
   box-shadow: inset 0 0 0 1px var(--border-strong);
 }
 
+/* League switcher */
+.league-switcher {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.league-switcher__label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.league-switcher select {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  max-width: 260px;
+  outline: none;
+  transition: border 0.15s ease;
+}
+.league-switcher select:focus {
+  border-color: var(--accent);
+}
+.league-switcher select[aria-busy="true"] {
+  opacity: 0.6;
+}
+.league-switcher__note {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
 /* Freshness banner */
 .freshness {
   display: flex;

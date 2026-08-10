@@ -1,4 +1,11 @@
-"""Full historical import of a Sports.ru Fantasy RPL season (development-plan step 2).
+"""Full historical import of one Sports.ru fantasy season (development-plan step 2).
+
+The season belongs to whichever competition ``IngestionOptions.tournament_slug``
+names — the RPL by default, any of the leagues in the catalogue
+(:mod:`fantasy_analytics.competitions`) otherwise. Nothing in the importer is
+league-specific: rules, roster limits, club and tour counts all come from the
+payload, so a 38-tour La Liga season and a 9-tour Champions League knockout stage
+go through the same code.
 
 The importer runs in two clearly separated stages:
 
@@ -29,6 +36,7 @@ from typing import Any, Callable
 from sqlalchemy.orm import sessionmaker
 
 from .client import SportsGraphQLClient
+from .competitions import DEFAULT_TOURNAMENT_SLUG, catalogue_seasons
 from .db import session_scope
 from .db.import_repository import DomainImportRepository
 from .db.repository import IngestionRepository
@@ -78,7 +86,7 @@ _VALID_ROLES = {"GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD"}
 
 @dataclass(frozen=True)
 class IngestionOptions:
-    tournament_slug: str = "russia"
+    tournament_slug: str = DEFAULT_TOURNAMENT_SLUG
     season_id: str | None = None
     season_name: str | None = None
     use_current_season: bool = False
@@ -309,10 +317,17 @@ def _persist(
         )
     on_progress(f"Saved {len(fetch.raw_payloads)} raw responses")
 
+    # The tournament payload already lists every season this league exposes, so
+    # an import doubles as a catalogue refresh for its own competition and the
+    # admin season picker never goes stale behind a successful refresh.
     competition_id = repo.upsert_competition(
         fantasy_tournament_id=str(tournament["id"]),
         slug=str(tournament.get("webName") or tournament.get("id")),
         name=str(tournament.get("name") or ""),
+        available_seasons=[
+            season.as_dict() for season in catalogue_seasons(tournament)
+        ],
+        catalogue_synced_at=datetime.now(UTC),
     )
 
     stat_seasons = (fetch.team_stats_payload.get("data") or {}).get("stat_season") or []

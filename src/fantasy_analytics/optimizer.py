@@ -1304,6 +1304,7 @@ def build_squad_optimization(
     run_id: int | None = None,
     season_ref: str | None = None,
     tour_ref: str | None = None,
+    competition_ref: str | None = None,
     model: str = MODEL_EVENT,
     current_squad: Sequence[str | int] | None = None,
     max_transfers: int | None = None,
@@ -1330,6 +1331,7 @@ def build_squad_optimization(
             run_id=run_id,
             season_ref=season_ref,
             tour_ref=tour_ref,
+            competition_ref=competition_ref,
             now=generated_at,
         )
     except ForecastError as error:
