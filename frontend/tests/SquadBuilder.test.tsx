@@ -18,6 +18,8 @@ vi.mock("@/lib/api", () => ({
   ApiError: class ApiError extends Error {},
 }));
 
+const FANTASY_SEASON_ID = "59";
+
 const TOURS: TourModel[] = [
   {
     tour_id: 15,
@@ -29,6 +31,18 @@ const TOURS: TourModel[] = [
     total_transfers: 3,
   },
 ];
+
+function renderSquadBuilder() {
+  return render(
+    <SquadBuilder
+      seasonId={1}
+      fantasySeasonId={FANTASY_SEASON_ID}
+      tours={TOURS}
+      defaultTourId={15}
+      rules={RPL_RULES}
+    />,
+  );
+}
 
 function poolResponse() {
   const items = [
@@ -61,9 +75,7 @@ describe("SquadBuilder", () => {
   });
 
   it("renders the candidate pool", async () => {
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() =>
       expect(screen.getAllByTestId("pool-row").length).toBeGreaterThan(0),
     );
@@ -71,9 +83,7 @@ describe("SquadBuilder", () => {
   });
 
   it("filters the pool by position without refetching", async () => {
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
     const requests = listPlayers.mock.calls.length;
 
@@ -112,9 +122,7 @@ describe("SquadBuilder", () => {
         pagination: { limit: 200, offset: 200, total: 202, count: 2 },
       });
 
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
 
     await waitFor(() => expect(listPlayers).toHaveBeenCalledTimes(2));
     expect(listPlayers).toHaveBeenLastCalledWith(
@@ -123,9 +131,7 @@ describe("SquadBuilder", () => {
   });
 
   it("shows the pitch by default and switches to the list view", async () => {
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
 
     // Pitch view is the default.
@@ -142,9 +148,7 @@ describe("SquadBuilder", () => {
   });
 
   it("keeps transfers disabled until the squad is valid and shows violations", async () => {
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
 
     const transfersBtn = screen.getByTestId("optimize-transfers");
@@ -195,9 +199,7 @@ describe("SquadBuilder", () => {
       },
     });
 
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
 
     await userEvent.click(screen.getByTestId("optimize-from-scratch"));
@@ -205,7 +207,11 @@ describe("SquadBuilder", () => {
     const result = await screen.findByTestId("optimizer-result");
     expect(result).toHaveTextContent("4-5-1");
     expect(result).toHaveTextContent("76.3");
-    expect(optimizeSquad).toHaveBeenCalledWith({ tour: "1786", model: "poisson_events" });
+    expect(optimizeSquad).toHaveBeenCalledWith({
+      season: FANTASY_SEASON_ID,
+      tour: "1786",
+      model: "poisson_events",
+    });
   });
 
   it("keeps the season history of a generated squad", async () => {
@@ -238,9 +244,7 @@ describe("SquadBuilder", () => {
       ]),
     );
 
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(1));
     await userEvent.click(screen.getByTestId("optimize-from-scratch"));
     await screen.findByTestId("optimizer-result");
@@ -291,9 +295,7 @@ describe("SquadBuilder", () => {
       ]),
     );
 
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await userEvent.click(screen.getByTestId("optimize-from-scratch"));
     await screen.findByTestId("optimizer-result");
 
@@ -316,9 +318,7 @@ describe("SquadBuilder", () => {
     };
     optimizeSquad.mockResolvedValue(optimizerResponse([pinned]));
 
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
 
     // Add the goalkeeper to the squad, then pin them on the pitch.
@@ -332,6 +332,7 @@ describe("SquadBuilder", () => {
 
     await waitFor(() =>
       expect(optimizeSquad).toHaveBeenCalledWith({
+        season: FANTASY_SEASON_ID,
         tour: "1786",
         model: "poisson_events",
         locked: ["f-gk"],
@@ -348,9 +349,7 @@ describe("SquadBuilder", () => {
   it("omits the lock key when only a formation is chosen", async () => {
     optimizeSquad.mockResolvedValue(optimizerResponse([makeCandidate("Капитан")]));
 
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
 
     await userEvent.selectOptions(screen.getByTestId("formation-select"), "4-4-2");
@@ -358,6 +357,7 @@ describe("SquadBuilder", () => {
 
     await waitFor(() =>
       expect(optimizeSquad).toHaveBeenCalledWith({
+        season: FANTASY_SEASON_ID,
         tour: "1786",
         model: "poisson_events",
         formation: "4-4-2",
@@ -366,9 +366,7 @@ describe("SquadBuilder", () => {
   });
 
   it("explains that the two build buttons differ in what they keep", async () => {
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
 
     const help = screen.getByTestId("optimizer-help");
@@ -424,9 +422,7 @@ describe("SquadBuilder", () => {
     };
     optimizeSquad.mockResolvedValue(response);
 
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
 
     await userEvent.click(screen.getByTestId("optimize-from-scratch"));
@@ -441,9 +437,7 @@ describe("SquadBuilder", () => {
   it("hides the clash panel when nothing cancels out", async () => {
     optimizeSquad.mockResolvedValue(optimizerResponse([makeCandidate("Капитан")]));
 
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
 
     await userEvent.click(screen.getByTestId("optimize-from-scratch"));
@@ -457,9 +451,7 @@ describe("SquadBuilder", () => {
       new Error("3 locked GK exceed the squad limit of 2 for this position"),
     );
 
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
 
     const firstRow = screen.getAllByTestId("pool-row")[0];
@@ -478,9 +470,7 @@ describe("SquadBuilder", () => {
     });
     optimizeTransfers.mockResolvedValue(transfersResponse());
 
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() =>
       expect(screen.getAllByTestId("pool-row").length).toBe(squad.length),
     );
@@ -496,7 +486,11 @@ describe("SquadBuilder", () => {
 
     await waitFor(() =>
       expect(optimizeTransfers).toHaveBeenCalledWith(
-        expect.objectContaining({ max_transfers: 3, tour: "1786" }),
+        expect.objectContaining({
+          season: FANTASY_SEASON_ID,
+          max_transfers: 3,
+          tour: "1786",
+        }),
       ),
     );
 
@@ -529,9 +523,7 @@ describe("SquadBuilder", () => {
     };
     optimizeTransfers.mockResolvedValue(response);
 
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() =>
       expect(screen.getAllByTestId("pool-row").length).toBe(squad.length),
     );
@@ -554,9 +546,7 @@ describe("SquadBuilder", () => {
     });
     optimizeTransfers.mockResolvedValue(transfersResponse());
 
-    render(
-      <SquadBuilder seasonId={1} tours={TOURS} defaultTourId={15} rules={RPL_RULES} />,
-    );
+    renderSquadBuilder();
     await waitFor(() =>
       expect(screen.getAllByTestId("pool-row").length).toBe(squad.length),
     );
@@ -569,7 +559,7 @@ describe("SquadBuilder", () => {
 
     await waitFor(() =>
       expect(optimizeTransfers).toHaveBeenCalledWith(
-        expect.objectContaining({ max_transfers: 1 }),
+        expect.objectContaining({ season: FANTASY_SEASON_ID, max_transfers: 1 }),
       ),
     );
   });
