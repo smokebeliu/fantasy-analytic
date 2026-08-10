@@ -1,4 +1,5 @@
 import { api, ApiError } from "@/lib/api";
+import { leagueSeasonId, loadLeagueContext } from "@/lib/league";
 import { TourExplorer } from "@/components/TourExplorer";
 import type { TourModel } from "@/lib/types";
 
@@ -14,22 +15,24 @@ function pickDefaultTour(tours: TourModel[]): TourModel | null {
 }
 
 export default async function HomePage() {
-  let seasonId: number | null = null;
+  const { competition, error } = await loadLeagueContext();
+  const seasonId = leagueSeasonId(competition);
   let tours: TourModel[] = [];
-  let loadError: string | null = null;
+  let loadError: string | null = error;
 
-  try {
-    const seasons = await api.listSeasons({ limit: 1 });
-    seasonId = seasons.items[0]?.season_id ?? null;
-    if (seasonId != null) {
-      const tourResponse = await api.listTours({ season_id: seasonId, limit: 200 });
+  if (loadError === null && seasonId != null) {
+    try {
+      const tourResponse = await api.listTours({
+        season_id: seasonId,
+        limit: 200,
+      });
       tours = tourResponse.items;
+    } catch (cause) {
+      loadError =
+        cause instanceof ApiError
+          ? cause.message
+          : "Не удалось получить данные от API аналитики.";
     }
-  } catch (error) {
-    loadError =
-      error instanceof ApiError
-        ? error.message
-        : "Не удалось получить данные от API аналитики.";
   }
 
   const defaultTour = pickDefaultTour(tours);
@@ -40,7 +43,8 @@ export default async function HomePage() {
         <h1>Тур и игроки</h1>
         <p>
           Прогноз ожидаемых очков, фильтры, сортировка и сравнение игроков перед
-          туром РПЛ.
+          туром
+          {competition ? ` ${competition.name}` : ""}.
         </p>
       </div>
 

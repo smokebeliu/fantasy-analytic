@@ -336,6 +336,15 @@ class SquadRequest(BaseModel):
     model_config = {"protected_namespaces": ()}
 
     run_id: int | None = Field(default=None, description="Ingestion run to build from")
+    competition: str | None = Field(
+        default=None,
+        description=(
+            "League to optimize: tournament slug or fantasy tournament id. With "
+            "several leagues imported there is no single active snapshot, so name "
+            "this (or season/run_id) to avoid getting whichever league was "
+            "published most recently"
+        ),
+    )
     season: str | None = Field(
         default=None, description="Season fantasy id, stat id or name"
     )

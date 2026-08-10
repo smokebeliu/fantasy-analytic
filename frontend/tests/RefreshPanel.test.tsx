@@ -3,16 +3,22 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { RefreshPanel } from "@/components/RefreshPanel";
 import { ApiError } from "@/lib/api";
-import type { IngestionJob, IngestionStatusResponse } from "@/lib/types";
+import type {
+  CompetitionModel,
+  IngestionJob,
+  IngestionStatusResponse,
+} from "@/lib/types";
 
 const getIngestionStatus = vi.fn();
 const refreshIngestion = vi.fn();
+const syncCompetitions = vi.fn();
 const routerRefresh = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
     getIngestionStatus: (...args: unknown[]) => getIngestionStatus(...args),
     refreshIngestion: (...args: unknown[]) => refreshIngestion(...args),
+    syncCompetitions: (...args: unknown[]) => syncCompetitions(...args),
   },
   // Mirrors the real ApiError, whose status the panel branches on (409).
   ApiError: class ApiError extends Error {
@@ -48,9 +54,64 @@ function job(overrides: Partial<IngestionJob> = {}): IngestionJob {
   };
 }
 
+function competition(
+  overrides: Partial<CompetitionModel> = {},
+): CompetitionModel {
+  return {
+    competition_id: 1,
+    fantasy_tournament_id: "1",
+    slug: "russia",
+    name: "Россия",
+    sort_order: 1,
+    available_seasons: [
+      {
+        fantasy_season_id: "59",
+        stat_season_id: "rfpl_25-26",
+        name: "2025/2026",
+        label: "2025/2026",
+        is_active: false,
+      },
+      {
+        fantasy_season_id: "75",
+        stat_season_id: "rfpl_26-27",
+        name: "2026/2027",
+        label: "2026/2027",
+        is_active: true,
+      },
+    ],
+    has_active_season: true,
+    seasons: [],
+    is_imported: true,
+    ...overrides,
+  };
+}
+
+// A league whose latest season is already finished, so "active season" is not
+// offered — Serie A and the Bundesliga are in exactly this state.
+const ITALY = competition({
+  competition_id: 3,
+  fantasy_tournament_id: "15",
+  slug: "italy",
+  name: "Италия",
+  sort_order: 10,
+  has_active_season: false,
+  available_seasons: [
+    {
+      fantasy_season_id: "69",
+      stat_season_id: "serie_a_25-26",
+      name: "2025/2026",
+      label: "2025/2026",
+      is_active: false,
+    },
+  ],
+});
+
+const COMPETITIONS = [competition(), ITALY];
+
 function status(overrides: Partial<IngestionStatusResponse> = {}): IngestionStatusResponse {
   return {
     tournament_slug: "russia",
+    competition: competition(),
     is_refreshing: false,
     stages: STAGES,
     snapshot: {
@@ -64,6 +125,10 @@ function status(overrides: Partial<IngestionStatusResponse> = {}): IngestionStat
       fantasy_season_id: "59",
       stat_season_id: "rfpl_25-26",
       name: "2025/2026",
+      label: "2025/2026",
+      competition_id: 1,
+      competition_name: "Россия",
+      competition_slug: "russia",
       is_active: false,
     },
     target_tour: {
@@ -78,23 +143,112 @@ function status(overrides: Partial<IngestionStatusResponse> = {}): IngestionStat
   };
 }
 
+type PanelProps = Parameters<typeof RefreshPanel>[0];
+
+function renderPanel(overrides: Partial<PanelProps> = {}) {
+  return render(
+    <RefreshPanel
+      initialStatus={status()}
+      competitions={COMPETITIONS}
+      initialSlug="russia"
+      {...overrides}
+    />,
+  );
+}
+
 describe("RefreshPanel", () => {
   beforeEach(() => {
     getIngestionStatus.mockReset();
     refreshIngestion.mockReset();
+    syncCompetitions.mockReset();
     routerRefresh.mockReset();
   });
 
   it("shows the published snapshot and the target tour", async () => {
     getIngestionStatus.mockResolvedValue(status());
-    render(<RefreshPanel initialStatus={status()} />);
-    await waitFor(() => expect(getIngestionStatus).toHaveBeenCalled());
+    renderPanel();
+    await waitFor(() => expect(getIngestionStatus).toHaveBeenCalledWith("russia"));
 
     const snapshot = screen.getByTestId("refresh-snapshot");
     expect(snapshot).toHaveTextContent("#1");
     expect(snapshot).toHaveTextContent("2025/2026");
+    expect(screen.getByTestId("refresh-snapshot-league")).toHaveTextContent(
+      "Россия",
+    );
     expect(screen.getByTestId("refresh-target-tour")).toHaveTextContent("30 тур");
     expect(screen.getByTestId("refresh-button")).toBeEnabled();
+  });
+
+  it("imports the league that is selected, not a hardcoded one", async () => {
+    refreshIngestion.mockResolvedValue(job({ tournament_slug: "italy" }));
+    getIngestionStatus.mockResolvedValue(
+      status({ tournament_slug: "italy", competition: ITALY }),
+    );
+
+    renderPanel();
+    await userEvent.selectOptions(screen.getByTestId("refresh-league"), "italy");
+    // Switching leagues re-reads that league's own job history.
+    await waitFor(() => expect(getIngestionStatus).toHaveBeenCalledWith("italy"));
+
+    await userEvent.click(screen.getByTestId("refresh-button"));
+    expect(refreshIngestion).toHaveBeenCalledWith("italy", {});
+  });
+
+  it("offers the league's own seasons and disables an absent active season", async () => {
+    getIngestionStatus.mockResolvedValue(status());
+    renderPanel();
+    await waitFor(() => expect(getIngestionStatus).toHaveBeenCalled());
+
+    const select = screen.getByTestId("refresh-season") as HTMLSelectElement;
+    const active = Array.from(select.options).find(
+      (option) => option.value === "current",
+    );
+    expect(active?.disabled).toBe(false);
+    expect(
+      Array.from(select.options).map((option) => option.value),
+    ).toContain("59");
+
+    await userEvent.selectOptions(screen.getByTestId("refresh-league"), "italy");
+    await waitFor(() => {
+      const italyActive = Array.from(
+        (screen.getByTestId("refresh-season") as HTMLSelectElement).options,
+      ).find((option) => option.value === "current");
+      expect(italyActive?.disabled).toBe(true);
+    });
+  });
+
+  it("imports one explicit season of the league by fantasy id", async () => {
+    refreshIngestion.mockResolvedValue(job({ status: "pending" }));
+    getIngestionStatus
+      .mockResolvedValueOnce(status())
+      .mockResolvedValue(status({ is_refreshing: true }));
+
+    renderPanel();
+    await waitFor(() => expect(getIngestionStatus).toHaveBeenCalled());
+    await userEvent.selectOptions(screen.getByTestId("refresh-season"), "59");
+    await userEvent.click(screen.getByTestId("refresh-button"));
+
+    expect(refreshIngestion).toHaveBeenCalledWith("russia", {
+      season_id: "59",
+    });
+  });
+
+  it("re-reads the league catalogue on demand", async () => {
+    getIngestionStatus.mockResolvedValue(status());
+    syncCompetitions.mockResolvedValue({
+      synced_at: "2026-08-10T00:00:00Z",
+      competitions: 24,
+      seasons: 77,
+      slugs: ["russia", "italy"],
+    });
+
+    renderPanel();
+    await waitFor(() => expect(getIngestionStatus).toHaveBeenCalled());
+    await userEvent.click(screen.getByTestId("sync-competitions"));
+
+    await waitFor(() => expect(syncCompetitions).toHaveBeenCalled());
+    // The league list is server-rendered, so a fresh server tree is required.
+    await waitFor(() => expect(routerRefresh).toHaveBeenCalled());
   });
 
   it("starts a refresh and follows the job to success", async () => {
@@ -135,10 +289,10 @@ describe("RefreshPanel", () => {
         }),
       );
 
-    render(<RefreshPanel initialStatus={status()} />);
+    renderPanel();
     await userEvent.click(screen.getByTestId("refresh-button"));
 
-    expect(refreshIngestion).toHaveBeenCalledWith({});
+    expect(refreshIngestion).toHaveBeenCalledWith("russia", {});
     // While the job runs the button is blocked, so a second click cannot start
     // a parallel import.
     await waitFor(() =>
@@ -176,9 +330,7 @@ describe("RefreshPanel", () => {
     });
 
     getIngestionStatus.mockResolvedValue(status({ latest_job: failed }));
-    render(
-      <RefreshPanel initialStatus={status({ latest_job: failed })} />,
-    );
+    renderPanel({ initialStatus: status({ latest_job: failed }) });
 
     expect(screen.getByTestId("refresh-outcome")).toHaveTextContent(
       "simulated history failure",
@@ -210,7 +362,7 @@ describe("RefreshPanel", () => {
         status({ is_refreshing: true, active_job: job({ status: "running" }) }),
       );
 
-    render(<RefreshPanel initialStatus={status()} />);
+    renderPanel();
     await waitFor(() => expect(getIngestionStatus).toHaveBeenCalled());
     await userEvent.click(screen.getByTestId("refresh-button"));
 
@@ -230,12 +382,12 @@ describe("RefreshPanel", () => {
       .mockResolvedValueOnce(status())
       .mockResolvedValue(status({ is_refreshing: true }));
 
-    render(<RefreshPanel initialStatus={status()} />);
+    renderPanel();
     await waitFor(() => expect(getIngestionStatus).toHaveBeenCalled());
     await userEvent.selectOptions(screen.getByTestId("refresh-season"), "current");
     await userEvent.click(screen.getByTestId("refresh-button"));
 
-    expect(refreshIngestion).toHaveBeenCalledWith({ current: true });
+    expect(refreshIngestion).toHaveBeenCalledWith("russia", { current: true });
   });
 
   it("offers a retry when the status cannot be loaded at all", async () => {
@@ -243,9 +395,7 @@ describe("RefreshPanel", () => {
       .mockRejectedValueOnce(new ApiError(0, "network_error", "API недоступен"))
       .mockResolvedValue(status());
 
-    render(
-      <RefreshPanel initialStatus={null} initialError="API недоступен" />,
-    );
+    renderPanel({ initialStatus: null, initialError: "API недоступен" });
     expect(screen.getByTestId("error")).toHaveTextContent("API недоступен");
 
     await userEvent.click(screen.getByRole("button", { name: "Повторить" }));

@@ -56,11 +56,16 @@ function candidateToPlayer(c: OptimizerCandidate): PlayerModel {
 
 export function SquadBuilder({
   seasonId,
+  fantasySeasonId,
   tours,
   defaultTourId,
   rules,
 }: {
   seasonId: number;
+  // Sent with every optimizer call. A tour id alone would be ambiguous once
+  // more than one league is imported, and the solver would fall back to
+  // whichever league published a snapshot most recently.
+  fantasySeasonId: string;
   tours: TourModel[];
   defaultTourId: number;
   rules: SeasonRulesModel | null;
@@ -238,6 +243,7 @@ export function SquadBuilder({
     setResult(null);
     try {
       const res = await api.optimizeSquad({
+        season: fantasySeasonId,
         tour: selectedTour.fantasy_tour_id,
         model,
       });
@@ -261,6 +267,7 @@ export function SquadBuilder({
     setResult(null);
     try {
       const res = await api.optimizeSquad({
+        season: fantasySeasonId,
         tour: selectedTour.fantasy_tour_id,
         model,
         ...(lockedRefs.length > 0 ? { locked: lockedRefs } : {}),
@@ -289,6 +296,7 @@ export function SquadBuilder({
     try {
       const res = await api.optimizeTransfers({
         current_squad: currentSquad,
+        season: fantasySeasonId,
         tour: selectedTour.fantasy_tour_id,
         model,
         max_transfers: transferLimit,

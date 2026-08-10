@@ -1,30 +1,25 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { api } from "@/lib/api";
 import { relativeFreshness } from "@/lib/format";
+import { loadLeagueContext } from "@/lib/league";
 import { NavLinks } from "@/components/NavLinks";
-import type { SnapshotMeta } from "@/lib/types";
+import { LeagueSwitcher } from "@/components/LeagueSwitcher";
+import { selectLeague } from "./actions";
 
 export const metadata: Metadata = {
-  title: "Fantasy Analytics — РПЛ",
-  description: "Прогноз очков и подбор состава Fantasy РПЛ",
+  title: "Fantasy Analytics",
+  description: "Прогноз очков и подбор состава фэнтези Sports.ru",
 };
-
-async function loadSnapshot(): Promise<{ snapshot: SnapshotMeta | null; ok: boolean }> {
-  try {
-    const seasons = await api.listSeasons({ limit: 1 });
-    return { snapshot: seasons.items[0]?.snapshot ?? null, ok: true };
-  } catch {
-    return { snapshot: null, ok: false };
-  }
-}
 
 export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const { snapshot, ok } = await loadSnapshot();
+  // The header describes the league the pages below are showing, so it resolves
+  // the same league context they do (from the cookie) instead of guessing.
+  const { competitions, competition, error } = await loadLeagueContext();
+  const snapshot = competition?.snapshot ?? null;
 
   return (
     <html lang="ru">
@@ -36,15 +31,26 @@ export default async function RootLayout({
               Fantasy Analytics
             </div>
             <NavLinks />
+            <LeagueSwitcher
+              competitions={competitions}
+              selectedSlug={competition?.slug ?? null}
+              onSelect={selectLeague}
+            />
             <div className="freshness" data-testid="freshness">
+              <div className="freshness__item">
+                <span className="freshness__label">Сезон</span>
+                <span className="freshness__value" data-testid="freshness-season">
+                  {competition?.latest_season?.label ?? "—"}
+                </span>
+              </div>
               <div className="freshness__item">
                 <span className="freshness__label">Данные</span>
                 <span className="freshness__value">
-                  {ok
-                    ? snapshot?.data_freshness
+                  {error
+                    ? "API недоступен"
+                    : snapshot?.data_freshness
                       ? relativeFreshness(snapshot.data_freshness)
-                      : "нет активного снапшота"
-                    : "API недоступен"}
+                      : "нет активного снапшота"}
                 </span>
               </div>
               <div className="freshness__item">

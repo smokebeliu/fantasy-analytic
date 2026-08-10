@@ -15,35 +15,42 @@ import {
   shouldPoll,
   stageLabel,
 } from "@/lib/ingestion";
-import type { IngestionStatusResponse } from "@/lib/types";
+import type {
+  CompetitionModel,
+  IngestionStatusResponse,
+  RefreshRequestBody,
+} from "@/lib/types";
 import { ErrorState } from "./StateBlocks";
 
-// How often the panel asks the backend for the job state. A full RPL season
-// import takes ~45 s, so a few seconds is responsive without being chatty — and
-// polling stops entirely once the job reaches a terminal status.
+// How often the panel asks the backend for the job state. A full season import
+// takes ~40-90 s depending on the league's size, so a few seconds is responsive
+// without being chatty — and polling stops entirely once the job is terminal.
 const POLL_INTERVAL_MS = 2500;
 
-type SeasonChoice = "latest" | "current";
+// The two dynamic season selectors resolve at import time (which season is the
+// latest completed one changes as a season ends); anything else is an explicit
+// fantasy season id from the league's catalogue.
+const LATEST_COMPLETED = "latest";
+const ACTIVE_SEASON = "current";
 
-const SEASON_CHOICES: { value: SeasonChoice; label: string; hint: string }[] = [
-  {
-    value: "latest",
-    label: "Последний завершённый сезон",
-    hint: "Обновляет исторические данные (по умолчанию).",
-  },
-  {
-    value: "current",
-    label: "Активный сезон",
-    hint: "Обновляет текущий турнир: составы, цены и календарь.",
-  },
-];
+/** Translate the season selector into the refresh request body. */
+export function refreshBodyFor(choice: string): RefreshRequestBody {
+  if (choice === ACTIVE_SEASON) return { current: true };
+  if (choice === LATEST_COMPLETED) return {};
+  return { season_id: choice };
+}
 
 export function RefreshPanel({
   initialStatus,
   initialError,
+  competitions = [],
+  initialSlug,
 }: {
   initialStatus: IngestionStatusResponse | null;
   initialError?: string | null;
+  /** The whole catalogue: a league can be imported before it has any data. */
+  competitions?: CompetitionModel[];
+  initialSlug?: string;
 }) {
   const router = useRouter();
   const [status, setStatus] = useState<IngestionStatusResponse | null>(
@@ -54,8 +61,17 @@ export function RefreshPanel({
   );
   const [actionError, setActionError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
-  const [season, setSeason] = useState<SeasonChoice>("latest");
+  const [syncing, setSyncing] = useState(false);
+  const [slug, setSlug] = useState<string>(
+    initialSlug ?? initialStatus?.tournament_slug ?? competitions[0]?.slug ?? "",
+  );
+  const [season, setSeason] = useState<string>(LATEST_COMPLETED);
   const [now, setNow] = useState(() => Date.now());
+
+  const competition =
+    competitions.find((item) => item.slug === slug) ??
+    status?.competition ??
+    null;
 
   // Remembering the job the panel last saw lets it react exactly once to a
   // refresh finishing, instead of re-rendering the server tree on every poll.
@@ -77,8 +93,9 @@ export function RefreshPanel({
   );
 
   const reload = useCallback(async () => {
+    if (!slug) return;
     try {
-      applyStatus(await api.getIngestionStatus());
+      applyStatus(await api.getIngestionStatus(slug));
     } catch (error: unknown) {
       setLoadError(
         error instanceof ApiError
@@ -86,7 +103,7 @@ export function RefreshPanel({
           : "Не удалось получить состояние обновления.",
       );
     }
-  }, [applyStatus]);
+  }, [applyStatus, slug]);
 
   // The timer must not be torn down and rebuilt whenever an unrelated render
   // produces a new `reload` identity, so it is reached through a ref.
@@ -98,9 +115,16 @@ export function RefreshPanel({
   // The server render is a snapshot of the moment the page was requested, and a
   // client-side navigation can reuse a prefetched payload, so the state of an
   // in-flight refresh is revalidated once on mount before any polling starts.
+  // Switching leagues re-runs this: each league has its own job history.
   useEffect(() => {
     void reloadRef.current();
-  }, []);
+  }, [slug]);
+
+  // A season chosen for one league means nothing for another, so the selector
+  // returns to the default whenever the league changes.
+  useEffect(() => {
+    setSeason(LATEST_COMPLETED);
+  }, [slug]);
 
   const polling = shouldPoll(status);
 
@@ -116,13 +140,30 @@ export function RefreshPanel({
 
   const refreshing = polling || starting;
 
+  const syncCatalogue = useCallback(async () => {
+    setSyncing(true);
+    setActionError(null);
+    try {
+      await api.syncCompetitions();
+      // The league list is server-rendered, so it needs a fresh server tree.
+      router.refresh();
+      await reload();
+    } catch (error: unknown) {
+      setActionError(
+        error instanceof ApiError
+          ? error.message
+          : "Не удалось обновить список лиг.",
+      );
+    } finally {
+      setSyncing(false);
+    }
+  }, [reload, router]);
+
   const start = useCallback(async () => {
     setStarting(true);
     setActionError(null);
     try {
-      const job = await api.refreshIngestion(
-        season === "current" ? { current: true } : {},
-      );
+      const job = await api.refreshIngestion(slug, refreshBodyFor(season));
       // Show the queued job immediately; the poller takes over from here.
       setStatus((prev) =>
         prev
@@ -148,7 +189,7 @@ export function RefreshPanel({
     } finally {
       setStarting(false);
     }
-  }, [season, reload]);
+  }, [season, slug, reload]);
 
   if (loadError && !status) {
     return <ErrorState message={loadError} onRetry={() => void reload()} />;
@@ -176,29 +217,71 @@ export function RefreshPanel({
         </div>
 
         <div className="field">
+          <label htmlFor="refresh-league">Лига</label>
+          <select
+            id="refresh-league"
+            data-testid="refresh-league"
+            value={slug}
+            disabled={refreshing || competitions.length === 0}
+            onChange={(event) => setSlug(event.target.value)}
+          >
+            {competitions.length === 0 && <option value={slug}>{slug}</option>}
+            {competitions.map((item) => (
+              <option key={item.slug} value={item.slug}>
+                {item.name}
+                {item.is_imported ? "" : " — ещё не импортирована"}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="field">
           <label htmlFor="refresh-season">Что обновлять</label>
           <select
             id="refresh-season"
             data-testid="refresh-season"
             value={season}
             disabled={refreshing}
-            onChange={(event) => setSeason(event.target.value as SeasonChoice)}
+            onChange={(event) => setSeason(event.target.value)}
           >
-            {SEASON_CHOICES.map((choice) => (
-              <option key={choice.value} value={choice.value}>
-                {choice.label}
-              </option>
-            ))}
+            <option value={LATEST_COMPLETED}>
+              Последний завершённый сезон
+            </option>
+            <option
+              value={ACTIVE_SEASON}
+              disabled={competition ? !competition.has_active_season : false}
+            >
+              Активный сезон
+              {competition && !competition.has_active_season
+                ? " — нет в этой лиге"
+                : ""}
+            </option>
+            {(competition?.available_seasons ?? [])
+              .slice()
+              .reverse()
+              .map((item) => (
+                <option
+                  key={item.fantasy_season_id}
+                  value={item.fantasy_season_id}
+                >
+                  Сезон {item.label}
+                  {item.is_active ? " (идёт)" : ""}
+                </option>
+              ))}
           </select>
         </div>
-        <p className="inline-note">
-          {SEASON_CHOICES.find((choice) => choice.value === season)?.hint}
+        <p className="inline-note" data-testid="refresh-season-hint">
+          {season === LATEST_COMPLETED
+            ? "Обновляет исторические данные (по умолчанию)."
+            : season === ACTIVE_SEASON
+              ? "Обновляет текущий турнир: составы, цены и календарь."
+              : "Импортирует выбранный сезон этой лиги."}
         </p>
 
         <button
           className="btn btn--primary"
           data-testid="refresh-button"
-          disabled={refreshing}
+          disabled={refreshing || !slug}
           onClick={() => void start()}
         >
           {refreshing ? "Обновление идёт…" : "Запустить обновление"}
@@ -206,7 +289,26 @@ export function RefreshPanel({
         <p className="inline-note">
           Импорт и контроль качества выполняются в отдельном процессе. Снапшот
           публикуется только после успешной проверки, поэтому неудачное
-          обновление не портит текущие данные.
+          обновление не портит текущие данные. Блокировка действует на одну лигу,
+          поэтому разные лиги можно обновлять параллельно.
+        </p>
+
+        <button
+          className="btn btn--sm"
+          data-testid="sync-competitions"
+          disabled={syncing}
+          onClick={() => void syncCatalogue()}
+        >
+          {syncing ? "Обновляем список лиг…" : "Обновить список лиг"}
+        </button>
+        <p className="inline-note">
+          Перечитывает у Sports.ru список доступных лиг и их сезонов
+          {competition?.catalogue_synced_at
+            ? `. Последняя синхронизация: ${formatDateTime(
+                competition.catalogue_synced_at,
+              )}`
+            : ""}
+          .
         </p>
 
         {actionError && (
@@ -344,8 +446,16 @@ export function RefreshPanel({
               <span className="v">#{status.snapshot.run_id}</span>
             </div>
             <div className="stat-box">
+              <span className="k">Лига</span>
+              <span className="v" data-testid="refresh-snapshot-league">
+                {status.competition?.name ?? status.tournament_slug}
+              </span>
+            </div>
+            <div className="stat-box">
               <span className="k">Сезон</span>
-              <span className="v">{status.season?.name ?? "—"}</span>
+              <span className="v">
+                {status.season?.label ?? status.season?.name ?? "—"}
+              </span>
             </div>
             <div className="stat-box">
               <span className="k">Данные от</span>

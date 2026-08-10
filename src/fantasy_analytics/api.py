@@ -590,6 +590,7 @@ def create_app(
     def _run_optimizer(
         *,
         run_id: int | None,
+        competition: str | None,
         season: str | None,
         tour: str | None,
         model: str,
@@ -606,6 +607,7 @@ def create_app(
                 run_id=run_id,
                 season_ref=season,
                 tour_ref=tour,
+                competition_ref=competition,
                 model=model,
                 current_squad=current_squad,
                 max_transfers=max_transfers,
@@ -624,6 +626,7 @@ def create_app(
         body = request or SquadRequest()
         return _run_optimizer(
             run_id=body.run_id,
+            competition=body.competition,
             season=body.season,
             tour=body.tour,
             model=body.model,
@@ -643,6 +646,7 @@ def create_app(
     def optimize_transfers(request: TransfersRequest) -> dict[str, Any]:
         return _run_optimizer(
             run_id=request.run_id,
+            competition=request.competition,
             season=request.season,
             tour=request.tour,
             model=request.model,

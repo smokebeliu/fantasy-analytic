@@ -276,14 +276,26 @@ FEATURE_DICTIONARY: tuple[dict[str, str], ...] = (
 # ---------------------------------------------------------------------------
 
 
-def resolve_run(session, run_id: int | None, season_ref: str | None):
+def resolve_run(
+    session,
+    run_id: int | None,
+    season_ref: str | None,
+    competition_ref: str | None = None,
+):
     """Resolve the ingestion run whose snapshot the features are built from.
 
-    With an explicit ``run_id`` that run is used. Otherwise the single active
-    run (published by the quality gate) is selected, optionally filtered to a
-    season referenced by its fantasy/stat id or name.
+    With an explicit ``run_id`` that run is used. Otherwise the active run
+    (published by the quality gate) is selected, narrowed by ``competition_ref``
+    (a tournament slug or fantasy tournament id) and/or a season referenced by its
+    fantasy/stat id or name.
+
+    Once more than one league is imported there is no single active snapshot, so a
+    caller that names neither gets the most recently published one — whichever
+    league that happens to belong to. Both the API and the UI therefore always
+    name the season they mean; the fallback only keeps single-league setups and
+    ad-hoc CLI runs working.
     """
-    from .db.models import IngestionRun
+    from .db.models import Competition, IngestionRun
 
     if run_id is not None:
         run = session.get(IngestionRun, run_id)
@@ -300,17 +312,35 @@ def resolve_run(session, run_id: int | None, season_ref: str | None):
         .where(IngestionRun.is_active.is_(True))
         .order_by(IngestionRun.id.desc())
     )
+    if season_ref is not None or competition_ref is not None:
+        query = query.join(Season, IngestionRun.season_id == Season.id)
     if season_ref is not None:
-        query = query.join(Season, IngestionRun.season_id == Season.id).where(
+        query = query.where(
             (Season.fantasy_season_id == season_ref)
             | (Season.stat_season_id == season_ref)
             | (Season.name == season_ref)
         )
+    if competition_ref is not None:
+        query = query.join(
+            Competition, Season.competition_id == Competition.id
+        ).where(
+            (Competition.slug == competition_ref)
+            | (Competition.fantasy_tournament_id == competition_ref)
+        )
     run = session.execute(query.limit(1)).scalar_one_or_none()
     if run is None:
+        scope = ", ".join(
+            filter(
+                None,
+                [
+                    f"competition '{competition_ref}'" if competition_ref else "",
+                    f"season '{season_ref}'" if season_ref else "",
+                ],
+            )
+        )
         raise FeaturesError(
             "No active snapshot found; run 'fantasy-ingest' then 'fantasy-quality'"
-            + (f" for season '{season_ref}'" if season_ref else "")
+            + (f" for {scope}" if scope else "")
         )
     return run
 
@@ -981,6 +1011,7 @@ def build_feature_dataset(
     run_id: int | None = None,
     season_ref: str | None = None,
     tour_ref: str | None = None,
+    competition_ref: str | None = None,
     now: datetime | None = None,
     feature_version: str = FEATURE_VERSION,
 ) -> dict[str, Any]:
@@ -992,7 +1023,7 @@ def build_feature_dataset(
     """
     generated_at = now or datetime.now(UTC)
     with session_scope(session_factory) as session:
-        run = resolve_run(session, run_id, season_ref)
+        run = resolve_run(session, run_id, season_ref, competition_ref)
         season_id = run.season_id
         season = session.get(Season, season_id)
 

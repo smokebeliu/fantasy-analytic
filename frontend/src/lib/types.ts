@@ -40,7 +40,13 @@ export interface SeasonModel {
   fantasy_season_id: string;
   stat_season_id: string;
   name: string;
+  // Unique within the competition: the season name, with the fantasy id
+  // appended when a tournament splits a season into phases (Champions League
+  // league phase vs knockout stage both being "2025/2026").
+  label: string;
+  competition_id?: number | null;
   competition_name?: string | null;
+  competition_slug?: string | null;
   is_active: boolean;
   starts_at?: string | null;
   ends_at?: string | null;
@@ -54,6 +60,45 @@ export interface SeasonDetailModel extends SeasonModel {
 export interface SeasonListResponse {
   items: SeasonModel[];
   pagination: PageMeta;
+}
+
+// Competitions (leagues). The catalogue lists every league Sports.ru offers;
+// `seasons` holds only what has actually been imported, so the UI can tell a
+// league it can show from one it can merely offer for import.
+
+export interface CatalogueSeasonModel {
+  fantasy_season_id: string;
+  stat_season_id?: string | null;
+  name: string;
+  label: string;
+  is_active: boolean;
+}
+
+export interface CompetitionModel {
+  competition_id: number;
+  fantasy_tournament_id: string;
+  slug: string;
+  name: string;
+  sort_order: number;
+  catalogue_synced_at?: string | null;
+  available_seasons: CatalogueSeasonModel[];
+  has_active_season: boolean;
+  seasons: SeasonModel[];
+  latest_season?: SeasonModel | null;
+  snapshot?: SnapshotMeta | null;
+  is_imported: boolean;
+}
+
+export interface CompetitionListResponse {
+  items: CompetitionModel[];
+  pagination: PageMeta;
+}
+
+export interface CatalogueSyncResponse {
+  synced_at: string;
+  competitions: number;
+  seasons: number;
+  slugs: string[];
 }
 
 export interface TourModel {
@@ -343,6 +388,7 @@ export interface IngestionJob {
 
 export interface IngestionStatusResponse {
   tournament_slug: string;
+  competition?: CompetitionModel | null;
   is_refreshing: boolean;
   active_job?: IngestionJob | null;
   latest_job?: IngestionJob | null;
