@@ -2,16 +2,22 @@
 
 The application serves two concerns behind one app:
 
-* **Admin ingestion (steps 5 and 17).** ``POST /admin/ingestion/rpl/refresh``
-  enqueues a refresh job and returns immediately; the import runs in a separate
-  worker process (:mod:`fantasy_analytics.ingestion_worker`). ``GET
+* **Admin ingestion (steps 5, 17 and 22).**
+  ``POST /admin/ingestion/{tournament_slug}/refresh`` enqueues a refresh job for
+  one league and returns immediately; the import runs in a separate worker
+  process (:mod:`fantasy_analytics.ingestion_worker`). ``GET
   /admin/ingestion/runs/{job_id}`` reports a job's status, and ``GET
-  /admin/ingestion/rpl/status`` answers "is a refresh running, and what does the
-  published snapshot look like" *without* a job id, so the admin screen recovers
-  its state after a page reload.
-* **User read API (step 9).** Read endpoints for seasons, tours, matches and
-  players (with filters, projections and explaining components) plus the
-  ``POST /optimizer/squad`` and ``POST /optimizer/transfers`` endpoints. Every
+  /admin/ingestion/{tournament_slug}/status`` answers "is a refresh running, and
+  what does the published snapshot look like" *without* a job id, so the admin
+  screen recovers its state after a page reload. ``rpl`` is accepted as an alias
+  for the ``russia`` slug the original single-league endpoints used, and
+  ``POST /admin/competitions/sync`` refreshes the catalogue of available leagues.
+* **User read API (steps 9 and 22).** Read endpoints for competitions, seasons,
+  tours, matches and players (with filters, projections and explaining
+  components) plus the ``POST /optimizer/squad`` and ``POST
+  /optimizer/transfers`` endpoints. ``GET /competitions`` is what a league
+  switcher reads: it lists every catalogued league and, for each, the season and
+  snapshot the rest of the UI should use. Every
   read endpoint is served exclusively from PostgreSQL — the Sports.ru GraphQL
   API is never called from a read path. Numbers that vary per snapshot come from
   the single *active* snapshot published by the quality gate; projections come
@@ -39,6 +45,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .api_schemas import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
+    CatalogueSyncResponse,
+    CompetitionListResponse,
+    CompetitionModel,
     ForecastModel,
     IngestionJobModel,
     IngestionStatusResponse,
@@ -56,7 +65,12 @@ from .api_schemas import (
     TourModel,
     TransfersRequest,
 )
-from .client import DEFAULT_ENDPOINT
+from .client import ClientConfig, DEFAULT_ENDPOINT, SportsGraphQLClient
+from .competitions import (
+    CompetitionCatalogueError,
+    DEFAULT_TOURNAMENT_SLUG,
+    sync_catalogue,
+)
 from .db import (
     IngestionJobRepository,
     create_db_engine,
@@ -70,8 +84,13 @@ from .ingestion_progress import STAGES
 from .optimizer import OptimizerError, build_squad_optimization
 from .read_repository import ReadRepository
 
-# The refresh endpoint is tournament-scoped by path; RPL maps to this slug.
-RPL_TOURNAMENT_SLUG = "russia"
+# The legacy admin paths (``/admin/ingestion/rpl/*``) are aliases for this slug;
+# every league is reachable through ``/admin/ingestion/{tournament_slug}/*``.
+RPL_TOURNAMENT_SLUG = DEFAULT_TOURNAMENT_SLUG
+
+# Refreshes the stored league catalogue from Sports.ru. Injectable so tests can
+# drive the admin endpoint without network access.
+SyncCatalogue = Callable[..., dict[str, Any]]
 
 SpawnWorker = Callable[[int], None]
 
@@ -218,19 +237,34 @@ def _page_meta(*, limit: int, offset: int, total: int, count: int) -> dict[str, 
     return {"limit": limit, "offset": offset, "total": total, "count": count}
 
 
+def default_sync_catalogue(
+    session_factory: sessionmaker, *, endpoint: str = DEFAULT_ENDPOINT
+) -> dict[str, Any]:
+    """Refresh the league catalogue from Sports.ru in-process.
+
+    This is the one admin write that calls the GraphQL API inline rather than
+    through the worker: it is a single request that returns in well under a
+    second, so queueing a job for it would only add latency and a poll loop.
+    """
+    client = SportsGraphQLClient(ClientConfig(endpoint=endpoint))
+    return sync_catalogue(client, session_factory)
+
+
 def create_app(
     *,
     session_factory: sessionmaker | None = None,
     spawn_worker: SpawnWorker | None = None,
     ensure_forecasts: EnsureForecasts = ensure_tour_forecasts,
+    sync_competitions: SyncCatalogue | None = None,
     database_url: str | None = None,
     endpoint: str = DEFAULT_ENDPOINT,
 ) -> FastAPI:
     """Build the combined admin + user API.
 
-    ``session_factory``, ``spawn_worker`` and ``ensure_forecasts`` are injectable
-    so tests can use a transactional session, a synchronous/fake worker and a
-    no-op forecast materialiser instead of a subprocess and a real solver run.
+    ``session_factory``, ``spawn_worker``, ``ensure_forecasts`` and
+    ``sync_competitions`` are injectable so tests can use a transactional
+    session, a synchronous/fake worker, a no-op forecast materialiser and a
+    canned catalogue instead of a subprocess, a real solver run and the network.
     """
     if session_factory is None:
         engine = create_db_engine(database_url)
@@ -240,18 +274,24 @@ def create_app(
             default_spawn_worker(
                 job_id, database_url=database_url, endpoint=endpoint
             )
+    if sync_competitions is None:
+        def sync_competitions(factory: sessionmaker) -> dict[str, Any]:
+            return default_sync_catalogue(factory, endpoint=endpoint)
 
     app = FastAPI(
         title="Fantasy Analytics API",
-        version="0.2.0",
+        version="0.3.0",
         description=(
-            "Read API and squad optimizer for the Fantasy RPL pipeline, plus the "
-            "manual ingestion control plane. Read endpoints never call Sports.ru."
+            "Read API and squad optimizer for the Sports.ru fantasy pipeline, "
+            "plus the manual ingestion control plane. Every league in the "
+            "catalogue is served by the same endpoints; read endpoints never "
+            "call Sports.ru."
         ),
     )
     app.state.session_factory = session_factory
     app.state.spawn_worker = spawn_worker
     app.state.ensure_forecasts = ensure_forecasts
+    app.state.sync_competitions = sync_competitions
 
     # ------------------------------------------------------------------
     # Unified error envelope.
@@ -309,15 +349,63 @@ def create_app(
         return run.id if run is not None else None
 
     # ------------------------------------------------------------------
+    # Competitions (leagues).
+    # ------------------------------------------------------------------
+    @app.get(
+        "/competitions", response_model=CompetitionListResponse, tags=["catalog"]
+    )
+    def list_competitions(
+        imported_only: bool = Query(
+            default=False,
+            description="Only leagues that already have an imported season",
+        ),
+        limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
+        offset: int = Query(0, ge=0),
+    ) -> dict[str, Any]:
+        """List the leagues the pipeline knows about.
+
+        This is what a league switcher reads: with ``imported_only=true`` it
+        returns exactly the leagues the read API can serve, each with the season
+        and snapshot the rest of the UI should use.
+        """
+        with session_scope(app.state.session_factory) as session:
+            competitions = ReadRepository(session).list_competitions(
+                imported_only=imported_only
+            )
+        total = len(competitions)
+        page = competitions[offset : offset + limit]
+        return {
+            "items": page,
+            "pagination": _page_meta(
+                limit=limit, offset=offset, total=total, count=len(page)
+            ),
+        }
+
+    @app.get(
+        "/competitions/{slug}", response_model=CompetitionModel, tags=["catalog"]
+    )
+    def get_competition(slug: str) -> dict[str, Any]:
+        with session_scope(app.state.session_factory) as session:
+            competition = ReadRepository(session).get_competition_by_slug(slug)
+        if competition is None:
+            raise api_error(404, f"Competition {slug!r} not found")
+        return competition
+
+    # ------------------------------------------------------------------
     # Seasons.
     # ------------------------------------------------------------------
     @app.get("/seasons", response_model=SeasonListResponse, tags=["catalog"])
     def list_seasons(
+        competition_id: int | None = Query(
+            default=None, description="Restrict to one league"
+        ),
         limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
         offset: int = Query(0, ge=0),
     ) -> dict[str, Any]:
         with session_scope(app.state.session_factory) as session:
-            seasons = ReadRepository(session).list_seasons()
+            seasons = ReadRepository(session).list_seasons(
+                competition_id=competition_id
+            )
         total = len(seasons)
         page = seasons[offset : offset + limit]
         return {
@@ -567,15 +655,38 @@ def create_app(
         )
 
     # ------------------------------------------------------------------
-    # Admin ingestion (step 5).
+    # Admin ingestion (step 5), scoped to one league (step 22).
     # ------------------------------------------------------------------
-    @app.post("/admin/ingestion/rpl/refresh", status_code=202, tags=["admin"])
-    def refresh_rpl(request: RefreshRequest | None = None) -> JSONResponse:
-        body = request or RefreshRequest()
+    def _resolve_tournament_slug(slug: str) -> str:
+        """Map a path slug to a tournament slug, keeping the legacy RPL alias.
+
+        The original endpoints were ``/admin/ingestion/rpl/*`` while the
+        Sports.ru slug is ``russia``; ``rpl`` therefore stays accepted so older
+        clients and bookmarks keep working.
+        """
+        if slug == "rpl":
+            return RPL_TOURNAMENT_SLUG
+        with session_scope(app.state.session_factory) as session:
+            known = ReadRepository(session).list_competitions()
+        if not known:
+            # Nothing catalogued yet: allow any slug so the very first import
+            # (which also seeds the catalogue) is not blocked by a chicken-and-egg.
+            return slug
+        if any(item["slug"] == slug for item in known):
+            return slug
+        raise api_error(
+            404,
+            f"Unknown tournament slug {slug!r}",
+            details={"known_slugs": [item["slug"] for item in known]},
+        )
+
+    def _enqueue_refresh(
+        tournament_slug: str, body: RefreshRequest
+    ) -> JSONResponse:
         with session_scope(app.state.session_factory) as session:
             repo = IngestionJobRepository(session)
             job, created = repo.enqueue(
-                tournament_slug=RPL_TOURNAMENT_SLUG,
+                tournament_slug=tournament_slug,
                 requested_season_id=body.season_id,
                 requested_season_name=body.season_name,
                 use_current_season=body.current,
@@ -597,37 +708,17 @@ def create_app(
         app.state.spawn_worker(payload["id"])
         return JSONResponse(status_code=202, content=jsonable_encoder(payload))
 
-    @app.get(
-        "/admin/ingestion/runs/{job_id}",
-        response_model=IngestionJobModel,
-        tags=["admin"],
-    )
-    def get_run(job_id: int) -> dict[str, Any]:
-        with session_scope(app.state.session_factory) as session:
-            job = IngestionJobRepository(session).get(job_id)
-            if job is None:
-                raise api_error(404, f"Ingestion job {job_id} not found")
-            return _job_to_dict(job)
-
-    @app.get(
-        "/admin/ingestion/rpl/status",
-        response_model=IngestionStatusResponse,
-        tags=["admin"],
-    )
-    def ingestion_status() -> dict[str, Any]:
-        """Report refresh state plus the snapshot and tour the UI should show.
-
-        The admin screen calls this on load (and while polling), so it never has
-        to remember a job id: an in-flight refresh is discovered from the
-        database, which is also what makes a second browser tab consistent.
-        """
+    def _ingestion_status(tournament_slug: str) -> dict[str, Any]:
         with session_scope(app.state.session_factory) as session:
             jobs = IngestionJobRepository(session)
-            active = jobs.active_job(RPL_TOURNAMENT_SLUG)
-            latest = jobs.latest_job(RPL_TOURNAMENT_SLUG)
-            successful = jobs.latest_successful_job(RPL_TOURNAMENT_SLUG)
+            active = jobs.active_job(tournament_slug)
+            latest = jobs.latest_job(tournament_slug)
+            successful = jobs.latest_successful_job(tournament_slug)
+            repo = ReadRepository(session)
+            competition = repo.get_competition_by_slug(tournament_slug)
             payload = {
-                "tournament_slug": RPL_TOURNAMENT_SLUG,
+                "tournament_slug": tournament_slug,
+                "competition": competition,
                 "is_refreshing": active is not None
                 and active.status in ACTIVE_STATUSES,
                 "active_job": _job_summary(active) if active else None,
@@ -640,10 +731,15 @@ def create_app(
                 ],
             }
 
-            # Show the season the read API serves: the most recent one with a
-            # published snapshot, falling back to the most recent import.
-            repo = ReadRepository(session)
-            seasons = repo.list_seasons()
+            # Show the season the read API serves *for this league*: the most
+            # recent one with a published snapshot, falling back to the most
+            # recent import. Before the catalogue is synced the competition row
+            # may not exist yet, in which case there is nothing imported either.
+            seasons = (
+                repo.list_seasons(competition_id=competition["competition_id"])
+                if competition is not None
+                else []
+            )
             season = next(
                 (item for item in seasons if item.get("snapshot")),
                 seasons[0] if seasons else None,
@@ -666,6 +762,69 @@ def create_app(
                 )
             payload["target_tour"] = target_tour
         return payload
+
+    @app.post(
+        "/admin/competitions/sync",
+        response_model=CatalogueSyncResponse,
+        tags=["admin"],
+    )
+    def sync_competition_catalogue() -> dict[str, Any]:
+        """Refresh the catalogue of leagues and their seasons from Sports.ru.
+
+        The only admin call that reaches the GraphQL API inline: it is a single
+        request, and without it a freshly created database has no league list for
+        the switcher or the import screen to offer.
+        """
+        try:
+            return app.state.sync_competitions(app.state.session_factory)
+        except CompetitionCatalogueError as error:
+            raise api_error(
+                502, str(error), type_="upstream_error"
+            ) from error
+
+    @app.post(
+        "/admin/ingestion/{tournament_slug}/refresh",
+        status_code=202,
+        tags=["admin"],
+    )
+    def refresh_competition(
+        tournament_slug: str, request: RefreshRequest | None = None
+    ) -> JSONResponse:
+        """Queue an import of one league's season.
+
+        The job is keyed by ``tournament_slug``, and the ``ingestion_jobs``
+        partial unique index only forbids two concurrent refreshes *of the same
+        league* — so different leagues can be imported in parallel.
+        """
+        return _enqueue_refresh(
+            _resolve_tournament_slug(tournament_slug), request or RefreshRequest()
+        )
+
+    @app.get(
+        "/admin/ingestion/runs/{job_id}",
+        response_model=IngestionJobModel,
+        tags=["admin"],
+    )
+    def get_run(job_id: int) -> dict[str, Any]:
+        with session_scope(app.state.session_factory) as session:
+            job = IngestionJobRepository(session).get(job_id)
+            if job is None:
+                raise api_error(404, f"Ingestion job {job_id} not found")
+            return _job_to_dict(job)
+
+    @app.get(
+        "/admin/ingestion/{tournament_slug}/status",
+        response_model=IngestionStatusResponse,
+        tags=["admin"],
+    )
+    def ingestion_status(tournament_slug: str) -> dict[str, Any]:
+        """Report one league's refresh state plus the snapshot and tour to show.
+
+        The admin screen calls this on load (and while polling), so it never has
+        to remember a job id: an in-flight refresh is discovered from the
+        database, which is also what makes a second browser tab consistent.
+        """
+        return _ingestion_status(_resolve_tournament_slug(tournament_slug))
 
     return app
 

@@ -73,7 +73,16 @@ class SeasonModel(BaseModel):
     fantasy_season_id: str
     stat_season_id: str
     name: str
+    label: str = Field(
+        description=(
+            "Display name, unique within the competition: the season name, with "
+            "the fantasy id appended when a tournament splits one season into "
+            "phases (Champions League league phase vs knockout stage)"
+        )
+    )
+    competition_id: int | None = None
     competition_name: str | None = None
+    competition_slug: str | None = None
     is_active: bool
     starts_at: str | None = None
     ends_at: str | None = None
@@ -87,6 +96,60 @@ class SeasonDetailModel(SeasonModel):
 class SeasonListResponse(BaseModel):
     items: list[SeasonModel]
     pagination: PageMeta
+
+
+# ---------------------------------------------------------------------------
+# Competitions (step 22).
+# ---------------------------------------------------------------------------
+class CatalogueSeasonModel(BaseModel):
+    """A season Sports.ru exposes for a league, imported or not."""
+
+    fantasy_season_id: str
+    stat_season_id: str | None = None
+    name: str
+    label: str
+    is_active: bool
+
+
+class CompetitionModel(BaseModel):
+    """One fantasy league with its catalogue and what has been imported."""
+
+    competition_id: int
+    fantasy_tournament_id: str
+    slug: str = Field(description="Tournament slug, e.g. russia, spain, italy")
+    name: str
+    sort_order: int
+    catalogue_synced_at: str | None = None
+    available_seasons: list[CatalogueSeasonModel] = Field(
+        default_factory=list,
+        description="Seasons Sports.ru offers for this league, oldest first",
+    )
+    has_active_season: bool = Field(
+        description="Whether a season is currently in progress (affects 'refresh active season')"
+    )
+    seasons: list[SeasonModel] = Field(
+        default_factory=list, description="Imported seasons, newest first"
+    )
+    latest_season: SeasonModel | None = Field(
+        default=None,
+        description="Season the read API serves: the newest published one",
+    )
+    snapshot: SnapshotMeta | None = None
+    is_imported: bool
+
+
+class CompetitionListResponse(BaseModel):
+    items: list[CompetitionModel]
+    pagination: PageMeta
+
+
+class CatalogueSyncResponse(BaseModel):
+    """Result of refreshing the league catalogue from Sports.ru."""
+
+    synced_at: str
+    competitions: int
+    seasons: int
+    slugs: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +476,10 @@ class IngestionStatusResponse(BaseModel):
     """
 
     tournament_slug: str
+    competition: CompetitionModel | None = Field(
+        default=None,
+        description="The league this status describes, once its catalogue is known",
+    )
     is_refreshing: bool = Field(
         description="True while a pending/running job exists for the tournament"
     )
@@ -440,6 +507,10 @@ __all__ = [
     "ErrorResponse",
     "SnapshotMeta",
     "PageMeta",
+    "CatalogueSeasonModel",
+    "CatalogueSyncResponse",
+    "CompetitionListResponse",
+    "CompetitionModel",
     "SeasonModel",
     "SeasonDetailModel",
     "SeasonListResponse",

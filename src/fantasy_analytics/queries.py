@@ -1,5 +1,41 @@
 """GraphQL operations used by the discovery prototype."""
 
+# Every fantasy tournament Sports.ru offers, with the seasons each one exposes.
+# This is the only operation that answers "which leagues can we import?" — the
+# tournament endpoint itself has to be addressed by a slug that is already known.
+TOURNAMENTS_QUERY = """
+query DiscoverTournaments {
+  fantasyQueries {
+    tournamentsList {
+      id
+      name
+      webName
+      seasons {
+        id
+        isActive
+        statObject {
+          id
+          name
+        }
+      }
+      currentSeason {
+        id
+        isActive
+        statObject {
+          id
+          name
+        }
+        currentTour {
+          id
+          name
+          status
+        }
+      }
+    }
+  }
+}
+"""
+
 TOURNAMENT_QUERY = """
 query DiscoverTournament($id: ID!) {
   fantasyQueries {

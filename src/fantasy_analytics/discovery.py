@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .client import SportsGraphQLClient
+from .competitions import DEFAULT_TOURNAMENT_SLUG
 from .queries import (
     PLAYER_HISTORY_QUERY,
     PLAYERS_QUERY,
@@ -25,7 +26,7 @@ class DiscoveryError(RuntimeError):
 @dataclass(frozen=True)
 class DiscoveryOptions:
     output_dir: Path
-    tournament_slug: str = "russia"
+    tournament_slug: str = DEFAULT_TOURNAMENT_SLUG
     season_id: str | None = None
     season_name: str | None = None
     use_current_season: bool = False

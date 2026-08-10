@@ -8,6 +8,11 @@ from the single *active* snapshot published by the quality gate (step 4).
 Projections and their explaining components are served from the persisted
 ``player_forecasts`` rows (step 7) for a given tour and model.
 
+Everything is scoped by season, and a season belongs to exactly one competition,
+so the same queries serve every imported league (step 22). :meth:`
+ReadRepository.list_competitions` is the entry point a league switcher needs: it
+joins the stored catalogue of leagues to what has actually been imported.
+
 Every player also carries a ``prior_season`` block: what the same person did in
 the previous season, resolved through the cross-season identity
 (``players.stat_player_id``) that step 14 already relies on. Early in a new
@@ -98,40 +103,166 @@ class ReadRepository:
         }
 
     # ------------------------------------------------------------------
+    # Competitions.
+    # ------------------------------------------------------------------
+    def list_competitions(
+        self, *, imported_only: bool = False
+    ) -> list[dict[str, Any]]:
+        """List the leagues in the catalogue with what has been imported.
+
+        Every league Sports.ru offers appears once the catalogue has been synced
+        (:mod:`fantasy_analytics.competitions`); ``seasons`` holds only the
+        seasons an import actually produced, so the switcher can show a league as
+        available-but-empty and the admin screen can offer it for import.
+        ``imported_only`` narrows the result to what the read API can serve,
+        which is what a league switcher wants.
+        """
+        competitions = list(
+            self._session.execute(
+                select(Competition).order_by(Competition.sort_order, Competition.id)
+            ).scalars()
+        )
+        seasons_by_competition: dict[int, list[dict[str, Any]]] = {}
+        for season in self.list_seasons():
+            seasons_by_competition.setdefault(season["competition_id"], []).append(
+                season
+            )
+
+        payload: list[dict[str, Any]] = []
+        for competition in competitions:
+            seasons = seasons_by_competition.get(competition.id, [])
+            if imported_only and not seasons:
+                continue
+            # Prefer a season the read API can actually serve; a league whose
+            # only import was blocked by the quality gate still reports its
+            # newest season so the UI can say what it tried to publish.
+            published = next(
+                (season for season in seasons if season.get("snapshot")), None
+            )
+            latest = published or (seasons[0] if seasons else None)
+            available = list(competition.available_seasons or [])
+            payload.append(
+                {
+                    "competition_id": competition.id,
+                    "fantasy_tournament_id": competition.fantasy_tournament_id,
+                    "slug": competition.slug,
+                    "name": competition.name,
+                    "sort_order": competition.sort_order,
+                    "catalogue_synced_at": _iso(competition.catalogue_synced_at),
+                    "available_seasons": available,
+                    "has_active_season": any(
+                        bool(season.get("is_active")) for season in available
+                    ),
+                    "seasons": seasons,
+                    "latest_season": latest,
+                    "snapshot": (latest or {}).get("snapshot"),
+                    "is_imported": bool(seasons),
+                }
+            )
+        return payload
+
+    def get_competition_by_slug(self, slug: str) -> dict[str, Any] | None:
+        return next(
+            (item for item in self.list_competitions() if item["slug"] == slug), None
+        )
+
+    # ------------------------------------------------------------------
     # Seasons.
     # ------------------------------------------------------------------
-    def _season_dict(self, season: Season, competition_name: str | None) -> dict[str, Any]:
+    def _season_dict(
+        self,
+        season: Season,
+        competition: Competition | None,
+        label: str | None = None,
+    ) -> dict[str, Any]:
         active_run = self.resolve_active_run(season.id)
         return {
             "season_id": season.id,
             "fantasy_season_id": season.fantasy_season_id,
             "stat_season_id": season.stat_season_id,
             "name": season.name,
-            "competition_name": competition_name,
+            "label": label or season.name,
+            "competition_id": season.competition_id,
+            "competition_name": competition.name if competition else None,
+            "competition_slug": competition.slug if competition else None,
             "is_active": season.is_active,
             "starts_at": _iso(season.starts_at),
             "ends_at": _iso(season.ends_at),
             "snapshot": self.snapshot_meta(active_run),
         }
 
-    def list_seasons(self) -> list[dict[str, Any]]:
+    def _labels_for(self, seasons: Sequence[Season]) -> dict[int, str]:
+        """Label each season uniquely within its competition.
+
+        A stat season name repeats inside a competition whenever a tournament is
+        split into phases — the Champions and Europa League publish a league-phase
+        and a knockout season per year, both named e.g. ``2025/2026``. Only those
+        get the fantasy season id appended, so domestic leagues stay clean.
+        """
+        counts: dict[tuple[int, str], int] = {}
+        for season in seasons:
+            key = (season.competition_id, season.name)
+            counts[key] = counts.get(key, 0) + 1
+        return {
+            season.id: (
+                f"{season.name} (#{season.fantasy_season_id})"
+                if counts[(season.competition_id, season.name)] > 1
+                else season.name
+            )
+            for season in seasons
+        }
+
+    def list_seasons(
+        self, *, competition_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        conditions = []
+        if competition_id is not None:
+            conditions.append(Season.competition_id == competition_id)
         rows = self._session.execute(
-            select(Season, Competition.name)
+            select(Season, Competition)
             .join(Competition, Season.competition_id == Competition.id)
-            .order_by(Season.starts_at.is_(None), Season.starts_at.desc(), Season.id.desc())
+            .where(*conditions)
+            .order_by(
+                Season.starts_at.is_(None), Season.starts_at.desc(), Season.id.desc()
+            )
         ).all()
-        return [self._season_dict(season, name) for season, name in rows]
+        # Labels must be unique per competition, so they are derived from every
+        # season of the competitions in the result, not from the current page.
+        labels = self._labels_for(
+            list(
+                self._session.execute(
+                    select(Season).where(
+                        Season.competition_id.in_(
+                            {season.competition_id for season, _ in rows} or {-1}
+                        )
+                    )
+                ).scalars()
+            )
+        )
+        return [
+            self._season_dict(season, competition, labels.get(season.id))
+            for season, competition in rows
+        ]
 
     def get_season(self, season_id: int) -> dict[str, Any] | None:
         row = self._session.execute(
-            select(Season, Competition.name)
+            select(Season, Competition)
             .join(Competition, Season.competition_id == Competition.id)
             .where(Season.id == season_id)
         ).one_or_none()
         if row is None:
             return None
-        season, competition_name = row
-        payload = self._season_dict(season, competition_name)
+        season, competition = row
+        labels = self._labels_for(
+            list(
+                self._session.execute(
+                    select(Season).where(
+                        Season.competition_id == season.competition_id
+                    )
+                ).scalars()
+            )
+        )
+        payload = self._season_dict(season, competition, labels.get(season.id))
         rules = self._session.get(SeasonRules, season_id)
         if rules is not None:
             payload["rules"] = {

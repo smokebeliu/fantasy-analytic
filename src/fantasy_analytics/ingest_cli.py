@@ -8,6 +8,7 @@ import sys
 from typing import Sequence
 
 from .client import ClientConfig, DEFAULT_ENDPOINT, SportsGraphQLClient
+from .competitions import DEFAULT_TOURNAMENT_SLUG
 from .db import create_db_engine, create_session_factory
 from .ingestion import IngestionOptions, run_ingestion
 
@@ -23,8 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fantasy-ingest",
         description=(
-            "Import a full Sports.ru Fantasy RPL season into PostgreSQL "
-            "(season, tours, matches, clubs and every player)."
+            "Import a full Sports.ru fantasy season into PostgreSQL "
+            "(season, tours, matches, clubs and every player). Pick the league "
+            "with --tournament; 'fantasy-competitions list' shows the slugs."
         ),
     )
     parser.add_argument(
@@ -38,8 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--tournament",
-        default="russia",
-        help="Fantasy tournament slug (default: russia)",
+        default=DEFAULT_TOURNAMENT_SLUG,
+        help=(
+            "Fantasy tournament slug, e.g. russia, spain, italy, england, "
+            f"champions-league (default: {DEFAULT_TOURNAMENT_SLUG})"
+        ),
     )
     season_group = parser.add_mutually_exclusive_group()
     season_group.add_argument("--season-id", help="Exact fantasy season ID")
