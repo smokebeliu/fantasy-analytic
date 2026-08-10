@@ -977,6 +977,42 @@ class FixtureAwareOptimizerTest(unittest.TestCase):
         violations = validate_squad(solution, self.rules)
         self.assertTrue(any("fixture cancellation" in v for v in violations))
 
+    def test_validator_prices_the_cancellation_from_the_unrounded_sum(self) -> None:
+        # round(w * round(x, 4), 4) can land a whole least-significant digit
+        # away from round(w * x, 4). The validator used to do the former and the
+        # report the latter, so a perfectly legal squad was rejected as invalid
+        # and took a whole backtest run down with it.
+        starters = [
+            {
+                "player_season_id": index,
+                "role": role,
+                "club_id": club,
+                "price": 5.0,
+                "expected_points": 4.0,
+                "is_starter": True,
+                "match_id": 77,
+                "goal_upside": upside,
+                "shutout_stake": stake,
+            }
+            for index, (role, club, upside, stake) in enumerate(
+                (
+                    ("FORWARD", 1, 2.385049, 0.0),
+                    ("DEFENDER", 2, 0.0, 1.0),
+                ),
+                start=1,
+            )
+        ]
+        weight = 0.25
+        solution = {
+            "squad": starters,
+            "fixture_penalty": round(weight * 2.385049, 4),
+            "objective_expected_points": 8.0,
+            "objective_score": round(8.0 - round(weight * 2.385049, 4), 4),
+            "fixtures": {"conflict_weight": weight, "cancellation": 2.385049},
+        }
+        violations = validate_squad(solution, self.rules)
+        self.assertFalse([v for v in violations if "fixture" in v])
+
     def test_validator_catches_a_wrong_objective_score(self) -> None:
         solution = solve_squad(_duel_pool(7.0), self.rules)
         solution["objective_score"] = solution["objective_expected_points"]

@@ -63,7 +63,7 @@ from .forecast import MODEL_EVENT, ForecastError, build_forecast_dataset
 
 # Bumped whenever the optimizer model or its constraints change so squads built
 # by different code revisions never get silently compared.
-OPTIMIZER_VERSION = "1.3.1"
+OPTIMIZER_VERSION = "1.3.2"
 
 # Search configuration, in *deterministic* time: a machine-independent measure of
 # work rather than wall clock, so the same request returns the same squad on any
@@ -1180,16 +1180,19 @@ def validate_squad(
     if fixtures is not None:
         weight = float(fixtures.get("conflict_weight") or 0.0)
         exposures = [_exposure_from_entry(player) for player in starters]
-        recomputed = round(
-            sum(amount for _, _, amount in fixture_conflicts(exposures)), 4
-        )
+        cancellation = sum(amount for _, _, amount in fixture_conflicts(exposures))
+        recomputed = round(cancellation, 4)
         reported = round(float(fixtures.get("cancellation") or 0.0), 4)
         if abs(recomputed - reported) > 1e-4:
             violations.append(
                 f"fixture cancellation {reported} does not match the "
                 f"recomputed {recomputed}"
             )
-        penalty = round(weight * recomputed, 4)
+        # Priced from the full sum, not from its rounded display value: rounding
+        # first and multiplying after can land a whole least-significant digit
+        # away from what the report shows, which read as a rule violation and
+        # aborted an otherwise valid squad.
+        penalty = round(weight * cancellation, 4)
         reported_penalty = round(float(solution.get("fixture_penalty") or 0.0), 4)
         if abs(penalty - reported_penalty) > 1e-4:
             violations.append(
