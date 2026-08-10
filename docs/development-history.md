@@ -1413,7 +1413,7 @@
   - `PYTHONPATH=src python3 -m unittest discover -s tests` — 314 тестов, OK
     (было 285; добавлены `test_forecast_service.py`, пары замен, бюджет поиска,
     лексикографическая цель, чтение прошлого сезона).
-  - `npm test` во `frontend` — 84 теста, OK (было 64; добавлены
+  - `npm test` во `frontend` — 83 теста, OK (было 64; добавлены
     `PlayerHoverCard.test.tsx`, `PlayerCard.test.tsx` и покрытие плана замен).
   - `npm run typecheck` — чисто.
   - `npm run e2e` — 22 passed, 1 skipped (живой импорт по флагу).
