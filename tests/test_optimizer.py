@@ -1237,6 +1237,65 @@ class OptimizerIntegrationTest(unittest.TestCase):
             )
         self.assertIn("does-not-exist", str(ctx.exception))
 
+    def test_end_to_end_locked_blank_fixture_player(self) -> None:
+        # Move the only tour fixture off club A so its forward has a price and a
+        # club but no match — the same blank-week case that used to reject a pin
+        # with "not selectable". Locking that forward must still keep him and
+        # fill the remaining slot from clubs that do play.
+        season_id = self._scalar("SELECT id FROM seasons LIMIT 1")
+        club_b = self._scalar(
+            "SELECT club_id FROM season_clubs WHERE fantasy_team_id = '20'"
+        )
+        club_c = self._exec(
+            """
+            INSERT INTO clubs (stat_team_id, canonical_name)
+            VALUES ('club_c', 'Клуб C')
+            RETURNING id
+            """
+        ).scalar_one()
+        self._exec(
+            """
+            INSERT INTO season_clubs
+                (season_id, club_id, fantasy_team_id, display_name)
+            VALUES (:season, :club, '30', 'Клуб C')
+            """,
+            season=season_id,
+            club=club_c,
+        )
+        tour_id = self._scalar(
+            "SELECT id FROM fantasy_tours WHERE fantasy_tour_id = '1773'"
+        )
+        self._exec("DELETE FROM matches WHERE tour_id = :tour", tour=tour_id)
+        self._exec(
+            """
+            INSERT INTO matches
+                (season_id, tour_id, stat_match_id, scheduled_at,
+                 home_club_id, away_club_id, home_score, away_score)
+            VALUES (:season, :tour, '900003', '2025-07-25T16:00:00Z',
+                    :home, :away, NULL, NULL)
+            """,
+            season=season_id,
+            tour=tour_id,
+            home=club_b,
+            away=club_c,
+        )
+
+        report = build_squad_optimization(
+            self.session_factory, tour_ref="1773", locked=["111"]
+        )
+        squad = report["solution"]["squad"]
+        locked_entry = next(p for p in squad if p["fantasy_player_id"] == "111")
+        self.assertTrue(locked_entry["is_locked"])
+        self.assertEqual(locked_entry["expected_points"], 0.0)
+        self.assertIsNone(locked_entry["match_id"])
+        self.assertEqual(locked_entry["stat_source"], "blank_fixture")
+        self.assertEqual(report["counts"]["locked"], 1)
+        self.assertTrue(report["valid"])
+        self.assertEqual(
+            {p["fantasy_player_id"] for p in squad},
+            {"111", "222"},
+        )
+
     def test_finished_season_without_tour_raises(self) -> None:
         self._exec("UPDATE fantasy_tours SET status = 'FINISHED'")
         with self.assertRaises(OptimizerError):

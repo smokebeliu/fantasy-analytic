@@ -47,15 +47,23 @@ from datetime import UTC, datetime
 from typing import Any, Iterable, Sequence
 
 from ortools.sat.python import cp_model
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from .db import session_scope
-from .db.models import FantasyTour, SeasonRules
+from .db.models import (
+    FantasyPlayerSnapshot,
+    FantasyTour,
+    Player,
+    PlayerSeason,
+    SeasonClub,
+    SeasonRules,
+)
 from .forecast import MODEL_EVENT, ForecastError, build_forecast_dataset
 
 # Bumped whenever the optimizer model or its constraints change so squads built
 # by different code revisions never get silently compared.
-OPTIMIZER_VERSION = "1.3.0"
+OPTIMIZER_VERSION = "1.3.1"
 
 # Search configuration, in *deterministic* time: a machine-independent measure of
 # work rather than wall clock, so the same request returns the same squad on any
@@ -1293,9 +1301,157 @@ def _resolve_locked_refs(
         listed = ", ".join(sorted(unknown))
         raise OptimizerError(
             f"{label} player(s) {listed} are not selectable for this tour "
-            "(unknown id, or no price/fixture in the candidate pool)"
+            "(unknown id, or no price/club in the active snapshot)"
         )
     return resolved
+
+
+def _unresolved_pin_refs(
+    refs: Sequence[str | int] | None, candidates: Sequence[Candidate]
+) -> list[str]:
+    """Return pin references that are not yet represented in ``candidates``."""
+    if not refs:
+        return []
+    by_fantasy = {
+        c.fantasy_player_id
+        for c in candidates
+        if c.fantasy_player_id is not None
+    }
+    known_season = {c.player_season_id for c in candidates}
+    missing: list[str] = []
+    for ref in refs:
+        ref_str = str(ref)
+        if ref_str in by_fantasy:
+            continue
+        if ref_str.isdigit() and int(ref_str) in known_season:
+            continue
+        missing.append(ref_str)
+    return missing
+
+
+def _load_blank_candidates_for_refs(
+    session,
+    *,
+    season_id: int,
+    run_id: int,
+    refs: Sequence[str],
+) -> list[Candidate]:
+    """Build zero-point candidates for priced players missing a tour fixture.
+
+    Forecast rows only cover clubs that play this tour. A manager who pins a
+    player through a blank (or a not-yet-scheduled fixture) still needs that
+    player in the pool so the solver can keep them and fill the rest. Players
+    without a price or club cannot enter the budget/club constraints and are
+    skipped here; ``_resolve_locked_refs`` then reports them as unknown.
+    """
+    if not refs:
+        return []
+
+    fantasy_ids = list(dict.fromkeys(refs))
+    season_ids = [int(ref) for ref in fantasy_ids if ref.isdigit()]
+    identity = PlayerSeason.fantasy_player_id.in_(fantasy_ids)
+    if season_ids:
+        identity = identity | PlayerSeason.id.in_(season_ids)
+
+    rows = session.execute(
+        select(
+            PlayerSeason.id,
+            PlayerSeason.fantasy_player_id,
+            Player.canonical_name,
+            PlayerSeason.role,
+            SeasonClub.club_id,
+            SeasonClub.display_name,
+            FantasyPlayerSnapshot.price,
+        )
+        .join(Player, PlayerSeason.player_id == Player.id)
+        .join(
+            SeasonClub,
+            PlayerSeason.current_season_club_id == SeasonClub.id,
+            isouter=True,
+        )
+        .join(
+            FantasyPlayerSnapshot,
+            (FantasyPlayerSnapshot.player_season_id == PlayerSeason.id)
+            & (FantasyPlayerSnapshot.ingestion_run_id == run_id),
+            isouter=True,
+        )
+        .where(PlayerSeason.season_id == season_id, identity)
+    ).all()
+
+    blanks: list[Candidate] = []
+    seen: set[int] = set()
+    for (
+        player_season_id,
+        fantasy_player_id,
+        player_name,
+        role,
+        club_id,
+        club_name,
+        price,
+    ) in rows:
+        if player_season_id in seen:
+            continue
+        if price is None or club_id is None or role not in ROLES:
+            continue
+        seen.add(player_season_id)
+        blanks.append(
+            Candidate(
+                player_season_id=int(player_season_id),
+                fantasy_player_id=fantasy_player_id,
+                player_name=player_name,
+                role=role,
+                club_id=int(club_id),
+                club_name=club_name,
+                price=float(price),
+                expected_points=0.0,
+                match_id=None,
+                opponent_club_id=None,
+                goal_upside=0.0,
+                shutout_stake=0.0,
+                opponent_name=None,
+                is_home=None,
+                p_appearance=None,
+                expected_minutes=None,
+                # Provenance: not a forecast row — the club has no fixture this
+                # tour, so the pin is held at zero expected points.
+                stat_source="blank_fixture",
+                is_newcomer=None,
+            )
+        )
+    blanks.sort(key=lambda c: c.player_season_id)
+    return blanks
+
+
+def _extend_candidates_for_pins(
+    session,
+    candidates: Sequence[Candidate],
+    *,
+    season_id: int,
+    run_id: int,
+    locked: Sequence[str | int] | None,
+    locked_starters: Sequence[str | int] | None,
+) -> list[Candidate]:
+    """Add blank-week stubs so locked players without a fixture stay selectable."""
+    missing = _unresolved_pin_refs(
+        [*(locked or ()), *(locked_starters or ())], candidates
+    )
+    if not missing:
+        return list(candidates)
+
+    known = {c.player_season_id for c in candidates}
+    extras = [
+        blank
+        for blank in _load_blank_candidates_for_refs(
+            session, season_id=season_id, run_id=run_id, refs=missing
+        )
+        if blank.player_season_id not in known
+    ]
+    if not extras:
+        return list(candidates)
+
+    merged = list(candidates) + extras
+    merged.sort(key=lambda c: c.player_season_id)
+    return merged
 
 
 def build_squad_optimization(
@@ -1322,7 +1478,8 @@ def build_squad_optimization(
     ``(run_id, tour, model, optimizer, fixture_conflict_weight, solve_limit)``.
     When ``current_squad`` is given the optimizer runs in limited-transfers mode;
     ``locked``/``locked_starters``/``formation`` pin the user's own choices into
-    either mode.
+    either mode. Pins whose club has no fixture this tour are kept as zero-point
+    candidates so "fill around locked" still works through a blank.
     """
     generated_at = now or datetime.now(UTC)
     try:
@@ -1338,7 +1495,7 @@ def build_squad_optimization(
         raise OptimizerError(str(error)) from error
 
     candidates = candidates_from_forecast(forecast["rows"], model)
-    if not candidates:
+    if not candidates and not (locked or locked_starters):
         raise OptimizerError(
             f"No priced candidates for model {model!r} in the target tour"
         )
@@ -1346,6 +1503,19 @@ def build_squad_optimization(
     with session_scope(session_factory) as session:
         rules = load_squad_rules(
             session, forecast["season_id"], forecast["tour"]["tour_id"]
+        )
+        candidates = _extend_candidates_for_pins(
+            session,
+            candidates,
+            season_id=forecast["season_id"],
+            run_id=forecast["run_id"],
+            locked=locked,
+            locked_starters=locked_starters,
+        )
+
+    if not candidates:
+        raise OptimizerError(
+            f"No priced candidates for model {model!r} in the target tour"
         )
 
     mode = "transfers" if current_squad is not None else "squad"
