@@ -395,6 +395,57 @@ class TransfersRequest(SquadRequest):
     )
 
 
+class ImportSquadRequest(BaseModel):
+    """Load a manager's Sports.ru team from its public URL into the builder."""
+
+    url: str = Field(
+        min_length=1,
+        description=(
+            "Public team page, e.g. https://www.sports.ru/fantasy/football/"
+            "portugal/588960/, or a bare squad id"
+        ),
+    )
+    season_id: int = Field(description="Internal season the players are resolved in")
+    tour_id: int | None = Field(
+        default=None,
+        description="Tour whose prices and projections are attached to the players",
+    )
+    competition: str | None = Field(
+        default=None,
+        description=(
+            "Expected league slug. The import is rejected when the URL or the "
+            "remote team belongs to a different league"
+        ),
+    )
+    model: ForecastModel = Field(
+        default="poisson_events",
+        description="Forecast model attached to the resolved players",
+    )
+
+
+class MissingImportedPlayer(BaseModel):
+    fantasy_player_id: str
+    player_name: str | None = None
+    role: str | None = None
+
+
+class RemoteTourRef(BaseModel):
+    fantasy_tour_id: str
+    name: str
+    status: str
+
+
+class ImportSquadResponse(BaseModel):
+    squad_id: str
+    squad_name: str
+    competition_slug: str
+    competition_name: str | None = None
+    remote_season_id: str
+    remote_tour: RemoteTourRef | None = None
+    players: list[PlayerModel]
+    missing: list[MissingImportedPlayer] = Field(default_factory=list)
+
+
 class SquadPlayerModel(BaseModel):
     player_season_id: int
     fantasy_player_id: str | None = None
@@ -534,6 +585,10 @@ __all__ = [
     "PlayerListResponse",
     "SquadRequest",
     "TransfersRequest",
+    "ImportSquadRequest",
+    "ImportSquadResponse",
+    "MissingImportedPlayer",
+    "RemoteTourRef",
     "SquadPlayerModel",
     "OptimizerResponse",
     "IngestionJobModel",

@@ -17,9 +17,10 @@ The application serves two concerns behind one app:
   components) plus the ``POST /optimizer/squad`` and ``POST
   /optimizer/transfers`` endpoints. ``GET /competitions`` is what a league
   switcher reads: it lists every catalogued league and, for each, the season and
-  snapshot the rest of the UI should use. Every
-  read endpoint is served exclusively from PostgreSQL — the Sports.ru GraphQL
-  API is never called from a read path. Numbers that vary per snapshot come from
+  snapshot the rest of the UI should use. Catalog read endpoints are served
+  exclusively from PostgreSQL. ``POST /squads/import`` is the exception: it
+  fetches one public Sports.ru team page so the builder can start from the
+  manager's current squad. Numbers that vary per snapshot come from
   the single *active* snapshot published by the quality gate; projections come
   from the persisted ``player_forecasts`` rows.
 
@@ -49,6 +50,8 @@ from .api_schemas import (
     CompetitionListResponse,
     CompetitionModel,
     ForecastModel,
+    ImportSquadRequest,
+    ImportSquadResponse,
     IngestionJobModel,
     IngestionStatusResponse,
     MatchListResponse,
@@ -65,7 +68,12 @@ from .api_schemas import (
     TourModel,
     TransfersRequest,
 )
-from .client import ClientConfig, DEFAULT_ENDPOINT, SportsGraphQLClient
+from .client import (
+    ClientConfig,
+    DEFAULT_ENDPOINT,
+    GraphQLRequestError,
+    SportsGraphQLClient,
+)
 from .competitions import (
     CompetitionCatalogueError,
     DEFAULT_TOURNAMENT_SLUG,
@@ -82,7 +90,14 @@ from .db.models import IngestionJob
 from .forecast_service import ensure_tour_forecasts
 from .ingestion_progress import STAGES
 from .optimizer import OptimizerError, build_squad_optimization
+from .queries import LEAGUE_PROBE_QUERY, SQUAD_QUERY
 from .read_repository import ReadRepository
+from .squad_import import (
+    SquadImportError,
+    import_squad_from_url,
+    parse_squad_url,
+    slugs_match,
+)
 
 # The legacy admin paths (``/admin/ingestion/rpl/*``) are aliases for this slug;
 # every league is reachable through ``/admin/ingestion/{tournament_slug}/*``.
@@ -97,6 +112,10 @@ SpawnWorker = Callable[[int], None]
 # Materialises the projections of one (run, tour) pair before a player read is
 # answered; see :mod:`fantasy_analytics.forecast_service`.
 EnsureForecasts = Callable[..., int]
+
+# Live Sports.ru lookups used by ``POST /squads/import``. Injectable so tests
+# never need the network.
+FetchSquad = Callable[[str], dict[str, Any]]
 
 _STATUS_ERROR_TYPES = {
     400: "bad_request",
@@ -237,6 +256,21 @@ def _page_meta(*, limit: int, offset: int, total: int, count: int) -> dict[str, 
     return {"limit": limit, "offset": offset, "total": total, "count": count}
 
 
+def default_fetch_squad(squad_id: str, *, endpoint: str = DEFAULT_ENDPOINT) -> dict[str, Any]:
+    """Fetch one public Sports.ru team by squad id."""
+    client = SportsGraphQLClient(ClientConfig(endpoint=endpoint))
+    return client.execute(SQUAD_QUERY, {"squadID": squad_id})
+
+
+def default_fetch_league(league_id: str, *, endpoint: str = DEFAULT_ENDPOINT) -> dict[str, Any]:
+    """Probe whether an id is a Sports.ru fantasy league rather than a team."""
+    client = SportsGraphQLClient(ClientConfig(endpoint=endpoint))
+    try:
+        return client.execute(LEAGUE_PROBE_QUERY, {"id": league_id})
+    except GraphQLRequestError:
+        return {"data": {"fantasyQueries": {"league": None}}}
+
+
 def default_sync_catalogue(
     session_factory: sessionmaker, *, endpoint: str = DEFAULT_ENDPOINT
 ) -> dict[str, Any]:
@@ -256,15 +290,18 @@ def create_app(
     spawn_worker: SpawnWorker | None = None,
     ensure_forecasts: EnsureForecasts = ensure_tour_forecasts,
     sync_competitions: SyncCatalogue | None = None,
+    fetch_squad: FetchSquad | None = None,
+    fetch_league: FetchSquad | None = None,
     database_url: str | None = None,
     endpoint: str = DEFAULT_ENDPOINT,
 ) -> FastAPI:
     """Build the combined admin + user API.
 
-    ``session_factory``, ``spawn_worker``, ``ensure_forecasts`` and
-    ``sync_competitions`` are injectable so tests can use a transactional
-    session, a synchronous/fake worker, a no-op forecast materialiser and a
-    canned catalogue instead of a subprocess, a real solver run and the network.
+    ``session_factory``, ``spawn_worker``, ``ensure_forecasts``,
+    ``sync_competitions``, ``fetch_squad`` and ``fetch_league`` are injectable
+    so tests can use a transactional session, a synchronous/fake worker, a
+    no-op forecast materialiser, a canned catalogue and a fake Sports.ru team
+    instead of a subprocess, a real solver run and the network.
     """
     if session_factory is None:
         engine = create_db_engine(database_url)
@@ -277,6 +314,12 @@ def create_app(
     if sync_competitions is None:
         def sync_competitions(factory: sessionmaker) -> dict[str, Any]:
             return default_sync_catalogue(factory, endpoint=endpoint)
+    if fetch_squad is None:
+        def fetch_squad(squad_id: str) -> dict[str, Any]:
+            return default_fetch_squad(squad_id, endpoint=endpoint)
+    if fetch_league is None:
+        def fetch_league(league_id: str) -> dict[str, Any]:
+            return default_fetch_league(league_id, endpoint=endpoint)
 
     app = FastAPI(
         title="Fantasy Analytics API",
@@ -284,14 +327,16 @@ def create_app(
         description=(
             "Read API and squad optimizer for the Sports.ru fantasy pipeline, "
             "plus the manual ingestion control plane. Every league in the "
-            "catalogue is served by the same endpoints; read endpoints never "
-            "call Sports.ru."
+            "catalogue is served by the same endpoints; catalog reads never "
+            "call Sports.ru. POST /squads/import fetches one public team."
         ),
     )
     app.state.session_factory = session_factory
     app.state.spawn_worker = spawn_worker
     app.state.ensure_forecasts = ensure_forecasts
     app.state.sync_competitions = sync_competitions
+    app.state.fetch_squad = fetch_squad
+    app.state.fetch_league = fetch_league
 
     # ------------------------------------------------------------------
     # Unified error envelope.
@@ -657,6 +702,95 @@ def create_app(
             formation=request.formation,
             fixture_conflict_weight=request.fixture_conflict_weight,
         )
+
+    @app.post(
+        "/squads/import",
+        response_model=ImportSquadResponse,
+        tags=["squads"],
+    )
+    def import_squad(request: ImportSquadRequest) -> dict[str, Any]:
+        """Load a public Sports.ru team into the squad builder.
+
+        The live roster comes from GraphQL (``currentTourInfo``); each player is
+        then resolved against the imported snapshot for ``season_id`` / ``tour_id``
+        so prices and projections match the tour the user is editing. A Portugal
+        link against an RPL season is rejected before the pitch is touched.
+        """
+        # Fail on a bad URL or an obvious league mismatch before opening a
+        # session: the slug in the link is enough, and tests can cover those
+        # cases without a database.
+        try:
+            parsed_link = parse_squad_url(request.url)
+        except SquadImportError as error:
+            raise api_error(
+                error.status,
+                error.message,
+                type_=error.type_,
+                details=error.details,
+            ) from error
+        if (
+            request.competition
+            and parsed_link.slug
+            and not slugs_match(parsed_link.slug, request.competition)
+        ):
+            raise api_error(
+                409,
+                (
+                    f"Лига в ссылке ({parsed_link.slug}) не совпадает с "
+                    f"выбранной лигой ({request.competition})."
+                ),
+                type_="league_mismatch",
+                details={
+                    "expected_slug": request.competition,
+                    "found_slug": parsed_link.slug,
+                },
+            )
+
+        with session_scope(app.state.session_factory) as session:
+            repo = ReadRepository(session)
+            season = _require_season(repo, request.season_id)
+            expected_slug = request.competition or season.get("competition_slug")
+            if not expected_slug:
+                raise api_error(
+                    400,
+                    "Не удалось определить лигу для проверки ссылки.",
+                    type_="bad_request",
+                )
+            active_run = repo.resolve_active_run(request.season_id)
+            run_id = active_run.id if active_run is not None else None
+
+        if request.tour_id is not None:
+            app.state.ensure_forecasts(
+                app.state.session_factory, run_id=run_id, tour_id=request.tour_id
+            )
+
+        with session_scope(app.state.session_factory) as session:
+            repo = ReadRepository(session)
+
+            def resolve_players(fantasy_ids: list[str]) -> list[dict[str, Any]]:
+                return repo.list_players_by_fantasy_ids(
+                    season_id=request.season_id,
+                    run_id=run_id,
+                    tour_id=request.tour_id,
+                    model=request.model,
+                    fantasy_ids=fantasy_ids,
+                )
+
+            try:
+                return import_squad_from_url(
+                    url=request.url,
+                    expected_slug=str(expected_slug),
+                    fetch_squad=app.state.fetch_squad,
+                    fetch_league=app.state.fetch_league,
+                    resolve_players=resolve_players,
+                )
+            except SquadImportError as error:
+                raise api_error(
+                    error.status,
+                    error.message,
+                    type_=error.type_,
+                    details=error.details,
+                ) from error
 
     # ------------------------------------------------------------------
     # Admin ingestion (step 5), scoped to one league (step 22).

@@ -2,20 +2,26 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SquadBuilder } from "@/components/SquadBuilder";
+import { ApiError } from "@/lib/api";
 import { RPL_RULES, makePlayer, makePriorSeason, makeValidSquad } from "./fixtures";
 import type { OptimizerCandidate, OptimizerResponse, TourModel } from "@/lib/types";
 
 const listPlayers = vi.fn();
 const optimizeSquad = vi.fn();
 const optimizeTransfers = vi.fn();
+const importSquad = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
     listPlayers: (...args: unknown[]) => listPlayers(...args),
     optimizeSquad: (...args: unknown[]) => optimizeSquad(...args),
     optimizeTransfers: (...args: unknown[]) => optimizeTransfers(...args),
+    importSquad: (...args: unknown[]) => importSquad(...args),
   },
-  ApiError: class ApiError extends Error {},
+  ApiError: class ApiError extends Error {
+    status = 400;
+    type = "http_error";
+  },
 }));
 
 const FANTASY_SEASON_ID = "59";
@@ -37,6 +43,7 @@ function renderSquadBuilder() {
     <SquadBuilder
       seasonId={1}
       fantasySeasonId={FANTASY_SEASON_ID}
+      competitionSlug="russia"
       tours={TOURS}
       defaultTourId={15}
       rules={RPL_RULES}
@@ -71,6 +78,7 @@ describe("SquadBuilder", () => {
     listPlayers.mockReset();
     optimizeSquad.mockReset();
     optimizeTransfers.mockReset();
+    importSquad.mockReset();
     listPlayers.mockResolvedValue(poolResponse());
   });
 
@@ -562,6 +570,64 @@ describe("SquadBuilder", () => {
         expect.objectContaining({ season: FANTASY_SEASON_ID, max_transfers: 1 }),
       ),
     );
+  });
+
+  it("loads a Sports.ru team from a pasted link into the pitch", async () => {
+    const squad = makeValidSquad();
+    listPlayers.mockResolvedValue({
+      items: squad,
+      pagination: { limit: 200, offset: 0, total: squad.length, count: squad.length },
+    });
+    importSquad.mockResolvedValue({
+      squad_id: "588960",
+      squad_name: "бегим",
+      competition_slug: "russia",
+      competition_name: "Россия",
+      remote_season_id: "59",
+      remote_tour: { fantasy_tour_id: "1786", name: "15 тур", status: "FINISHED" },
+      players: squad,
+      missing: [],
+    });
+
+    renderSquadBuilder();
+    await waitFor(() =>
+      expect(screen.getAllByTestId("pool-row").length).toBe(squad.length),
+    );
+
+    const link = "https://www.sports.ru/fantasy/football/russia/588960/";
+    await userEvent.type(screen.getByTestId("squad-import-url"), link);
+    await userEvent.click(screen.getByTestId("squad-import-submit"));
+
+    await waitFor(() =>
+      expect(importSquad).toHaveBeenCalledWith({
+        url: link,
+        season_id: 1,
+        tour_id: 15,
+        competition: "russia",
+        model: "poisson_events",
+      }),
+    );
+    expect(screen.getByTestId("squad-import-note")).toHaveTextContent("бегим");
+    expect(screen.getByTestId("squad-import-note")).toHaveTextContent("15 игроков");
+    expect(screen.getByTestId("valid-note")).toBeInTheDocument();
+    expect(screen.getByTestId("squad-pitch").querySelectorAll("[data-testid='pitch-player']").length).toBe(15);
+  });
+
+  it("shows an error when the pasted link belongs to another league", async () => {
+    importSquad.mockRejectedValue(
+      new ApiError("Лига в ссылке (portugal) не совпадает с выбранной лигой (russia)."),
+    );
+
+    renderSquadBuilder();
+    await waitFor(() => expect(screen.getAllByTestId("pool-row").length).toBe(2));
+
+    await userEvent.type(
+      screen.getByTestId("squad-import-url"),
+      "https://www.sports.ru/fantasy/football/portugal/588960/",
+    );
+    await userEvent.click(screen.getByTestId("squad-import-submit"));
+
+    expect(await screen.findByTestId("squad-import-error")).toHaveTextContent("portugal");
   });
 });
 

@@ -99,6 +99,19 @@ test.describe("Squad builder", () => {
     await expect(result).toContainText("5-3-2");
   });
 
+  test("offers a Sports.ru team-link import", async ({ page }) => {
+    await page.goto("/squad");
+    await expect(page.getByTestId("squad-import")).toBeVisible();
+    await expect(page.getByTestId("squad-import-submit")).toBeDisabled();
+    await page.getByTestId("squad-import-url").fill(
+      "https://www.sports.ru/fantasy/football/portugal/588960/",
+    );
+    await expect(page.getByTestId("squad-import-submit")).toBeEnabled();
+    await expect(page.getByTestId("optimizer-help")).toContainText(
+      "подставляет игроков из вашей команды",
+    );
+  });
+
   test("spells out how the two build buttons differ", async ({ page }) => {
     await page.goto("/squad");
 

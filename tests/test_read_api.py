@@ -20,7 +20,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 
 from fantasy_analytics.api import api_error, create_app
-from fantasy_analytics.api_schemas import MAX_PAGE_LIMIT, SquadRequest, TransfersRequest
+from fantasy_analytics.api_schemas import (
+    ImportSquadRequest,
+    MAX_PAGE_LIMIT,
+    SquadRequest,
+    TransfersRequest,
+)
 from fantasy_analytics.db import (
     create_db_engine,
     create_session_factory,
@@ -276,6 +281,36 @@ class OfflineAppTest(unittest.TestCase):
         self.assertEqual(422, response.status_code)
         self.assertEqual("validation_error", response.json()["error"]["type"])
 
+    def test_import_squad_rejects_an_invalid_url_without_a_database(self) -> None:
+        response = self._client().post(
+            "/squads/import",
+            json={
+                "url": "https://example.com/not-a-team",
+                "season_id": 1,
+                "competition": "portugal",
+            },
+        )
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("invalid_squad_url", response.json()["error"]["type"])
+
+    def test_import_squad_rejects_a_league_mismatch_from_the_url(self) -> None:
+        response = self._client().post(
+            "/squads/import",
+            json={
+                "url": "https://www.sports.ru/fantasy/football/portugal/588960/",
+                "season_id": 1,
+                "competition": "russia",
+            },
+        )
+        self.assertEqual(409, response.status_code)
+        body = response.json()
+        self.assertEqual("league_mismatch", body["error"]["type"])
+        self.assertIn("portugal", body["error"]["message"])
+
+    def test_import_squad_request_requires_a_url(self) -> None:
+        with self.assertRaises(pydantic.ValidationError):
+            ImportSquadRequest(season_id=1)
+
 
 class OpenApiTest(unittest.TestCase):
     def test_schema_documents_read_and_optimizer_paths(self) -> None:
@@ -290,12 +325,15 @@ class OpenApiTest(unittest.TestCase):
             "/players/{player_season_id}",
             "/optimizer/squad",
             "/optimizer/transfers",
+            "/squads/import",
         ):
             self.assertIn(path, paths)
         # Request/response models are materialised as components.
         schemas = schema["components"]["schemas"]
         self.assertIn("PlayerListResponse", schemas)
         self.assertIn("TransfersRequest", schemas)
+        self.assertIn("ImportSquadRequest", schemas)
+        self.assertIn("ImportSquadResponse", schemas)
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +524,106 @@ class ReadApiIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(422, response.status_code)
         self.assertEqual("optimizer_error", response.json()["error"]["type"])
+
+    def test_import_squad_resolves_fixture_players(self) -> None:
+        def fetch_squad(_squad_id: str) -> dict:
+            return {
+                "data": {
+                    "fantasyQueries": {
+                        "squads": [
+                            {
+                                "id": "9",
+                                "name": "Тест",
+                                "season": {
+                                    "id": "59",
+                                    "isActive": False,
+                                    "tournament": {
+                                        "id": "1",
+                                        "webName": "russia",
+                                        "name": "Россия",
+                                    },
+                                },
+                                "currentTourInfo": {
+                                    "tour": {
+                                        "id": self.fantasy_tour_id,
+                                        "name": "1 тур",
+                                        "status": "FINISHED",
+                                    },
+                                    "players": [
+                                        {
+                                            "isCaptain": True,
+                                            "isViceCaptain": False,
+                                            "isStarting": True,
+                                            "substitutePriority": None,
+                                            "seasonPlayer": {
+                                                "id": "111",
+                                                "name": "Игрок Один",
+                                                "role": "GOALKEEPER",
+                                            },
+                                        },
+                                        {
+                                            "isCaptain": False,
+                                            "isViceCaptain": False,
+                                            "isStarting": True,
+                                            "substitutePriority": None,
+                                            "seasonPlayer": {
+                                                "id": "222",
+                                                "name": "Игрок Два",
+                                                "role": "FORWARD",
+                                            },
+                                        },
+                                        {
+                                            "isCaptain": False,
+                                            "isViceCaptain": False,
+                                            "isStarting": False,
+                                            "substitutePriority": 1,
+                                            "seasonPlayer": {
+                                                "id": "missing",
+                                                "name": "Ушёл",
+                                                "role": "MIDFIELDER",
+                                            },
+                                        },
+                                    ],
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+
+        client = TestClient(
+            create_app(
+                session_factory=self.session_factory,
+                spawn_worker=lambda job_id: None,
+                fetch_squad=fetch_squad,
+                fetch_league=lambda _id: {
+                    "data": {"fantasyQueries": {"league": None}}
+                },
+            ),
+            raise_server_exceptions=False,
+        )
+        response = client.post(
+            "/squads/import",
+            json={
+                "url": "https://www.sports.ru/fantasy/football/russia/9/",
+                "season_id": self.season_id,
+                "tour_id": self.tour_id,
+                "competition": "russia",
+                "model": MODEL_EVENT,
+            },
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        body = response.json()
+        self.assertEqual("Тест", body["squad_name"])
+        self.assertEqual(
+            ["111", "222"],
+            [player["fantasy_player_id"] for player in body["players"]],
+        )
+        self.assertEqual(
+            ["missing"],
+            [player["fantasy_player_id"] for player in body["missing"]],
+        )
+        self.assertIsNotNone(body["players"][0].get("projection"))
 
 
 if __name__ == "__main__":

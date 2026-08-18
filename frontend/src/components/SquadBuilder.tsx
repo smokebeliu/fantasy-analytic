@@ -57,6 +57,7 @@ function candidateToPlayer(c: OptimizerCandidate): PlayerModel {
 export function SquadBuilder({
   seasonId,
   fantasySeasonId,
+  competitionSlug,
   tours,
   defaultTourId,
   rules,
@@ -66,6 +67,9 @@ export function SquadBuilder({
   // more than one league is imported, and the solver would fall back to
   // whichever league published a snapshot most recently.
   fantasySeasonId: string;
+  // Compared with the Sports.ru URL (and the remote team's tournament) so a
+  // Portugal link cannot populate an RPL pitch.
+  competitionSlug: string;
   tours: TourModel[];
   defaultTourId: number;
   rules: SeasonRulesModel | null;
@@ -89,6 +93,11 @@ export function SquadBuilder({
   const [result, setResult] = useState<OptimizerResponse | null>(null);
   const [optimizing, setOptimizing] = useState(false);
   const [optimizerError, setOptimizerError] = useState<string | null>(null);
+
+  const [teamUrl, setTeamUrl] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importNote, setImportNote] = useState<string | null>(null);
 
   const poolHover = usePlayerHoverCard();
 
@@ -281,6 +290,46 @@ export function SquadBuilder({
     }
   };
 
+  const importFromLink = async () => {
+    const url = teamUrl.trim();
+    if (!url || !selectedTour) return;
+    setImporting(true);
+    setImportError(null);
+    setImportNote(null);
+    try {
+      const res = await api.importSquad({
+        url,
+        season_id: seasonId,
+        tour_id: tourId,
+        competition: competitionSlug,
+        model,
+      });
+      const resolved = asPlayersFromPool(res.players);
+      setSelected(resolved);
+      setLocked(new Set());
+      setResult(null);
+      const missingNames = res.missing
+        .map((item) => item.player_name || item.fantasy_player_id)
+        .filter(Boolean);
+      const bits = [`Загружена команда «${res.squad_name}»`];
+      if (res.remote_tour?.name) {
+        bits.push(`текущий тур Sports.ru: ${res.remote_tour.name}`);
+      }
+      bits.push(`${resolved.length} игроков на выбранный тур`);
+      if (missingNames.length > 0) {
+        bits.push(`не найдены в снимке: ${missingNames.join(", ")}`);
+      }
+      setImportNote(`${bits.join(" — ")}.`);
+    } catch (err) {
+      setImportError(err instanceof ApiError ? err.message : "Не удалось загрузить состав");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const asPlayersFromPool = (players: PlayerModel[]) =>
+    players.map((player) => playerIndex.get(player.player_season_id) ?? player);
+
   const runTransfers = async () => {
     if (!selectedTour || !validation.valid) return;
     const currentSquad = selected
@@ -400,9 +449,52 @@ export function SquadBuilder({
         </button>
       </div>
 
+      <div className="panel toolbar squad-import" data-testid="squad-import">
+        <div className="field squad-import__url">
+          <label htmlFor="sq-team-url">Ссылка на команду Sports.ru</label>
+          <input
+            id="sq-team-url"
+            type="text"
+            inputMode="url"
+            placeholder="https://www.sports.ru/fantasy/football/portugal/588960/"
+            value={teamUrl}
+            onChange={(e) => setTeamUrl(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void importFromLink();
+              }
+            }}
+            data-testid="squad-import-url"
+          />
+        </div>
+        <button
+          className="btn btn--primary"
+          onClick={() => void importFromLink()}
+          disabled={importing || !selectedTour || !teamUrl.trim()}
+          data-testid="squad-import-submit"
+          title="Подставить игроков текущей команды, чтобы быстрее подобрать замены"
+        >
+          {importing ? "Загрузка…" : "Загрузить состав"}
+        </button>
+      </div>
+      {importError && (
+        <div className="error-inline" style={{ margin: "0 0 14px" }} data-testid="squad-import-error">
+          {importError}
+        </div>
+      )}
+      {importNote && (
+        <div className="valid-note" style={{ margin: "0 0 14px" }} data-testid="squad-import-note">
+          {importNote}
+        </div>
+      )}
+
       {/* The two optimizer buttons differ only in what they are allowed to keep,
           which is impossible to guess from their labels alone. */}
       <p className="inline-note" style={{ margin: "0 0 14px" }} data-testid="optimizer-help">
+        <strong>«Загрузить состав»</strong> подставляет игроков из вашей команды
+        Sports.ru на выбранный тур — удобно, чтобы сразу подобрать замены. Лига
+        в ссылке должна совпадать с выбранной.{" "}
         <strong>«Собрать состав с нуля»</strong> строит лучший состав тура заново и
         игнорирует всё, что вы выбрали.{" "}
         <strong>«Подобрать под мою схему»</strong> сохраняет закреплённых 📌 игроков

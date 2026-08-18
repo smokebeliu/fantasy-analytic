@@ -43,8 +43,8 @@ export default async function SquadPage() {
       <div className="page-head">
         <h1>Конструктор состава</h1>
         <p>
-          Соберите состав вручную с проверкой всех ограничений или получите
-          оптимальный состав от солвера
+          Соберите состав вручную с проверкой всех ограничений, загрузите свою
+          команду по ссылке Sports.ru или получите оптимальный состав от солвера
           {competition ? ` для ${competition.name}` : ""}.
         </p>
       </div>
@@ -69,6 +69,7 @@ export default async function SquadPage() {
         <SquadBuilder
           seasonId={season.season_id}
           fantasySeasonId={season.fantasy_season_id}
+          competitionSlug={competition?.slug ?? season.competition_slug ?? ""}
           tours={tours}
           defaultTourId={defaultTour.tour_id}
           rules={season.rules ?? null}

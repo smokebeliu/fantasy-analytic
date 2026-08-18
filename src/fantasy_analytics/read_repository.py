@@ -573,6 +573,7 @@ class ReadRepository:
         status: str | None = None,
         min_price: float | None = None,
         max_price: float | None = None,
+        fantasy_ids: Sequence[str] | None = None,
         order: str = "name",
         limit: int,
         offset: int,
@@ -583,6 +584,8 @@ class ReadRepository:
         published snapshot, in which case snapshot columns come back null). When
         ``run_id``, ``tour_id`` and ``model`` are all given, the persisted
         forecast for that tour and model is joined in as ``projection``.
+        ``fantasy_ids`` narrows the list to those Sports.ru player ids — used
+        when a pasted team link has to be resolved against the local snapshot.
         """
         snapshot = FantasyPlayerSnapshot.__table__.alias("snapshot")
         forecast = PlayerForecast.__table__.alias("forecast")
@@ -672,6 +675,8 @@ class ReadRepository:
             conditions.append(snapshot.c.price >= min_price)
         if join_snapshot and max_price is not None:
             conditions.append(snapshot.c.price <= max_price)
+        if fantasy_ids is not None:
+            conditions.append(PlayerSeason.fantasy_player_id.in_(list(fantasy_ids)))
         base = base.where(*conditions)
 
         total = self._session.execute(
@@ -689,6 +694,39 @@ class ReadRepository:
             self._player_row_dict(row, prior.get(row.player_season_id))
             for row in rows
         ]
+
+    def list_players_by_fantasy_ids(
+        self,
+        *,
+        season_id: int,
+        run_id: int | None,
+        tour_id: int | None = None,
+        model: str | None = None,
+        fantasy_ids: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        """Resolve Sports.ru player ids to the same shape ``list_players`` uses.
+
+        The returned list keeps the requested order and drops ids that are not
+        in this season, so a caller can tell a missing import from a found one.
+        """
+        if not fantasy_ids:
+            return []
+        _, items = self.list_players(
+            season_id=season_id,
+            run_id=run_id,
+            tour_id=tour_id,
+            model=model,
+            fantasy_ids=fantasy_ids,
+            order="name",
+            limit=max(len(fantasy_ids), 1),
+            offset=0,
+        )
+        by_id = {
+            item["fantasy_player_id"]: item
+            for item in items
+            if item.get("fantasy_player_id")
+        }
+        return [by_id[fid] for fid in fantasy_ids if fid in by_id]
 
     @staticmethod
     def _player_order(order, snapshot, forecast, join_snapshot, join_forecast):
