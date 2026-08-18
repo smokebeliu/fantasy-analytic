@@ -206,6 +206,13 @@ button {
   padding: 16px 18px;
   margin-bottom: 16px;
 }
+.squad-import {
+  align-items: flex-end;
+}
+.squad-import__url {
+  flex: 1 1 360px;
+  min-width: min(100%, 280px);
+}
 .field {
   display: flex;
   flex-direction: column;

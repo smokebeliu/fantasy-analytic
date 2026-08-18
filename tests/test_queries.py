@@ -1,6 +1,6 @@
 import unittest
 
-from fantasy_analytics.queries import build_team_stats_query
+from fantasy_analytics.queries import SQUAD_QUERY, build_team_stats_query
 
 
 class TeamStatsQueryTest(unittest.TestCase):
@@ -17,6 +17,14 @@ class TeamStatsQueryTest(unittest.TestCase):
     def test_rejects_empty_team_list(self) -> None:
         with self.assertRaises(ValueError):
             build_team_stats_query(0)
+
+
+class SquadQueryTest(unittest.TestCase):
+    def test_asks_for_the_current_tour_roster(self) -> None:
+        self.assertIn("squads(input: { squadID: $squadID })", SQUAD_QUERY)
+        self.assertIn("currentTourInfo", SQUAD_QUERY)
+        self.assertIn("seasonPlayer", SQUAD_QUERY)
+        self.assertIn("webName", SQUAD_QUERY)
 
 
 if __name__ == "__main__":

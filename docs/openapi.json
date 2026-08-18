@@ -1,6 +1,192 @@
 {
   "components": {
     "schemas": {
+      "CatalogueSeasonModel": {
+        "description": "A season Sports.ru exposes for a league, imported or not.",
+        "properties": {
+          "fantasy_season_id": {
+            "title": "Fantasy Season Id",
+            "type": "string"
+          },
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "stat_season_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stat Season Id"
+          }
+        },
+        "required": [
+          "fantasy_season_id",
+          "name",
+          "label",
+          "is_active"
+        ],
+        "title": "CatalogueSeasonModel",
+        "type": "object"
+      },
+      "CatalogueSyncResponse": {
+        "description": "Result of refreshing the league catalogue from Sports.ru.",
+        "properties": {
+          "competitions": {
+            "title": "Competitions",
+            "type": "integer"
+          },
+          "seasons": {
+            "title": "Seasons",
+            "type": "integer"
+          },
+          "slugs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Slugs",
+            "type": "array"
+          },
+          "synced_at": {
+            "title": "Synced At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "synced_at",
+          "competitions",
+          "seasons",
+          "slugs"
+        ],
+        "title": "CatalogueSyncResponse",
+        "type": "object"
+      },
+      "CompetitionListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CompetitionModel"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PageMeta"
+          }
+        },
+        "required": [
+          "items",
+          "pagination"
+        ],
+        "title": "CompetitionListResponse",
+        "type": "object"
+      },
+      "CompetitionModel": {
+        "description": "One fantasy league with its catalogue and what has been imported.",
+        "properties": {
+          "available_seasons": {
+            "description": "Seasons Sports.ru offers for this league, oldest first",
+            "items": {
+              "$ref": "#/components/schemas/CatalogueSeasonModel"
+            },
+            "title": "Available Seasons",
+            "type": "array"
+          },
+          "catalogue_synced_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Catalogue Synced At"
+          },
+          "competition_id": {
+            "title": "Competition Id",
+            "type": "integer"
+          },
+          "fantasy_tournament_id": {
+            "title": "Fantasy Tournament Id",
+            "type": "string"
+          },
+          "has_active_season": {
+            "description": "Whether a season is currently in progress (affects 'refresh active season')",
+            "title": "Has Active Season",
+            "type": "boolean"
+          },
+          "is_imported": {
+            "title": "Is Imported",
+            "type": "boolean"
+          },
+          "latest_season": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SeasonModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Season the read API serves: the newest published one"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "seasons": {
+            "description": "Imported seasons, newest first",
+            "items": {
+              "$ref": "#/components/schemas/SeasonModel"
+            },
+            "title": "Seasons",
+            "type": "array"
+          },
+          "slug": {
+            "description": "Tournament slug, e.g. russia, spain, italy",
+            "title": "Slug",
+            "type": "string"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnapshotMeta"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sort_order": {
+            "title": "Sort Order",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "competition_id",
+          "fantasy_tournament_id",
+          "slug",
+          "name",
+          "sort_order",
+          "has_active_season",
+          "is_imported"
+        ],
+        "title": "CompetitionModel",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -12,6 +198,127 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ImportSquadRequest": {
+        "description": "Load a manager's Sports.ru team from its public URL into the builder.",
+        "properties": {
+          "competition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Expected league slug. The import is rejected when the URL or the remote team belongs to a different league",
+            "title": "Competition"
+          },
+          "model": {
+            "default": "poisson_events",
+            "description": "Forecast model attached to the resolved players",
+            "enum": [
+              "poisson_events",
+              "season_mean",
+              "recent_form"
+            ],
+            "title": "Model",
+            "type": "string"
+          },
+          "season_id": {
+            "description": "Internal season the players are resolved in",
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "tour_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tour whose prices and projections are attached to the players",
+            "title": "Tour Id"
+          },
+          "url": {
+            "description": "Public team page, e.g. https://www.sports.ru/fantasy/football/portugal/588960/, or a bare squad id",
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "season_id"
+        ],
+        "title": "ImportSquadRequest",
+        "type": "object"
+      },
+      "ImportSquadResponse": {
+        "properties": {
+          "competition_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Name"
+          },
+          "competition_slug": {
+            "title": "Competition Slug",
+            "type": "string"
+          },
+          "missing": {
+            "items": {
+              "$ref": "#/components/schemas/MissingImportedPlayer"
+            },
+            "title": "Missing",
+            "type": "array"
+          },
+          "players": {
+            "items": {
+              "$ref": "#/components/schemas/PlayerModel"
+            },
+            "title": "Players",
+            "type": "array"
+          },
+          "remote_season_id": {
+            "title": "Remote Season Id",
+            "type": "string"
+          },
+          "remote_tour": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteTourRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "squad_id": {
+            "title": "Squad Id",
+            "type": "string"
+          },
+          "squad_name": {
+            "title": "Squad Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "squad_id",
+          "squad_name",
+          "competition_slug",
+          "remote_season_id",
+          "players"
+        ],
+        "title": "ImportSquadResponse",
         "type": "object"
       },
       "IngestionJobModel": {
@@ -235,6 +542,17 @@
                 "type": "null"
               }
             ]
+          },
+          "competition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompetitionModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The league this status describes, once its catalogue is known"
           },
           "is_refreshing": {
             "description": "True while a pending/running job exists for the tournament",
@@ -464,6 +782,41 @@
           "away_club_id"
         ],
         "title": "MatchModel",
+        "type": "object"
+      },
+      "MissingImportedPlayer": {
+        "properties": {
+          "fantasy_player_id": {
+            "title": "Fantasy Player Id",
+            "type": "string"
+          },
+          "player_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Name"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          }
+        },
+        "required": [
+          "fantasy_player_id"
+        ],
+        "title": "MissingImportedPlayer",
         "type": "object"
       },
       "OptimizerResponse": {
@@ -1444,8 +1797,42 @@
         "title": "RefreshRequest",
         "type": "object"
       },
+      "RemoteTourRef": {
+        "properties": {
+          "fantasy_tour_id": {
+            "title": "Fantasy Tour Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fantasy_tour_id",
+          "name",
+          "status"
+        ],
+        "title": "RemoteTourRef",
+        "type": "object"
+      },
       "SeasonDetailModel": {
         "properties": {
+          "competition_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Id"
+          },
           "competition_name": {
             "anyOf": [
               {
@@ -1456,6 +1843,17 @@
               }
             ],
             "title": "Competition Name"
+          },
+          "competition_slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Slug"
           },
           "ends_at": {
             "anyOf": [
@@ -1475,6 +1873,11 @@
           "is_active": {
             "title": "Is Active",
             "type": "boolean"
+          },
+          "label": {
+            "description": "Display name, unique within the competition: the season name, with the fantasy id appended when a tournament splits one season into phases (Champions League league phase vs knockout stage)",
+            "title": "Label",
+            "type": "string"
           },
           "name": {
             "title": "Name",
@@ -1525,6 +1928,7 @@
           "fantasy_season_id",
           "stat_season_id",
           "name",
+          "label",
           "is_active"
         ],
         "title": "SeasonDetailModel",
@@ -1552,6 +1956,17 @@
       },
       "SeasonModel": {
         "properties": {
+          "competition_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Id"
+          },
           "competition_name": {
             "anyOf": [
               {
@@ -1562,6 +1977,17 @@
               }
             ],
             "title": "Competition Name"
+          },
+          "competition_slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Slug"
           },
           "ends_at": {
             "anyOf": [
@@ -1581,6 +2007,11 @@
           "is_active": {
             "title": "Is Active",
             "type": "boolean"
+          },
+          "label": {
+            "description": "Display name, unique within the competition: the season name, with the fantasy id appended when a tournament splits one season into phases (Champions League league phase vs knockout stage)",
+            "title": "Label",
+            "type": "string"
           },
           "name": {
             "title": "Name",
@@ -1621,6 +2052,7 @@
           "fantasy_season_id",
           "stat_season_id",
           "name",
+          "label",
           "is_active"
         ],
         "title": "SeasonModel",
@@ -1732,6 +2164,18 @@
       },
       "SquadRequest": {
         "properties": {
+          "competition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "League to optimize: tournament slug or fantasy tournament id. With several leagues imported there is no single active snapshot, so name this (or season/run_id) to avoid getting whichever league was published most recently",
+            "title": "Competition"
+          },
           "fixture_conflict_weight": {
             "anyOf": [
               {
@@ -1946,6 +2390,18 @@
       },
       "TransfersRequest": {
         "properties": {
+          "competition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "League to optimize: tournament slug or fantasy tournament id. With several leagues imported there is no single active snapshot, so name this (or season/run_id) to avoid getting whichever league was published most recently",
+            "title": "Competition"
+          },
           "current_squad": {
             "description": "Fantasy player ids of the current squad (limited-transfers mode)",
             "items": {
@@ -2107,75 +2563,29 @@
     }
   },
   "info": {
-    "description": "Read API and squad optimizer for the Fantasy RPL pipeline, plus the manual ingestion control plane. Read endpoints never call Sports.ru.",
+    "description": "Read API and squad optimizer for the Sports.ru fantasy pipeline, plus the manual ingestion control plane. Every league in the catalogue is served by the same endpoints; catalog reads never call Sports.ru. POST /squads/import fetches one public team.",
     "title": "Fantasy Analytics API",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "openapi": "3.1.0",
   "paths": {
-    "/admin/ingestion/rpl/refresh": {
+    "/admin/competitions/sync": {
       "post": {
-        "operationId": "refresh_rpl_admin_ingestion_rpl_refresh_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/RefreshRequest"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "title": "Request"
-              }
-            }
-          }
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Refresh Rpl",
-        "tags": [
-          "admin"
-        ]
-      }
-    },
-    "/admin/ingestion/rpl/status": {
-      "get": {
-        "description": "Report refresh state plus the snapshot and tour the UI should show.\n\nThe admin screen calls this on load (and while polling), so it never has\nto remember a job id: an in-flight refresh is discovered from the\ndatabase, which is also what makes a second browser tab consistent.",
-        "operationId": "ingestion_status_admin_ingestion_rpl_status_get",
+        "description": "Refresh the catalogue of leagues and their seasons from Sports.ru.\n\nThe only admin call that reaches the GraphQL API inline: it is a single\nrequest, and without it a freshly created database has no league list for\nthe switcher or the import screen to offer.",
+        "operationId": "sync_competition_catalogue_admin_competitions_sync_post",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/IngestionStatusResponse"
+                  "$ref": "#/components/schemas/CatalogueSyncResponse"
                 }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Ingestion Status",
+        "summary": "Sync Competition Catalogue",
         "tags": [
           "admin"
         ]
@@ -2220,6 +2630,218 @@
         "summary": "Get Run",
         "tags": [
           "admin"
+        ]
+      }
+    },
+    "/admin/ingestion/{tournament_slug}/refresh": {
+      "post": {
+        "description": "Queue an import of one league's season.\n\nThe job is keyed by ``tournament_slug``, and the ``ingestion_jobs``\npartial unique index only forbids two concurrent refreshes *of the same\nleague* — so different leagues can be imported in parallel.",
+        "operationId": "refresh_competition_admin_ingestion__tournament_slug__refresh_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_slug",
+            "required": true,
+            "schema": {
+              "title": "Tournament Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RefreshRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Refresh Competition",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/ingestion/{tournament_slug}/status": {
+      "get": {
+        "description": "Report one league's refresh state plus the snapshot and tour to show.\n\nThe admin screen calls this on load (and while polling), so it never has\nto remember a job id: an in-flight refresh is discovered from the\ndatabase, which is also what makes a second browser tab consistent.",
+        "operationId": "ingestion_status_admin_ingestion__tournament_slug__status_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_slug",
+            "required": true,
+            "schema": {
+              "title": "Tournament Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ingestion Status",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/competitions": {
+      "get": {
+        "description": "List the leagues the pipeline knows about.\n\nThis is what a league switcher reads: with ``imported_only=true`` it\nreturns exactly the leagues the read API can serve, each with the season\nand snapshot the rest of the UI should use.",
+        "operationId": "list_competitions_competitions_get",
+        "parameters": [
+          {
+            "description": "Only leagues that already have an imported season",
+            "in": "query",
+            "name": "imported_only",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Only leagues that already have an imported season",
+              "title": "Imported Only",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompetitionListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Competitions",
+        "tags": [
+          "catalog"
+        ]
+      }
+    },
+    "/competitions/{slug}": {
+      "get": {
+        "operationId": "get_competition_competitions__slug__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompetitionModel"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Competition",
+        "tags": [
+          "catalog"
         ]
       }
     },
@@ -2770,6 +3392,24 @@
         "operationId": "list_seasons_seasons_get",
         "parameters": [
           {
+            "description": "Restrict to one league",
+            "in": "query",
+            "name": "competition_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Restrict to one league",
+              "title": "Competition Id"
+            }
+          },
+          {
             "in": "query",
             "name": "limit",
             "required": false,
@@ -2860,6 +3500,48 @@
         "summary": "Get Season",
         "tags": [
           "catalog"
+        ]
+      }
+    },
+    "/squads/import": {
+      "post": {
+        "description": "Load a public Sports.ru team into the squad builder.\n\nThe live roster comes from GraphQL (``currentTourInfo``); each player is\nthen resolved against the imported snapshot for ``season_id`` / ``tour_id``\nso prices and projections match the tour the user is editing. A Portugal\nlink against an RPL season is rejected before the pitch is touched.",
+        "operationId": "import_squad_squads_import_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportSquadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportSquadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import Squad",
+        "tags": [
+          "squads"
         ]
       }
     },

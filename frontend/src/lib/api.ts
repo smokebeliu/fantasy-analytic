@@ -5,6 +5,7 @@ import type {
   ForecastModel,
   IngestionJob,
   IngestionStatusResponse,
+  ImportSquadResponse,
   OptimizerResponse,
   PlayerDetailModel,
   PlayerListResponse,
@@ -164,6 +165,18 @@ export const api = {
     formation?: string;
   }) =>
     request<OptimizerResponse>("/optimizer/squad", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  importSquad: (body: {
+    url: string;
+    season_id: number;
+    tour_id?: number | null;
+    competition?: string;
+    model?: ForecastModel;
+  }) =>
+    request<ImportSquadResponse>("/squads/import", {
       method: "POST",
       body: JSON.stringify(body),
     }),

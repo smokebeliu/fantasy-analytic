@@ -188,6 +188,29 @@ export interface PlayerListResponse {
   snapshot?: SnapshotMeta | null;
 }
 
+export interface MissingImportedPlayer {
+  fantasy_player_id: string;
+  player_name?: string | null;
+  role?: Role | null;
+}
+
+export interface RemoteTourRef {
+  fantasy_tour_id: string;
+  name: string;
+  status: string;
+}
+
+export interface ImportSquadResponse {
+  squad_id: string;
+  squad_name: string;
+  competition_slug: string;
+  competition_name?: string | null;
+  remote_season_id: string;
+  remote_tour?: RemoteTourRef | null;
+  players: PlayerModel[];
+  missing: MissingImportedPlayer[];
+}
+
 export interface PlayerHistoryEntry {
   match_id: number;
   tour_id?: number | null;

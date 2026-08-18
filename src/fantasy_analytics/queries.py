@@ -472,6 +472,69 @@ query DiscoverMatchStats($id: ID!, $source: statSourceList) {{
 MATCH_STATS_QUERY = build_match_stats_query()
 
 
+# A user's fantasy team (the public /fantasy/football/{slug}/{squadId}/ page).
+# currentTourInfo is the squad as it stands now — what a manager pastes when
+# they want to load their own team and then plan transfers for the next tour.
+SQUAD_QUERY = """
+query ImportSquad($squadID: ID!) {
+  fantasyQueries {
+    squads(input: { squadID: $squadID }) {
+      id
+      name
+      season {
+        id
+        isActive
+        tournament {
+          id
+          webName
+          name
+        }
+      }
+      currentTourInfo {
+        tour {
+          id
+          name
+          status
+        }
+        totalPrice
+        currentBalance
+        transfersLeft
+        transfersDone
+        players {
+          isCaptain
+          isViceCaptain
+          isStarting
+          substitutePriority
+          seasonPlayer {
+            id
+            name
+            price
+            role
+            team {
+              id
+              name
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+# Used only to distinguish "this id is a league, not a team" from a missing squad.
+LEAGUE_PROBE_QUERY = """
+query ProbeFantasyLeague($id: ID!) {
+  fantasyQueries {
+    league(source: ID, id: $id) {
+      id
+      name
+    }
+  }
+}
+"""
+
+
 TEAM_STAT_FIELDS = """
 MatchesPlayed
 MatchesWon
