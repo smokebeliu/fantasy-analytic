@@ -19,8 +19,15 @@ vi.mock("@/lib/api", () => ({
     importSquad: (...args: unknown[]) => importSquad(...args),
   },
   ApiError: class ApiError extends Error {
-    status = 400;
-    type = "http_error";
+    status: number;
+    type: string;
+    details: unknown;
+    constructor(status: number, type: string, message: string, details?: unknown) {
+      super(message);
+      this.status = status;
+      this.type = type;
+      this.details = details;
+    }
   },
 }));
 
@@ -615,7 +622,11 @@ describe("SquadBuilder", () => {
 
   it("shows an error when the pasted link belongs to another league", async () => {
     importSquad.mockRejectedValue(
-      new ApiError("Лига в ссылке (portugal) не совпадает с выбранной лигой (russia)."),
+      new ApiError(
+        409,
+        "league_mismatch",
+        "Лига в ссылке (portugal) не совпадает с выбранной лигой (russia).",
+      ),
     );
 
     renderSquadBuilder();
