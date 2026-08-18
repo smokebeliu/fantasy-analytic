@@ -60,6 +60,11 @@ services:
         condition: service_completed_successfully
     environment:
       <<: *database-url
+      NIGHTLY_REFRESH_ENABLED: ${NIGHTLY_REFRESH_ENABLED:-true}
+      NIGHTLY_REFRESH_HOUR: ${NIGHTLY_REFRESH_HOUR:-3}
+      NIGHTLY_REFRESH_MINUTE: ${NIGHTLY_REFRESH_MINUTE:-0}
+      NIGHTLY_REFRESH_TZ: ${NIGHTLY_REFRESH_TZ:-Europe/Moscow}
+      NIGHTLY_REFRESH_CATCHUP_HOURS: ${NIGHTLY_REFRESH_CATCHUP_HOURS:-3}
     entrypoint: ["python3", "-m", "fantasy_analytics.api"]
     command: ["--host", "0.0.0.0", "--port", "8000"]
     healthcheck:

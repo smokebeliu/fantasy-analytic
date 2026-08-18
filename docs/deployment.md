@@ -158,6 +158,11 @@ curl -s https://fantasy.smokebeliu.com/api/backend/health   # {"status":"ok"}
 
 ## Обслуживание
 
+- Ночное обновление: процесс `api` в 03:00 Europe/Moscow сам ставит в очередь
+  refresh текущего сезона для каждой лиги, у которой этот сезон уже загружен.
+  Каталожные лиги без импорта и лиги только с завершённым историческим сезоном
+  не трогаются. Отключить или сдвинуть час можно переменными
+  `NIGHTLY_REFRESH_*` в Environment приложения (см. `.env.prod.example`).
 - Логи: `docker compose -p fantasy-analytics logs -f api frontend` (или через
   UI Dokploy).
 - Данные PostgreSQL сохраняются в volume `postgres_data` и переживают

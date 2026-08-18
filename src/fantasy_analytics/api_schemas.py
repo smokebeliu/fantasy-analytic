@@ -528,6 +528,46 @@ class IngestionJobModel(BaseModel):
     result: dict[str, Any] | None = None
 
 
+class NightlyEligibleLeague(BaseModel):
+    """A league whose current season is already imported and will be refreshed."""
+
+    tournament_slug: str
+    season_id: int
+    fantasy_season_id: str
+    season_name: str
+
+
+class NightlySkippedLeague(BaseModel):
+    """A league the sweep considered but did not enqueue."""
+
+    tournament_slug: str
+    reason: str
+
+
+class NightlyRefreshReport(BaseModel):
+    """Result of one nightly sweep across every eligible league."""
+
+    ran_at: str
+    force: bool
+    eligible: list[NightlyEligibleLeague]
+    enqueued: list[IngestionJobModel]
+    skipped: list[NightlySkippedLeague]
+
+
+class NightlyRefreshStatus(BaseModel):
+    """Scheduler configuration, who is eligible, and today's scheduled jobs."""
+
+    enabled: bool
+    timezone: str
+    hour: int
+    minute: int
+    catchup_hours: int
+    now: str
+    next_run_at: str
+    eligible: list[NightlyEligibleLeague]
+    scheduled_today: list[IngestionJobModel]
+
+
 class IngestionStatusResponse(BaseModel):
     """Everything the admin refresh screen needs in a single request.
 
@@ -594,4 +634,8 @@ __all__ = [
     "IngestionJobModel",
     "IngestionProgressModel",
     "IngestionStatusResponse",
+    "NightlyEligibleLeague",
+    "NightlyRefreshReport",
+    "NightlyRefreshStatus",
+    "NightlySkippedLeague",
 ]
