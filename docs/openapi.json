@@ -819,6 +819,157 @@
         "title": "MissingImportedPlayer",
         "type": "object"
       },
+      "NightlyEligibleLeague": {
+        "description": "A league whose current season is already imported and will be refreshed.",
+        "properties": {
+          "fantasy_season_id": {
+            "title": "Fantasy Season Id",
+            "type": "string"
+          },
+          "season_id": {
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "season_name": {
+            "title": "Season Name",
+            "type": "string"
+          },
+          "tournament_slug": {
+            "title": "Tournament Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tournament_slug",
+          "season_id",
+          "fantasy_season_id",
+          "season_name"
+        ],
+        "title": "NightlyEligibleLeague",
+        "type": "object"
+      },
+      "NightlyRefreshReport": {
+        "description": "Result of one nightly sweep across every eligible league.",
+        "properties": {
+          "eligible": {
+            "items": {
+              "$ref": "#/components/schemas/NightlyEligibleLeague"
+            },
+            "title": "Eligible",
+            "type": "array"
+          },
+          "enqueued": {
+            "items": {
+              "$ref": "#/components/schemas/IngestionJobModel"
+            },
+            "title": "Enqueued",
+            "type": "array"
+          },
+          "force": {
+            "title": "Force",
+            "type": "boolean"
+          },
+          "ran_at": {
+            "title": "Ran At",
+            "type": "string"
+          },
+          "skipped": {
+            "items": {
+              "$ref": "#/components/schemas/NightlySkippedLeague"
+            },
+            "title": "Skipped",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ran_at",
+          "force",
+          "eligible",
+          "enqueued",
+          "skipped"
+        ],
+        "title": "NightlyRefreshReport",
+        "type": "object"
+      },
+      "NightlyRefreshStatus": {
+        "description": "Scheduler configuration, who is eligible, and today's scheduled jobs.",
+        "properties": {
+          "catchup_hours": {
+            "title": "Catchup Hours",
+            "type": "integer"
+          },
+          "eligible": {
+            "items": {
+              "$ref": "#/components/schemas/NightlyEligibleLeague"
+            },
+            "title": "Eligible",
+            "type": "array"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "hour": {
+            "title": "Hour",
+            "type": "integer"
+          },
+          "minute": {
+            "title": "Minute",
+            "type": "integer"
+          },
+          "next_run_at": {
+            "title": "Next Run At",
+            "type": "string"
+          },
+          "now": {
+            "title": "Now",
+            "type": "string"
+          },
+          "scheduled_today": {
+            "items": {
+              "$ref": "#/components/schemas/IngestionJobModel"
+            },
+            "title": "Scheduled Today",
+            "type": "array"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "timezone",
+          "hour",
+          "minute",
+          "catchup_hours",
+          "now",
+          "next_run_at",
+          "eligible",
+          "scheduled_today"
+        ],
+        "title": "NightlyRefreshStatus",
+        "type": "object"
+      },
+      "NightlySkippedLeague": {
+        "description": "A league the sweep considered but did not enqueue.",
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "tournament_slug": {
+            "title": "Tournament Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tournament_slug",
+          "reason"
+        ],
+        "title": "NightlySkippedLeague",
+        "type": "object"
+      },
       "OptimizerResponse": {
         "additionalProperties": true,
         "description": "The optimizer report; nested explanation kept permissive on purpose.",
@@ -2563,7 +2714,7 @@
     }
   },
   "info": {
-    "description": "Read API and squad optimizer for the Sports.ru fantasy pipeline, plus the manual ingestion control plane. Every league in the catalogue is served by the same endpoints; catalog reads never call Sports.ru. POST /squads/import fetches one public team.",
+    "description": "Read API and squad optimizer for the Sports.ru fantasy pipeline, plus the manual ingestion control plane. Every league in the catalogue is served by the same endpoints; catalog reads never call Sports.ru. POST /squads/import fetches one public team. Leagues whose current season is already imported are refreshed automatically once a night.",
     "title": "Fantasy Analytics API",
     "version": "0.3.0"
   },
@@ -2586,6 +2737,72 @@
           }
         },
         "summary": "Sync Competition Catalogue",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/ingestion/nightly": {
+      "get": {
+        "description": "Show the nightly scheduler: next run, eligible leagues, today's jobs.\n\nEligibility is \"this league already has its current season imported\".\nCatalogued-only leagues and leagues with only a finished historical\nseason are not on the list and will not be touched at night.",
+        "operationId": "get_nightly_refresh_admin_ingestion_nightly_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NightlyRefreshStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Nightly Refresh",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "Run the nightly sweep now, without waiting for the scheduled hour.\n\nEach eligible league is enqueued as a regular current-season job with\n``trigger_type=scheduled``. A league that already has a pending or\nrunning refresh is skipped; ``force`` only bypasses the once-a-day\nguard, not the per-tournament lock.",
+        "operationId": "trigger_nightly_refresh_admin_ingestion_nightly_post",
+        "parameters": [
+          {
+            "description": "Re-queue even if a scheduled job already ran today",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": true,
+              "description": "Re-queue even if a scheduled job already ran today",
+              "title": "Force",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NightlyRefreshReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trigger Nightly Refresh",
         "tags": [
           "admin"
         ]

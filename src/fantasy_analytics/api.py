@@ -12,6 +12,9 @@ The application serves two concerns behind one app:
   screen recovers its state after a page reload. ``rpl`` is accepted as an alias
   for the ``russia`` slug the original single-league endpoints used, and
   ``POST /admin/competitions/sync`` refreshes the catalogue of available leagues.
+  Once a league's current season has been imported, a nightly sweep
+  (:mod:`fantasy_analytics.nightly_refresh`) re-enqueues that same current
+  season automatically so the snapshot stays fresh without a button press.
 * **User read API (steps 9 and 22).** Read endpoints for competitions, seasons,
   tours, matches and players (with filters, projections and explaining
   components) plus the ``POST /optimizer/squad`` and ``POST
@@ -31,8 +34,11 @@ time and (for projections) the model version.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import subprocess
 import sys
+from contextlib import asynccontextmanager, suppress
 from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -54,6 +60,8 @@ from .api_schemas import (
     ImportSquadResponse,
     IngestionJobModel,
     IngestionStatusResponse,
+    NightlyRefreshReport,
+    NightlyRefreshStatus,
     MatchListResponse,
     MatchModel,
     OptimizerResponse,
@@ -89,9 +97,17 @@ from .db.job_repository import ACTIVE_STATUSES
 from .db.models import IngestionJob
 from .forecast_service import ensure_tour_forecasts
 from .ingestion_progress import STAGES
+from .nightly_refresh import (
+    NightlyRefreshSettings,
+    enqueue_nightly_jobs,
+    run_nightly_loop,
+    scheduler_status,
+)
 from .optimizer import OptimizerError, build_squad_optimization
 from .queries import LEAGUE_PROBE_QUERY, SQUAD_QUERY
 from .read_repository import ReadRepository
+
+logger = logging.getLogger(__name__)
 from .squad_import import (
     SquadImportError,
     import_squad_from_url,
@@ -292,6 +308,7 @@ def create_app(
     sync_competitions: SyncCatalogue | None = None,
     fetch_squad: FetchSquad | None = None,
     fetch_league: FetchSquad | None = None,
+    nightly_refresh: NightlyRefreshSettings | None = None,
     database_url: str | None = None,
     endpoint: str = DEFAULT_ENDPOINT,
 ) -> FastAPI:
@@ -302,6 +319,8 @@ def create_app(
     so tests can use a transactional session, a synchronous/fake worker, a
     no-op forecast materialiser, a canned catalogue and a fake Sports.ru team
     instead of a subprocess, a real solver run and the network.
+    ``nightly_refresh`` is off unless the caller passes settings (the CLI
+    ``main()`` does); tests therefore never start a sleeping background task.
     """
     if session_factory is None:
         engine = create_db_engine(database_url)
@@ -321,6 +340,31 @@ def create_app(
         def fetch_league(league_id: str) -> dict[str, Any]:
             return default_fetch_league(league_id, endpoint=endpoint)
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        task: asyncio.Task[None] | None = None
+        settings = app.state.nightly_refresh
+        if settings is not None and settings.enabled:
+            def enqueue() -> None:
+                enqueue_nightly_jobs(
+                    app.state.session_factory,
+                    app.state.spawn_worker,
+                    settings=settings,
+                )
+
+            task = asyncio.create_task(run_nightly_loop(enqueue, settings))
+            logger.info(
+                "Nightly refresh scheduler enabled at %02d:%02d %s",
+                settings.hour,
+                settings.minute,
+                settings.timezone_name,
+            )
+        yield
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
     app = FastAPI(
         title="Fantasy Analytics API",
         version="0.3.0",
@@ -328,8 +372,11 @@ def create_app(
             "Read API and squad optimizer for the Sports.ru fantasy pipeline, "
             "plus the manual ingestion control plane. Every league in the "
             "catalogue is served by the same endpoints; catalog reads never "
-            "call Sports.ru. POST /squads/import fetches one public team."
+            "call Sports.ru. POST /squads/import fetches one public team. "
+            "Leagues whose current season is already imported are refreshed "
+            "automatically once a night."
         ),
+        lifespan=lifespan,
     )
     app.state.session_factory = session_factory
     app.state.spawn_worker = spawn_worker
@@ -337,6 +384,9 @@ def create_app(
     app.state.sync_competitions = sync_competitions
     app.state.fetch_squad = fetch_squad
     app.state.fetch_league = fetch_league
+    app.state.nightly_refresh = nightly_refresh or NightlyRefreshSettings(
+        enabled=False
+    )
 
     # ------------------------------------------------------------------
     # Unified error envelope.
@@ -920,6 +970,47 @@ def create_app(
                 502, str(error), type_="upstream_error"
             ) from error
 
+    @app.get(
+        "/admin/ingestion/nightly",
+        response_model=NightlyRefreshStatus,
+        tags=["admin"],
+    )
+    def get_nightly_refresh() -> dict[str, Any]:
+        """Show the nightly scheduler: next run, eligible leagues, today's jobs.
+
+        Eligibility is "this league already has its current season imported".
+        Catalogued-only leagues and leagues with only a finished historical
+        season are not on the list and will not be touched at night.
+        """
+        return scheduler_status(
+            app.state.session_factory, app.state.nightly_refresh
+        )
+
+    @app.post(
+        "/admin/ingestion/nightly",
+        response_model=NightlyRefreshReport,
+        tags=["admin"],
+    )
+    def trigger_nightly_refresh(
+        force: bool = Query(
+            default=True,
+            description="Re-queue even if a scheduled job already ran today",
+        ),
+    ) -> dict[str, Any]:
+        """Run the nightly sweep now, without waiting for the scheduled hour.
+
+        Each eligible league is enqueued as a regular current-season job with
+        ``trigger_type=scheduled``. A league that already has a pending or
+        running refresh is skipped; ``force`` only bypasses the once-a-day
+        guard, not the per-tournament lock.
+        """
+        return enqueue_nightly_jobs(
+            app.state.session_factory,
+            app.state.spawn_worker,
+            settings=app.state.nightly_refresh,
+            force=force,
+        )
+
     @app.post(
         "/admin/ingestion/{tournament_slug}/refresh",
         status_code=202,
@@ -985,9 +1076,49 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_ENDPOINT,
         help=f"GraphQL endpoint passed to workers (default: {DEFAULT_ENDPOINT})",
     )
+    parser.add_argument(
+        "--no-nightly-refresh",
+        action="store_true",
+        help="Disable the in-process nightly refresh of imported active seasons",
+    )
+    parser.add_argument(
+        "--nightly-refresh-hour",
+        type=int,
+        help="Local hour (0-23) for the nightly sweep (default: 3, or NIGHTLY_REFRESH_HOUR)",
+    )
+    parser.add_argument(
+        "--nightly-refresh-timezone",
+        help="IANA timezone for the nightly hour (default: Europe/Moscow)",
+    )
     args = parser.parse_args(argv)
 
-    app = create_app(database_url=args.database_url, endpoint=args.endpoint)
+    settings = NightlyRefreshSettings.from_env()
+    if args.no_nightly_refresh:
+        settings = NightlyRefreshSettings(
+            enabled=False,
+            hour=settings.hour,
+            minute=settings.minute,
+            timezone_name=settings.timezone_name,
+            catchup_hours=settings.catchup_hours,
+        )
+    elif args.nightly_refresh_hour is not None or args.nightly_refresh_timezone:
+        settings = NightlyRefreshSettings(
+            enabled=True,
+            hour=(
+                args.nightly_refresh_hour
+                if args.nightly_refresh_hour is not None
+                else settings.hour
+            ),
+            minute=settings.minute,
+            timezone_name=args.nightly_refresh_timezone or settings.timezone_name,
+            catchup_hours=settings.catchup_hours,
+        )
+
+    app = create_app(
+        database_url=args.database_url,
+        endpoint=args.endpoint,
+        nightly_refresh=settings,
+    )
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 

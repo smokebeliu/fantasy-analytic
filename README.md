@@ -14,8 +14,9 @@ normalized samples that can be used to refine the PostgreSQL schema.
 - A representative match history for the best player in each role
 - Derived home/away and clean-sheet club statistics
 
-The default target is the latest completed RPL season. No scheduler or
-continuous collection is included.
+The default target is the latest completed RPL season. Once a league's
+current season has been imported, the API refreshes it automatically once a
+night.
 
 ## Docker quick start
 
@@ -474,7 +475,8 @@ A committed snapshot of a full-season run lives in
 ## Manual ingestion API
 
 `fantasy-api` serves a small FastAPI control plane that triggers a full refresh
-on demand (no scheduler). The request only enqueues a job and returns
+on demand, and also runs a nightly sweep for every league whose *current*
+season is already imported. A refresh only enqueues a job and returns
 immediately; a separate worker process runs the import followed by the quality
 gate, so a snapshot is published only after both succeed. Job state lives in the
 `ingestion_jobs` table, so statuses survive an API restart, and a partial unique
@@ -520,6 +522,42 @@ successful one, the active snapshot with its `data_freshness`, the season and th
 target tour, plus the stage vocabulary. A finished job's full import/quality
 report stays on `GET /admin/ingestion/runs/{job_id}`; the status payload only
 carries the headline counts so polling stays cheap.
+
+### Nightly refresh
+
+The API process (not a separate cron container) sleeps until 03:00
+`Europe/Moscow` and then enqueues a `current`-season job for every league that
+already has an active season in `seasons`. Catalogued-only leagues and leagues
+whose only import is a finished historical season are skipped. A second
+scheduled job the same local day is not created, and a league that already has
+a pending/running refresh is left alone. Jobs are marked
+`trigger_type=scheduled` so they show up next to the manual ones.
+
+```bash
+# Who would be refreshed tonight, and when is the next run?
+curl http://127.0.0.1:8000/admin/ingestion/nightly
+
+# Run the sweep now (still skips a league that is already refreshing).
+curl -X POST 'http://127.0.0.1:8000/admin/ingestion/nightly?force=true'
+```
+
+The same sweep is also a one-shot CLI, useful if you prefer the host crontab
+over the in-process scheduler:
+
+```bash
+PYTHONPATH=src python3 -m fantasy_analytics.nightly_refresh
+PYTHONPATH=src python3 -m fantasy_analytics.nightly_refresh --dry-run
+```
+
+Schedule knobs (environment or `fantasy-api` flags):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `NIGHTLY_REFRESH_ENABLED` | `true` | Set `false` or pass `--no-nightly-refresh` to disable |
+| `NIGHTLY_REFRESH_HOUR` | `3` | Local hour (0–23) |
+| `NIGHTLY_REFRESH_MINUTE` | `0` | Local minute |
+| `NIGHTLY_REFRESH_TZ` | `Europe/Moscow` | IANA timezone of that clock |
+| `NIGHTLY_REFRESH_CATCHUP_HOURS` | `3` | After a deploy that lands just after the hour, still run tonight |
 
 ## User REST API
 
