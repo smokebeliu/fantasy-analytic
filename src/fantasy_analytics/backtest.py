@@ -97,6 +97,7 @@ _NON_SIGNAL_FEATURES = frozenset(
         "feature_version",
         "is_home",
         "is_available",
+        "red_card_suspension",
         "is_newcomer",
         "has_history",
     }

@@ -1318,6 +1318,29 @@ class OptimizerIntegrationTest(unittest.TestCase):
         self.assertEqual(roles, {"GOALKEEPER", "FORWARD"})
         self.assertEqual(validate_squad(solution, _rules_from_report(report)), [])
 
+    def test_a_red_card_zeroes_expected_points_for_the_next_tour(self) -> None:
+        baseline = build_squad_optimization(self.session_factory, tour_ref="1773")
+        forward = next(
+            player
+            for player in baseline["solution"]["squad"]
+            if player["fantasy_player_id"] == "111"
+        )
+        self.assertGreater(forward["expected_points"], 0.0)
+
+        self._exec(
+            "UPDATE player_match_stats SET red_cards = 1 "
+            "WHERE player_season_id = ("
+            "  SELECT id FROM player_seasons WHERE fantasy_player_id = '111')"
+        )
+        report = build_squad_optimization(self.session_factory, tour_ref="1773")
+        banned = next(
+            player
+            for player in report["solution"]["squad"]
+            if player["fantasy_player_id"] == "111"
+        )
+        self.assertEqual(0.0, banned["expected_points"])
+        self.assertEqual(0.0, banned["p_appearance"])
+
     def test_end_to_end_reports_the_head_to_head_fixture(self) -> None:
         # The fixture's only two players are a forward of club A and the
         # goalkeeper of club B, and club A hosts club B in the target tour, so

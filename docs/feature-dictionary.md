@@ -6,7 +6,7 @@ the `fantasy-features` CLI. It turns the *active* snapshot published by the
 quality gate (step 4) into a reproducible, leakage-free table with one row per
 player whose club plays a target tour.
 
-The current `feature_version` is `1.4.0`. Version `1.1.0` added the
+The current `feature_version` is `1.5.0`. Version `1.1.0` added the
 `saves_per90`, `recoveries_per90` and `yellows_per90` rates that the step-7
 event forecast consumes; version `1.2.0` added cross-season sourcing (step 14),
 the `stat_source` / `is_newcomer` labels and newcomer priors; version `1.3.0`
@@ -14,7 +14,8 @@ turned that sourcing into a decaying **blend** of the two seasons, stopped
 counting 0-minute matchday rows as appearances and estimates the appearance
 probability from the whole sourced season instead of a five-match window;
 version `1.4.0` reports every match a club plays in the target tour rather than
-only the earliest.
+only the earliest; version `1.5.0` marks a player unavailable for the target
+tour when a red card from a previous match has not yet been served.
 
 ## Reproducibility and leakage guarantees
 
@@ -47,12 +48,17 @@ tour, cutoff time and feature version" requirement.
 | Club has no matches at the fixture venue | Venue attack/defence falls back to the league mean for that venue |
 | No previous club match | `rest_days` is `null` |
 | Player marked out (`availability_status` in the unavailable set) | `p_appearance` and `expected_minutes` are `0.0` |
+| Unserved red card (`red_card_suspension`) | Same as marked out: `is_available` is `false`, `p_appearance` and `expected_minutes` are `0.0` |
 | Missing snapshot fields (`price`, `selected_by`, `form`) | `null` |
 
 Availability is unavailable when `availability_status` is one of
 `INJURY`, `INJURED`, `DISQUALIFICATION`, `DISQUALIFIED`, `SUSPENDED`,
-`SUSPENSION`, `OUT`, `LEFT`. Any other value (including `FIERY` and `UNKNOWN`)
-is treated as available so a new status never silently zeroes a player.
+`SUSPENSION`, `OUT`, `LEFT`, **or** when the player received a red card and
+his club has not played a later match before the cutoff (the one-match ban
+that skips the next tour). Any other snapshot value (including `FIERY` and
+`UNKNOWN`) is treated as available so a new status never silently zeroes a
+player; the red-card ban is derived from `player_match_stats.red_cards`, not
+from the snapshot, so it also applies when backtesting a historical tour.
 
 ## Cross-season blending
 
@@ -162,7 +168,8 @@ which used to forecast them at exactly zero for the whole following season.
 | `match_id`, `match_scheduled_at` | Target-tour fixture identity and kickoff. |
 | `rest_days` | Days between the club's last pre-cutoff match and the fixture; `null` when none. |
 | `availability_status`, `status_description` | From the active snapshot. |
-| `is_available` | `false` when the status marks the player out. |
+| `is_available` | `false` when the status marks the player out or a red card from a previous match has not yet been served. |
+| `red_card_suspension` | `true` when the player received a red card and his club has not played a later match before the cutoff, so he misses the target tour. |
 | `price`, `selected_by`, `form` | Fantasy snapshot values (`null` when absent). |
 | `points_avg_{3,5,10}` | Mean fantasy points over the last *N* appearances, spilling into last season while this one is shorter. |
 | `points_sum_{3,5,10}` | Total fantasy points over the last *N* appearances. |
