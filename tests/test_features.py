@@ -35,6 +35,7 @@ from fantasy_analytics.features import (
     build_feature_dataset,
     decayed_share,
     per90,
+    pending_red_card_suspension,
     played_before_cutoff,
     prior_season_weight,
     recent_before_cutoff,
@@ -54,7 +55,9 @@ TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL") or os.environ.get(
 _CUTOFF = datetime(2025, 8, 1, tzinfo=timezone.utc)
 
 
-def _appearance(day: int, points: int, minutes: int = 80) -> Appearance:
+def _appearance(
+    day: int, points: int, minutes: int = 80, *, red_cards: int = 0
+) -> Appearance:
     return Appearance(
         match_id=day,
         scheduled_at=datetime(2025, 7, day, 12, 0, tzinfo=timezone.utc),
@@ -62,6 +65,7 @@ def _appearance(day: int, points: int, minutes: int = 80) -> Appearance:
         points=points,
         goals=0,
         assists=0,
+        red_cards=red_cards,
     )
 
 
@@ -160,6 +164,50 @@ class PureHelperTest(unittest.TestCase):
     def test_injury_is_an_unavailable_status(self) -> None:
         self.assertIn("INJURY", UNAVAILABLE_STATUSES)
         self.assertNotIn("FIERY", UNAVAILABLE_STATUSES)
+
+
+class RedCardSuspensionTest(unittest.TestCase):
+    def _club(self, day: int) -> ClubMatch:
+        return ClubMatch(
+            day,
+            datetime(2025, 7, day, 12, 0, tzinfo=timezone.utc),
+            True,
+            1,
+            0,
+        )
+
+    def test_no_red_card_is_not_a_suspension(self) -> None:
+        self.assertFalse(
+            pending_red_card_suspension([_appearance(10, 5)], [self._club(10)])
+        )
+
+    def test_a_red_card_in_the_last_match_suspends_the_next_tour(self) -> None:
+        self.assertTrue(
+            pending_red_card_suspension(
+                [_appearance(10, 5, red_cards=1)], [self._club(10)]
+            )
+        )
+
+    def test_a_later_club_match_serves_the_one_match_ban(self) -> None:
+        # A double gameweek (or any later fixture) is the match the player
+        # already missed, so he is available again for the target tour.
+        self.assertFalse(
+            pending_red_card_suspension(
+                [_appearance(10, 5, red_cards=1)],
+                [self._club(20), self._club(10)],
+            )
+        )
+
+    def test_an_older_served_red_does_not_hide_a_fresh_one(self) -> None:
+        self.assertTrue(
+            pending_red_card_suspension(
+                [
+                    _appearance(5, 4, red_cards=1),
+                    _appearance(20, 8, red_cards=1),
+                ],
+                [self._club(20), self._club(10), self._club(5)],
+            )
+        )
 
 
 class HistoryBlendTest(unittest.TestCase):
@@ -400,6 +448,31 @@ class FeatureDatasetIntegrationTest(unittest.TestCase):
         self.assertEqual(78.0, home["expected_minutes"])
         self.assertEqual(1.0, home["appearance_share"])
         self.assertEqual(1.0, home["start_share"])
+        self.assertFalse(home["red_card_suspension"])
+
+    def test_a_red_card_makes_the_player_unavailable_next_tour(self) -> None:
+        # Snapshot status stays FIT; the ban is derived from the previous
+        # match's red card, which is what a historical (or just-played) tour
+        # actually knows.
+        self._add_future_tour()
+        self._exec(
+            "UPDATE player_match_stats SET red_cards = 1 "
+            "WHERE player_season_id = ("
+            "  SELECT id FROM player_seasons WHERE fantasy_player_id = '111')"
+        )
+
+        report = build_feature_dataset(self.session_factory, tour_ref="1773")
+        rows = self._rows_by_player(report)
+        banned = rows["111"]
+        available = rows["222"]
+
+        self.assertTrue(banned["red_card_suspension"])
+        self.assertFalse(banned["is_available"])
+        self.assertEqual(0.0, banned["p_appearance"])
+        self.assertEqual(0.0, banned["expected_minutes"])
+        self.assertFalse(available["red_card_suspension"])
+        self.assertTrue(available["is_available"])
+        self.assertGreater(available["p_appearance"], 0.0)
 
     def test_target_tour_match_never_leaks_into_history(self) -> None:
         # Tour 1's deadline (17:50) is after its own kickoff (17:30) in the

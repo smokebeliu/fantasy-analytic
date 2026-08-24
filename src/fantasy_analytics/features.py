@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
@@ -71,7 +71,9 @@ from .db.models import (
 # 1.4.0 reports every match a club plays in the target tour (``tour_fixtures``)
 #   instead of only the earliest, because a fantasy tour is a slice of the
 #   calendar and a postponement can leave a club playing twice inside one.
-FEATURE_VERSION = "1.4.0"
+# 1.5.0 treats a red card as a one-match ban: the player is unavailable for the
+#   target tour until his club has played a later match before the cutoff.
+FEATURE_VERSION = "1.5.0"
 
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
 
@@ -166,6 +168,7 @@ class Appearance:
     saves: int = 0
     ball_recoveries: int = 0
     yellow_cards: int = 0
+    red_cards: int = 0
 
     @property
     def played(self) -> bool:
@@ -278,6 +281,33 @@ def played_before_cutoff(
         )
         if appearance.played
     ]
+
+
+def pending_red_card_suspension(
+    appearances: Sequence[Appearance],
+    club_matches: Sequence[ClubMatch],
+) -> bool:
+    """True when a red card has not yet been served by a later club match.
+
+    A red card costs the next match, which for a one-match fantasy tour is the
+    next tour. If the club already played after the sending-off — a double
+    gameweek, or any later fixture before the cutoff — the ban is served and
+    the player is available again. The snapshot ``DISQUALIFICATION`` status is
+    not used here: it is a point-in-time flag from the latest import, so it
+    cannot tell a historical tour whether the player was banned *then*.
+    """
+    reds = [item for item in appearances if item.red_cards > 0]
+    if not reds:
+        return False
+    last_red = max(reds, key=lambda item: (item.scheduled_at, item.match_id))
+    return not any(
+        match.scheduled_at > last_red.scheduled_at
+        or (
+            match.scheduled_at == last_red.scheduled_at
+            and match.match_id != last_red.match_id
+        )
+        for match in club_matches
+    )
 
 
 def per90(total: float, minutes: float) -> float:
@@ -396,7 +426,8 @@ FEATURE_DICTIONARY: tuple[dict[str, str], ...] = (
     {"name": "fixture_count", "description": "How many matches the club plays in the target tour."},
     {"name": "rest_days", "description": "Days between the club's last match before cutoff and the fixture; null when the club has no prior match."},
     {"name": "availability_status", "description": "Fantasy availability status from the active snapshot."},
-    {"name": "is_available", "description": "False when availability_status marks the player out (see UNAVAILABLE_STATUSES)."},
+    {"name": "is_available", "description": "False when availability_status marks the player out (see UNAVAILABLE_STATUSES) or a red card from a previous match has not yet been served."},
+    {"name": "red_card_suspension", "description": "True when the player received a red card and his club has not played a later match before the cutoff, so he misses the target tour."},
     {"name": "price", "description": "Fantasy price from the active snapshot; null when absent."},
     {"name": "selected_by", "description": "Ownership percent from the active snapshot; null when absent."},
     {"name": "form", "description": "Fantasy form value from the active snapshot; null when absent."},
@@ -670,6 +701,7 @@ def load_appearances(
             PlayerMatchStats.saves,
             PlayerMatchStats.ball_recoveries,
             PlayerMatchStats.yellow_cards,
+            PlayerMatchStats.red_cards,
         )
         .join(Match, PlayerMatchStats.match_id == Match.id)
         .join(PlayerSeason, PlayerMatchStats.player_season_id == PlayerSeason.id)
@@ -691,6 +723,7 @@ def load_appearances(
                 saves=row.saves,
                 ball_recoveries=row.ball_recoveries,
                 yellow_cards=row.yellow_cards,
+                red_cards=row.red_cards,
             )
         )
     return by_player
@@ -1276,15 +1309,31 @@ def _build_row(
     row["appearance_share"] = round(appearance_share, 4)
     row["start_share"] = round(start_share, 4)
 
-    # Availability status from the active snapshot.
+    # Availability: the snapshot status covers injuries and published bans, and
+    # a red card on the last match before the cutoff covers the one-match
+    # suspension that status may not yet (or, for a historical tour, may no
+    # longer) reflect.
     status = snapshot["availability_status"] if snapshot else None
-    is_available = (status or "").upper() not in UNAVAILABLE_STATUSES
+    card_history = recent_before_cutoff(
+        [*appearances, *(prior_appearances or [])],
+        cutoff,
+        exclude_match_ids=target_match_ids,
+    )
+    red_card_suspension = pending_red_card_suspension(
+        card_history,
+        [*current_clubs, *prior_clubs],
+    )
+    is_available = (
+        (status or "").upper() not in UNAVAILABLE_STATUSES
+        and not red_card_suspension
+    )
     row["availability_status"] = status
     row["status_description"] = snapshot["status_description"] if snapshot else None
     row["price"] = snapshot["price"] if snapshot else None
     row["selected_by"] = snapshot["selected_by"] if snapshot else None
     row["form"] = snapshot["form"] if snapshot else None
     row["is_available"] = is_available
+    row["red_card_suspension"] = red_card_suspension
 
     # Appearance probability and expected minutes. The probability is the share
     # above: a whole season of evidence, recency-weighted, rather than the last
@@ -1558,6 +1607,7 @@ __all__ = [
     "share_blend_weights",
     "recent_before_cutoff",
     "played_before_cutoff",
+    "pending_red_card_suspension",
     "per90",
     "load_appearances",
     "resolve_prior_run",

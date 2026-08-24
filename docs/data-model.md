@@ -247,8 +247,11 @@ touch the data model are:
   derived from `club_match_stats` before the cutoff, with the league mean used as
   the fallback when a club has no matches at a venue yet.
 - **Availability.** Point-in-time `availability_status` from the active snapshot
-  drives `is_available`; `INJURY`/`SUSPENDED`/etc. zero the appearance
-  probability and expected minutes.
+  drives `is_available` (`INJURY`/`SUSPENDED`/etc. zero the appearance
+  probability). Independently, a red card in `player_match_stats` that has not
+  been served by a later club match before the cutoff also marks the player
+  unavailable for the target tour (`red_card_suspension`), so a sending-off
+  skips the next tour even when the snapshot status is still `FIT`.
 
 ## Baseline points forecast (step 7)
 
