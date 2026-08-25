@@ -34,6 +34,7 @@ fantasy-api = "fantasy_analytics.api:main"
 fantasy-openapi = "fantasy_analytics.openapi_cli:main"
 fantasy-ingestion-worker = "fantasy_analytics.ingestion_worker:main"
 fantasy-nightly-refresh = "fantasy_analytics.nightly_refresh:main"
+fantasy-odds = "fantasy_analytics.odds_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

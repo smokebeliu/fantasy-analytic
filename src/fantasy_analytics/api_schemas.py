@@ -568,6 +568,17 @@ class NightlyRefreshStatus(BaseModel):
     scheduled_today: list[IngestionJobModel]
 
 
+class OddsStatusModel(BaseModel):
+    """Compact odds block on the admin refresh status."""
+
+    season_id: int
+    synced_at: str | None = None
+    matches: int = 0
+    tour_id: int | None = None
+    tour_name: str | None = None
+    sports_tag_id: str | None = None
+
+
 class IngestionStatusResponse(BaseModel):
     """Everything the admin refresh screen needs in a single request.
 
@@ -597,6 +608,30 @@ class IngestionStatusResponse(BaseModel):
         default_factory=list,
         description="Ordered stage vocabulary with completion percentages",
     )
+    odds: OddsStatusModel | None = Field(
+        default=None,
+        description="Last 1x2 refresh for this league's imported season",
+    )
+
+
+class OddsRefreshResponse(BaseModel):
+    """Result of fetching the 1x2 line for one league."""
+
+    tournament_slug: str
+    competition_name: str | None = None
+    season_id: int
+    season_name: str
+    sports_tag_id: str | None = None
+    synced_at: str
+    calendar_matches: int = 0
+    fetched: int = 0
+    stored: int = 0
+    linked: int = 0
+    unmatched: int = 0
+    tour_id: int | None = None
+    tour_name: str | None = None
+    run_id: int | None = None
+    forecast_rows: int = 0
 
 
 __all__ = [
@@ -634,6 +669,8 @@ __all__ = [
     "IngestionJobModel",
     "IngestionProgressModel",
     "IngestionStatusResponse",
+    "OddsRefreshResponse",
+    "OddsStatusModel",
     "NightlyEligibleLeague",
     "NightlyRefreshReport",
     "NightlyRefreshStatus",

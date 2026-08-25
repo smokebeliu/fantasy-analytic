@@ -64,6 +64,7 @@ from .api_schemas import (
     NightlyRefreshStatus,
     MatchListResponse,
     MatchModel,
+    OddsRefreshResponse,
     OptimizerResponse,
     PlayerDetailModel,
     PlayerListResponse,
@@ -103,6 +104,12 @@ from .nightly_refresh import (
     run_nightly_loop,
     scheduler_status,
 )
+from .odds_refresh import (
+    OddsRefreshError,
+    odds_status,
+    refresh_due_odds,
+    refresh_league_odds,
+)
 from .optimizer import OptimizerError, build_squad_optimization
 from .queries import LEAGUE_PROBE_QUERY, SQUAD_QUERY
 from .read_repository import ReadRepository
@@ -122,6 +129,9 @@ RPL_TOURNAMENT_SLUG = DEFAULT_TOURNAMENT_SLUG
 # Refreshes the stored league catalogue from Sports.ru. Injectable so tests can
 # drive the admin endpoint without network access.
 SyncCatalogue = Callable[..., dict[str, Any]]
+
+# Fetches 1x2 odds for one league and rebuilds the next-tour forecast.
+RefreshOdds = Callable[..., dict[str, Any]]
 
 SpawnWorker = Callable[[int], None]
 
@@ -287,6 +297,19 @@ def default_fetch_league(league_id: str, *, endpoint: str = DEFAULT_ENDPOINT) ->
         return {"data": {"fantasyQueries": {"league": None}}}
 
 
+def default_refresh_odds(
+    session_factory: sessionmaker,
+    *,
+    tournament_slug: str,
+    endpoint: str = DEFAULT_ENDPOINT,
+) -> dict[str, Any]:
+    """Fetch one league's 1x2 line inline (one calendar request, then persist)."""
+    client = SportsGraphQLClient(ClientConfig(endpoint=endpoint))
+    return refresh_league_odds(
+        client, session_factory, tournament_slug=tournament_slug
+    )
+
+
 def default_sync_catalogue(
     session_factory: sessionmaker, *, endpoint: str = DEFAULT_ENDPOINT
 ) -> dict[str, Any]:
@@ -308,6 +331,7 @@ def create_app(
     sync_competitions: SyncCatalogue | None = None,
     fetch_squad: FetchSquad | None = None,
     fetch_league: FetchSquad | None = None,
+    refresh_odds: RefreshOdds | None = None,
     nightly_refresh: NightlyRefreshSettings | None = None,
     database_url: str | None = None,
     endpoint: str = DEFAULT_ENDPOINT,
@@ -339,6 +363,13 @@ def create_app(
     if fetch_league is None:
         def fetch_league(league_id: str) -> dict[str, Any]:
             return default_fetch_league(league_id, endpoint=endpoint)
+    if refresh_odds is None:
+        def refresh_odds(
+            factory: sessionmaker, *, tournament_slug: str
+        ) -> dict[str, Any]:
+            return default_refresh_odds(
+                factory, tournament_slug=tournament_slug, endpoint=endpoint
+            )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -351,6 +382,17 @@ def create_app(
                     app.state.spawn_worker,
                     settings=settings,
                 )
+                try:
+                    odds_client = SportsGraphQLClient(
+                        ClientConfig(endpoint=endpoint)
+                    )
+                    refresh_due_odds(
+                        odds_client,
+                        app.state.session_factory,
+                        settings=settings,
+                    )
+                except Exception:
+                    logger.exception("Scheduled match-odds refresh failed")
 
             task = asyncio.create_task(run_nightly_loop(enqueue, settings))
             logger.info(
@@ -384,6 +426,7 @@ def create_app(
     app.state.sync_competitions = sync_competitions
     app.state.fetch_squad = fetch_squad
     app.state.fetch_league = fetch_league
+    app.state.refresh_odds = refresh_odds
     app.state.nightly_refresh = nightly_refresh or NightlyRefreshSettings(
         enabled=False
     )
@@ -949,6 +992,7 @@ def create_app(
                     tours[-1] if tours else None,
                 )
             payload["target_tour"] = target_tour
+            payload["odds"] = odds_status(session, tournament_slug=tournament_slug)
         return payload
 
     @app.post(
@@ -1054,6 +1098,30 @@ def create_app(
         database, which is also what makes a second browser tab consistent.
         """
         return _ingestion_status(_resolve_tournament_slug(tournament_slug))
+
+    @app.post(
+        "/admin/ingestion/{tournament_slug}/odds",
+        response_model=OddsRefreshResponse,
+        tags=["admin"],
+    )
+    def refresh_competition_odds(tournament_slug: str) -> dict[str, Any]:
+        """Fetch the 1x2 line for one league and rebuild the next-tour forecast.
+
+        Addressed at the same calendar widget Sports.ru uses for tournament
+        odds. The optimizer is not touched: expected points change, and the
+        squad picker follows them.
+        """
+        slug = _resolve_tournament_slug(tournament_slug)
+        try:
+            return app.state.refresh_odds(
+                app.state.session_factory, tournament_slug=slug
+            )
+        except OddsRefreshError as error:
+            raise api_error(502, str(error), type_="upstream_error") from error
+        except GraphQLRequestError as error:
+            raise api_error(
+                502, str(error), type_="upstream_error"
+            ) from error
 
     return app
 

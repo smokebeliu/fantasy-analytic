@@ -39,18 +39,18 @@ class ForecastRepository:
     ) -> int:
         """Replace all forecasts for a run/tour with the supplied rows.
 
-        Every ``(model_name, model_version)`` present in ``rows`` is cleared for
-        the run and tour before the new rows are inserted, so a partial re-run of
-        one model does not disturb another model's stored forecasts.
+        Every ``model_name`` present in ``rows`` is cleared for the run and tour
+        before the new rows are inserted, including older ``model_version``
+        rows of the same model, so a version bump never leaves duplicate
+        forecasts that the read API would join twice.
         """
-        model_keys = {(row["model_name"], row["model_version"]) for row in rows}
-        for model_name, model_version in model_keys:
+        model_names = {row["model_name"] for row in rows}
+        for model_name in model_names:
             self._session.execute(
                 delete(PlayerForecast).where(
                     PlayerForecast.ingestion_run_id == run_id,
                     PlayerForecast.tour_id == tour_id,
                     PlayerForecast.model_name == model_name,
-                    PlayerForecast.model_version == model_version,
                 )
             )
         self._session.flush()
