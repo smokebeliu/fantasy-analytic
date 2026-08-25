@@ -12,6 +12,17 @@ from urllib.request import Request, urlopen
 
 DEFAULT_ENDPOINT = "https://www.sports.ru/gql/graphql/"
 
+# Headers the calendar/odds widget expects; harmless on the fantasy queries
+# the rest of the pipeline already sends.
+_DEFAULT_HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Origin": "https://www.sports.ru",
+    "Referer": "https://www.sports.ru/",
+    "X-Appname": "frontend-tagchester-tag-main",
+    "X-Platform": "desktop",
+}
+
 
 class GraphQLRequestError(RuntimeError):
     """Raised when the remote endpoint cannot return usable GraphQL data."""
@@ -48,19 +59,24 @@ class SportsGraphQLClient:
         self,
         query: str,
         variables: Mapping[str, Any] | None = None,
+        *,
+        operation_name: str | None = None,
     ) -> dict[str, Any]:
-        body = json.dumps(
-            {"query": query, "variables": dict(variables or {})},
-            ensure_ascii=False,
-        ).encode("utf-8")
+        payload: dict[str, Any] = {
+            "query": query,
+            "variables": dict(variables or {}),
+        }
+        if operation_name:
+            payload["operationName"] = operation_name
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {
+            **_DEFAULT_HEADERS,
+            "User-Agent": self.config.user_agent,
+        }
         request = Request(
             self.config.endpoint,
             data=body,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "User-Agent": self.config.user_agent,
-            },
+            headers=headers,
             method="POST",
         )
 

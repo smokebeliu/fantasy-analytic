@@ -119,17 +119,20 @@ def ensure_tour_forecasts(
     tour_id: int | None,
     now: datetime | None = None,
     on_progress: ProgressCallback = _noop,
+    force: bool = False,
 ) -> int:
     """Store the forecasts for one run/tour pair unless they already exist.
 
     Returns the number of rows written: ``0`` when the forecasts were already
-    there, when the arguments do not identify a forecastable tour, or when the
-    build failed. Never raises — a missing projection is a degraded read, not an
-    error, and the caller keeps working with whatever the table holds.
+    there (and ``force`` is false), when the arguments do not identify a
+    forecastable tour, or when the build failed. ``force`` rebuilds even if
+    rows already exist — used after an odds refresh so expected points pick
+    up the new line. Never raises — a missing projection is a degraded read,
+    not an error, and the caller keeps working with whatever the table holds.
     """
     if run_id is None or tour_id is None:
         return 0
-    if has_tour_forecasts(session_factory, run_id=run_id, tour_id=tour_id):
+    if not force and has_tour_forecasts(session_factory, run_id=run_id, tour_id=tour_id):
         return 0
 
     tour_ref = _resolve_tour_ref(session_factory, run_id, tour_id)
@@ -145,7 +148,9 @@ def ensure_tour_forecasts(
             # Another process is building the very same tour; its rows will be
             # visible to the next read.
             return 0
-        if has_tour_forecasts(session_factory, run_id=run_id, tour_id=tour_id):
+        if not force and has_tour_forecasts(
+            session_factory, run_id=run_id, tour_id=tour_id
+        ):
             return 0
         try:
             report = run_forecast(

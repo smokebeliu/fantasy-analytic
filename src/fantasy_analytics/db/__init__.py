@@ -19,6 +19,7 @@ from .models import (
     IngestionRun,
     RawApiResponse,
 )
+from .odds_repository import OddsRepository
 from .quality_repository import QualityRepository
 from .repository import IngestionRepository
 
@@ -32,6 +33,7 @@ __all__ = [
     "IngestionJobRepository",
     "IngestionRepository",
     "IngestionRun",
+    "OddsRepository",
     "QualityRepository",
     "RawApiResponse",
     "advisory_lock_key",

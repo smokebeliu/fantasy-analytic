@@ -6,6 +6,7 @@ import type {
   IngestionJob,
   IngestionStatusResponse,
   ImportSquadResponse,
+  OddsRefreshResponse,
   OptimizerResponse,
   PlayerDetailModel,
   PlayerListResponse,
@@ -224,4 +225,10 @@ export const api = {
     request<CatalogueSyncResponse>("/admin/competitions/sync", {
       method: "POST",
     }),
+
+  refreshOdds: (slug: string) =>
+    request<OddsRefreshResponse>(
+      `/admin/ingestion/${encodeURIComponent(slug)}/odds`,
+      { method: "POST" },
+    ),
 };

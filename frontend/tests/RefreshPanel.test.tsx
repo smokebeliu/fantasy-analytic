@@ -12,6 +12,7 @@ import type {
 const getIngestionStatus = vi.fn();
 const refreshIngestion = vi.fn();
 const syncCompetitions = vi.fn();
+const refreshOdds = vi.fn();
 const routerRefresh = vi.fn();
 
 vi.mock("@/lib/api", () => ({
@@ -19,6 +20,7 @@ vi.mock("@/lib/api", () => ({
     getIngestionStatus: (...args: unknown[]) => getIngestionStatus(...args),
     refreshIngestion: (...args: unknown[]) => refreshIngestion(...args),
     syncCompetitions: (...args: unknown[]) => syncCompetitions(...args),
+    refreshOdds: (...args: unknown[]) => refreshOdds(...args),
   },
   // Mirrors the real ApiError, whose status the panel branches on (409).
   ApiError: class ApiError extends Error {
@@ -161,6 +163,7 @@ describe("RefreshPanel", () => {
     getIngestionStatus.mockReset();
     refreshIngestion.mockReset();
     syncCompetitions.mockReset();
+    refreshOdds.mockReset();
     routerRefresh.mockReset();
   });
 
@@ -249,6 +252,39 @@ describe("RefreshPanel", () => {
     await waitFor(() => expect(syncCompetitions).toHaveBeenCalled());
     // The league list is server-rendered, so a fresh server tree is required.
     await waitFor(() => expect(routerRefresh).toHaveBeenCalled());
+  });
+
+  it("fetches 1x2 odds for the selected league", async () => {
+    getIngestionStatus.mockResolvedValue(
+      status({
+        odds: {
+          season_id: 1,
+          synced_at: "2026-08-24T12:00:00Z",
+          matches: 8,
+          tour_name: "6 тур",
+        },
+      }),
+    );
+    refreshOdds.mockResolvedValue({
+      tournament_slug: "russia",
+      season_id: 1,
+      season_name: "2026/2027",
+      synced_at: "2026-08-25T12:00:00Z",
+      calendar_matches: 8,
+      fetched: 8,
+      stored: 8,
+      linked: 8,
+      unmatched: 0,
+      forecast_rows: 90,
+    });
+
+    renderPanel();
+    await waitFor(() => expect(getIngestionStatus).toHaveBeenCalled());
+    expect(screen.getByTestId("refresh-odds-hint")).toHaveTextContent("8 матч");
+
+    await userEvent.click(screen.getByTestId("refresh-odds"));
+    expect(refreshOdds).toHaveBeenCalledWith("russia");
+    await waitFor(() => expect(getIngestionStatus).toHaveBeenCalledTimes(2));
   });
 
   it("starts a refresh and follows the job to success", async () => {

@@ -522,6 +522,137 @@ query ImportSquad($squadID: ID!) {
 }
 """
 
+# Sports.ru football calendar with the 1x2 bookmaker line. The widget is
+# addressed by the tournament *tag* (``source: SPORTS_TAG``), not the fantasy
+# slug; ``TOURNAMENT_HUB_QUERY`` resolves the tag from the stat-hub id.
+TOURNAMENT_HUB_QUERY = """
+query TournamentHub($id: ID!) {
+  statQueries {
+    football {
+      tournament(id: $id, source: SPORTS_HUB) {
+        id
+        name
+        ubersetzer {
+          sportsTag
+        }
+        currentSeason {
+          id
+          name
+        }
+      }
+    }
+  }
+}
+"""
+
+CALENDAR_ODDS_QUERY = """
+query calendarWidget_v1_getFootballCalendarMatchesByTag(
+  $tournamentTagId: ID!
+  $seasonSlug: String!
+  $hasSeasonSlug: Boolean!
+  $statuses: [matchStatus!]
+  $iso2Country: String
+  $withOdds: Boolean = true
+) {
+  statQueries {
+    football {
+      tournament(id: $tournamentTagId, source: SPORTS_TAG) {
+        currentSeason {
+          id
+          name
+          groupMatches(
+            groupBy: BY_STAGE_AND_DAY
+            status: $statuses
+          ) @skip(if: $hasSeasonSlug) {
+            stageName
+            days {
+              date
+              matches {
+                id
+                matchStatus
+                scheduledAt
+                home {
+                  team {
+                    id
+                    name
+                  }
+                }
+                away {
+                  team {
+                    id
+                    name
+                  }
+                }
+                bettingOdds(
+                  placementName: "TAGS_TOURNAMENT_CALENDAR"
+                  iso2Country: $iso2Country
+                  tournamentId: $tournamentTagId
+                ) @include(if: $withOdds) {
+                  bookmaker {
+                    lead
+                  }
+                  line1x2 {
+                    h
+                    x
+                    a
+                  }
+                }
+              }
+            }
+          }
+        }
+        seasonBySlug(slug: $seasonSlug) @include(if: $hasSeasonSlug) {
+          id
+          name
+          groupMatches(
+            groupBy: BY_STAGE_AND_DAY
+            status: $statuses
+          ) {
+            stageName
+            days {
+              date
+              matches {
+                id
+                matchStatus
+                scheduledAt
+                home {
+                  team {
+                    id
+                    name
+                  }
+                }
+                away {
+                  team {
+                    id
+                    name
+                  }
+                }
+                bettingOdds(
+                  placementName: "TAGS_TOURNAMENT_CALENDAR"
+                  iso2Country: $iso2Country
+                  tournamentId: $tournamentTagId
+                ) @include(if: $withOdds) {
+                  bookmaker {
+                    lead
+                  }
+                  line1x2 {
+                    h
+                    x
+                    a
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+CALENDAR_ODDS_OPERATION = "calendarWidget_v1_getFootballCalendarMatchesByTag"
+
 # Used only to distinguish "this id is a league, not a team" from a missing squad.
 LEAGUE_PROBE_QUERY = """
 query ProbeFantasyLeague($id: ID!) {

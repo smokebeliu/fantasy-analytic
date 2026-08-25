@@ -231,6 +231,10 @@ class Competition(Base):
     catalogue_synced_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+    # Sports.ru tag id used by the football calendar / betting-odds widget
+    # (``source: SPORTS_TAG``). Cached after the first odds fetch so later
+    # refreshes do not need a hub lookup.
+    sports_tag_id: Mapped[str | None] = mapped_column(Text)
 
 
 class Season(Base):
@@ -256,6 +260,9 @@ class Season(Base):
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    odds_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
     )
 
 
@@ -409,6 +416,51 @@ class Match(Base):
     away_score: Mapped[int | None] = mapped_column(Integer)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class MatchOdds(Base):
+    """1x2 bookmaker line for one upcoming fixture, used by the forecast.
+
+    The optimizer never reads this table: odds are converted into expected
+    goals, blended into the Poisson match model and only then show up as
+    ``expected_points``. A later refresh upserts on ``stat_match_id``.
+    """
+
+    __tablename__ = "match_odds"
+    __table_args__ = (
+        UniqueConstraint("stat_match_id", name="match_odds_stat_match_key"),
+        Index("match_odds_season_idx", "season_id"),
+        Index("match_odds_match_idx", "match_id"),
+    )
+
+    id: Mapped[int] = _identity_pk()
+    season_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("seasons.id", ondelete="CASCADE"), nullable=False
+    )
+    match_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("matches.id", ondelete="SET NULL")
+    )
+    tour_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("fantasy_tours.id", ondelete="SET NULL")
+    )
+    stat_match_id: Mapped[str] = mapped_column(Text, nullable=False)
+    home_stat_team_id: Mapped[str | None] = mapped_column(Text)
+    away_stat_team_id: Mapped[str | None] = mapped_column(Text)
+    bookmaker: Mapped[str | None] = mapped_column(Text)
+    home_odds: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    draw_odds: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    away_odds: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    implied_home: Mapped[Decimal] = mapped_column(Numeric(8, 6), nullable=False)
+    implied_draw: Mapped[Decimal] = mapped_column(Numeric(8, 6), nullable=False)
+    implied_away: Mapped[Decimal] = mapped_column(Numeric(8, 6), nullable=False)
+    expected_home_goals: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    expected_away_goals: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    raw: Mapped[Any] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
 
 
@@ -739,6 +791,7 @@ __all__ = [
     "IngestionJob",
     "IngestionRun",
     "Match",
+    "MatchOdds",
     "Player",
     "PlayerForecast",
     "PlayerMatchStats",

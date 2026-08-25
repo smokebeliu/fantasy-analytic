@@ -52,6 +52,7 @@ from sqlalchemy.orm import sessionmaker
 from .db import session_scope
 from .db.forecast_repository import ForecastRepository
 from .features import FEATURE_VERSION, build_feature_dataset
+from .odds import DEFAULT_ODDS_WEIGHT, attach_odds_to_features, blend_goal_means
 
 # Bumped whenever the model or its parameters change so forecasts from different
 # code revisions never get silently mixed.
@@ -59,7 +60,11 @@ from .features import FEATURE_VERSION, build_feature_dataset
 #   approximation of the per-N thresholds with their exact Poisson expectation.
 # 1.2.0 scores every match a club plays in the target tour rather than only the
 #   first, so a club doubled up by a postponement is no longer forecast at half.
-MODEL_VERSION = "1.2.0"
+# 1.3.0 blends the 1x2 bookmaker line into the Poisson match model: a favourite
+#   against a weak defence lifts attacking points, a priced-up shutout lifts
+#   clean-sheet points. The optimizer is unchanged — it still maximises
+#   expected_points.
+MODEL_VERSION = "1.3.0"
 
 # Model names persisted alongside every forecast row.
 MODEL_EVENT = "poisson_events"
@@ -326,6 +331,10 @@ def tour_fixtures(row: dict[str, Any]) -> list[dict[str, Any]]:
             "club_defense": row.get("club_defense"),
             "opponent_attack": row.get("opponent_attack"),
             "opponent_defense": row.get("opponent_defense"),
+            "odds_goals_for": row.get("odds_goals_for"),
+            "odds_goals_against": row.get("odds_goals_against"),
+            "odds_weight": row.get("odds_weight"),
+            "odds_line": row.get("odds_line"),
         }
     ]
 
@@ -377,8 +386,6 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
     # Points contributed by each component. The appearance bonus mixes full and
     # substitute probabilities; every other reward is a rate times its value.
     appearance_pts = scoring.appearance_full * p_full + scoring.appearance_sub * p_sub
-    goal_pts = scoring.goal * exp_goals
-    assist_pts = scoring.assist * exp_assists
     # The three block rewards are paid per completed threshold, so each one is
     # the expected number of *whole* blocks rather than the count divided by the
     # block size.
@@ -401,11 +408,21 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
     )
 
     for fixture in tour_fixtures(row):
-        goals_for, goals_against = team_goal_means(
+        hist_for, hist_against = team_goal_means(
             float(fixture.get("club_attack") or 0.0),
             float(fixture.get("club_defense") or 0.0),
             float(fixture.get("opponent_attack") or 0.0),
             float(fixture.get("opponent_defense") or 0.0),
+        )
+        odds_for = fixture.get("odds_goals_for")
+        odds_against = fixture.get("odds_goals_against")
+        weight = float(fixture.get("odds_weight") or DEFAULT_ODDS_WEIGHT)
+        goals_for, goals_against, attack_scale = blend_goal_means(
+            hist_for,
+            hist_against,
+            None if odds_for is None else float(odds_for),
+            None if odds_against is None else float(odds_against),
+            weight=weight,
         )
         p_clean_sheet = clean_sheet_probability(goals_against)
         # A clean sheet only counts for a full appearance.
@@ -417,6 +434,12 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
             * expected_threshold_count(goals_against, 2)
             * p_appearance
         )
+        # Attacking points follow the match scoring rate: a favourite against
+        # a weak defence (priced or historical) scales goals/assists up, an
+        # underdog scales them down. Appearance / cards / volume events stay
+        # on the player's own rates.
+        goal_pts = scoring.goal * exp_goals * attack_scale
+        assist_pts = scoring.assist * exp_assists * attack_scale
         match = {
             "appearance": round(appearance_pts, 4),
             "goals": round(goal_pts, 4),
@@ -460,6 +483,15 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
                 "team_goals_for": goals_for,
                 "team_goals_against": goals_against,
                 "clean_sheet_probability": round(p_clean_sheet, 4),
+                "historical_goals_for": hist_for,
+                "historical_goals_against": hist_against,
+                "attack_scale": attack_scale,
+                "odds_goals_for": (
+                    None if odds_for is None else round(float(odds_for), 4)
+                ),
+                "odds_goals_against": (
+                    None if odds_against is None else round(float(odds_against), 4)
+                ),
             }
         )
 
@@ -469,8 +501,8 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
         # interval. Matches are treated as independent, so variances add.
         if playing:
             variance += (
-                scoring.goal**2 * exp_goals
-                + scoring.assist**2 * exp_assists
+                scoring.goal**2 * exp_goals * attack_scale
+                + scoring.assist**2 * exp_assists * attack_scale
                 + (scoring.save_per_three / 3.0) ** 2 * exp_saves
                 + (scoring.recovery_per_three / 3.0) ** 2 * exp_recoveries
                 + scoring.yellow_card**2 * exp_yellows
@@ -751,6 +783,8 @@ def build_forecast_dataset(
         )
     except Exception as error:  # noqa: BLE001 - normalise to a forecast error
         raise ForecastError(str(error)) from error
+    with session_scope(session_factory) as session:
+        attach_odds_to_features(session, features)
     return forecast_from_features(features, now=generated_at)
 
 

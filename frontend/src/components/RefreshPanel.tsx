@@ -62,6 +62,7 @@ export function RefreshPanel({
   const [actionError, setActionError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [refreshingOdds, setRefreshingOdds] = useState(false);
   const [slug, setSlug] = useState<string>(
     initialSlug ?? initialStatus?.tournament_slug ?? competitions[0]?.slug ?? "",
   );
@@ -158,6 +159,24 @@ export function RefreshPanel({
       setSyncing(false);
     }
   }, [reload, router]);
+
+  const refreshOdds = useCallback(async () => {
+    if (!slug) return;
+    setRefreshingOdds(true);
+    setActionError(null);
+    try {
+      await api.refreshOdds(slug);
+      await reload();
+    } catch (error: unknown) {
+      setActionError(
+        error instanceof ApiError
+          ? error.message
+          : "Не удалось обновить котировки.",
+      );
+    } finally {
+      setRefreshingOdds(false);
+    }
+  }, [reload, slug]);
 
   const start = useCallback(async () => {
     setStarting(true);
@@ -307,6 +326,28 @@ export function RefreshPanel({
             ? `. Последняя синхронизация: ${formatDateTime(
                 competition.catalogue_synced_at,
               )}`
+            : ""}
+          .
+        </p>
+
+        <button
+          className="btn btn--sm"
+          data-testid="refresh-odds"
+          disabled={refreshingOdds || !slug}
+          onClick={() => void refreshOdds()}
+        >
+          {refreshingOdds ? "Загружаем котировки…" : "Обновить котировки"}
+        </button>
+        <p className="inline-note" data-testid="refresh-odds-hint">
+          Загружает 1x2 по ближайшим матчам этой лиги и пересчитывает ожидаемые
+          очки: фаворит против слабой обороны даёт апсайд атаки, крепкая оборона
+          против слабой атаки — апсайд «сухаря»
+          {status?.odds?.synced_at
+            ? `. Последнее обновление: ${formatDateTime(status.odds.synced_at)}${
+                status.odds.matches
+                  ? ` (${status.odds.matches} матч.)`
+                  : ""
+              }`
             : ""}
           .
         </p>

@@ -421,6 +421,34 @@ export interface IngestionStatusResponse {
   season?: SeasonModel | null;
   target_tour?: TourModel | null;
   stages: { stage: string; percent: number }[];
+  odds?: OddsStatus | null;
+}
+
+export interface OddsStatus {
+  season_id: number;
+  synced_at?: string | null;
+  matches: number;
+  tour_id?: number | null;
+  tour_name?: string | null;
+  sports_tag_id?: string | null;
+}
+
+export interface OddsRefreshResponse {
+  tournament_slug: string;
+  competition_name?: string | null;
+  season_id: number;
+  season_name: string;
+  sports_tag_id?: string | null;
+  synced_at: string;
+  calendar_matches: number;
+  fetched: number;
+  stored: number;
+  linked: number;
+  unmatched: number;
+  tour_id?: number | null;
+  tour_name?: string | null;
+  run_id?: number | null;
+  forecast_rows: number;
 }
 
 export interface RefreshRequestBody {
