@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .client import GraphQLRequestError, SportsGraphQLClient
 from .competitions import DEFAULT_TOURNAMENT_SLUG, resolve_slug
 from .db import session_scope
-from .db.models import Club, Competition, FantasyTour, Match, Season
+from .db.models import Competition, FantasyTour, Match, Season
 from .db.odds_repository import OddsRepository
 from .nightly_refresh import NightlyRefreshSettings, list_imported_active_leagues
 from .odds import parse_line1x2
@@ -273,25 +273,6 @@ def _index_matches(session: Session, season_id: int) -> dict[str, Match]:
     return {str(match.stat_match_id): match for match in rows}
 
 
-def _index_clubs(session: Session) -> dict[str, int]:
-    rows = session.execute(select(Club.stat_team_id, Club.id)).all()
-    return {str(stat_id): int(club_id) for stat_id, club_id in rows}
-
-
-def _fallback_match(
-    matches: list[Match],
-    *,
-    home_club_id: int | None,
-    away_club_id: int | None,
-) -> Match | None:
-    if home_club_id is None or away_club_id is None:
-        return None
-    for match in matches:
-        if match.home_club_id == home_club_id and match.away_club_id == away_club_id:
-            return match
-    return None
-
-
 def persist_match_odds(
     session: Session,
     *,
@@ -299,25 +280,21 @@ def persist_match_odds(
     extracted: list[dict[str, Any]],
     captured_at: datetime,
 ) -> dict[str, int]:
-    """Upsert parsed calendar lines, joining them to imported matches."""
+    """Upsert parsed calendar lines, joining them by ``stat_match_id``.
+
+    Club-pair fallback is deliberately not used: the same home/away pairing
+    repeats every season, so a 2026/2027 line would otherwise attach to a
+    2025/2026 fixture. Unmatched rows are still stored so a later import of
+    the current season can join them.
+    """
     by_stat = _index_matches(session, season.id)
-    clubs = _index_clubs(session)
-    season_matches = list(by_stat.values())
     rows: list[dict[str, Any]] = []
     linked = 0
     skipped = 0
     for item in extracted:
         match = by_stat.get(item["stat_match_id"])
         if match is None:
-            home_id = clubs.get(item["home_stat_team_id"] or "")
-            away_id = clubs.get(item["away_stat_team_id"] or "")
-            match = _fallback_match(
-                season_matches, home_club_id=home_id, away_club_id=away_id
-            )
-        if match is None:
             skipped += 1
-            # Still store the line: a later import of the current season can
-            # join it by ``stat_match_id``.
         else:
             linked += 1
         rows.append(

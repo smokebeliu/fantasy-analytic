@@ -502,6 +502,25 @@ class OddsIntegrationTest(unittest.TestCase):
             ).scalar_one()
             self.assertIsNotNone(odds)
 
+    def test_refresh_does_not_link_by_club_pair(self) -> None:
+        """A later season's calendar id must not attach to this season's fixture.
+
+        The same home/away pairing repeats every year; joining on clubs would
+        stamp a 2026/2027 1x2 onto a 2025/2026 match.
+        """
+        client = OddsFakeClient(_calendar_payload("999999"))
+        report = refresh_league_odds(
+            client, self.session_factory, tournament_slug="russia"
+        )
+        self.assertEqual(report["stored"], 1)
+        self.assertEqual(report["linked"], 0)
+        self.assertEqual(report["unmatched"], 1)
+        with session_scope(self.session_factory) as session:
+            match_id = session.execute(
+                text("SELECT match_id FROM match_odds WHERE stat_match_id = '999999'")
+            ).scalar_one()
+            self.assertIsNone(match_id)
+
     def test_admin_odds_endpoint_uses_the_injected_refresher(self) -> None:
         captured: list[str] = []
 
