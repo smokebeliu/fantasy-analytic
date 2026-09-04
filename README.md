@@ -741,6 +741,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - [`docs/backtest-2025-2026.md`](docs/backtest-2025-2026.md) is a committed
   snapshot of a full-season backtest: model versus baselines, per-tour and
   per-position errors, squad results and the resulting decision.
+- [`docs/forecast-improvement-plan.md`](docs/forecast-improvement-plan.md) is
+  the prioritised list of what to improve in the forecast and the optimizer
+  next, with the backtest as the acceptance gate for every item.
 - [`docs/development-plan.md`](docs/development-plan.md) is the agent-oriented
   execution roadmap (planning, current statuses and key nuances) and must be
   updated after every completed step.
