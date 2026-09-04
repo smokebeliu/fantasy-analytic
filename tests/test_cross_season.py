@@ -40,6 +40,10 @@ from fantasy_analytics.db import (
 )
 from fantasy_analytics.features import (
     NEWCOMER_P_APPEARANCE,
+    NEWCOMER_PRICE_SLOPE,
+    NEWCOMER_PRIOR_MATCHES,
+    RATE_PRIOR_WINDOW,
+    RATE_SHRINK_MATCHES,
     STAT_SOURCE_CURRENT,
     STAT_SOURCE_PRIOR,
     Appearance,
@@ -50,9 +54,13 @@ from fantasy_analytics.features import (
     RolePrior,
     _apply_newcomer_prior,
     _build_row,
+    _league_role_priors,
     _resolve_history_source,
     _role_priors,
     build_feature_dataset,
+    newcomer_appearance_prior,
+    rate_prior_scale,
+    shrunk_per90,
 )
 from fantasy_analytics.forecast import (
     MODEL_EVENT,
@@ -130,6 +138,53 @@ class RolePriorsTest(unittest.TestCase):
         # 3 saves over 45 minutes -> 6 per 90; mean minutes 45.
         self.assertEqual(6.0, keeper.saves_per90)
         self.assertEqual(45.0, keeper.mean_minutes)
+
+    def test_league_priors_pool_both_seasons_before_the_cutoff(self) -> None:
+        cutoff = datetime(2025, 7, 3, tzinfo=timezone.utc)
+        # Match 1 and 2 are before the cutoff; match 3 is not, and match 2 is
+        # the tour being predicted, so only match 1 may count.
+        current = {
+            1: [
+                _appearance(1, minutes=90, goals=1),
+                _appearance(2, minutes=90, goals=5),
+                _appearance(3, minutes=90, goals=5),
+            ]
+        }
+        prior = PriorContext(
+            run_id=1,
+            season_id=1,
+            appearances={7: [_appearance(1, minutes=90, goals=1)]},
+            club_matches={},
+            by_player_id={7: PriorPlayer(player_season_id=7, club_id=1, role="FORWARD")},
+            role_priors={},
+        )
+        priors = _league_role_priors(
+            current, {1: "FORWARD"}, prior, cutoff=cutoff, exclude_match_ids=frozenset({2})
+        )
+        # 2 goals over 180 minutes, one from each season.
+        self.assertEqual(1.0, priors["FORWARD"].goals_per90)
+        self.assertEqual(90.0, priors["FORWARD"].mean_minutes)
+
+    def test_rate_prior_scale_caps_a_long_season(self) -> None:
+        # A short prior season is admitted whole (at its weight); a long one is
+        # cut down to the window first.
+        self.assertEqual(1.0, rate_prior_scale(5, 1.0, window=8))
+        self.assertEqual(0.25, rate_prior_scale(32, 1.0, window=8))
+        self.assertEqual(0.125, rate_prior_scale(32, 0.5, window=8))
+        self.assertEqual(0.0, rate_prior_scale(0, 1.0))
+        self.assertEqual(0.0, rate_prior_scale(10, 0.0))
+
+    def test_shrunk_per90_moves_from_the_prior_to_the_sample(self) -> None:
+        # No minutes: the prior decides. Many minutes: the sample decides.
+        self.assertEqual(0.5, shrunk_per90(0, 0, 0.5, pseudo_matches=3))
+        self.assertAlmostEqual(
+            1.0, shrunk_per90(1000, 90_000, 0.5, pseudo_matches=3), places=2
+        )
+        # One goal in one match against a 0.5 prior with three pseudo-matches:
+        # (1 + 1.5) / 4 matches.
+        self.assertAlmostEqual(0.625, shrunk_per90(1, 90, 0.5, pseudo_matches=3))
+        # No pseudo-count reproduces the plain per-90 rate.
+        self.assertEqual(1.0, shrunk_per90(1, 90, 0.5, pseudo_matches=0))
 
     def test_role_without_appearances_is_absent(self) -> None:
         priors = _role_priors({1: [_appearance(1, minutes=90)]}, {1: "DEFENDER"})
@@ -261,10 +316,13 @@ class BlendedHistoryRowTest(unittest.TestCase):
                 )
         return appearances, matches
 
-    def _row(self, *, current: tuple, prior: tuple) -> dict:
+    def _row(
+        self, *, current: tuple, prior: tuple, role_prior: RolePrior | None = None
+    ) -> dict:
         current_appearances, current_matches = current
         prior_appearances, prior_matches = prior
         return _build_row(
+            role_prior=role_prior,
             player={
                 "player_season_id": 1,
                 "player_id": 1,
@@ -302,8 +360,11 @@ class BlendedHistoryRowTest(unittest.TestCase):
         self.assertEqual(0.8, row["p_appearance"])
         self.assertEqual(STAT_SOURCE_PRIOR, row["stat_source"])
         self.assertGreater(row["expected_minutes"], 60)
-        self.assertGreater(row["goals_per90"], 0.9)
-        self.assertGreater(forecast_event_model(row)["expected_points"], 4.0)
+        # A goal a game last season is still read as a goal-a-game striker,
+        # less the shrinkage every rate gets towards the role average (zero
+        # here, since no role prior is given).
+        self.assertGreater(row["goals_per90"], 0.6)
+        self.assertGreater(forecast_event_model(row)["expected_points"], 3.5)
 
     def test_last_season_still_counts_once_the_new_one_starts(self) -> None:
         # The plan's requirement: last season keeps informing later tours, at a
@@ -317,9 +378,53 @@ class BlendedHistoryRowTest(unittest.TestCase):
             self.assertGreater(row["goals_per90"], 0.0)
 
         self.assertEqual(weights, sorted(weights, reverse=True))
-        # A single match of the new season barely moves a rate; two dozen decide it.
-        self.assertGreater(weights[0], 0.8)
+        # A single match of the new season leaves last season the larger half
+        # of the story; two dozen decide it.
+        self.assertGreater(weights[0], 0.5)
         self.assertLess(weights[-1], 0.1)
+
+    def test_last_season_cannot_outvote_this_one_by_being_longer(self) -> None:
+        # The 1.6.0 fix: a 38-match season used to bring 38 matches of evidence
+        # to the pool, so eight blank matches of the new season were outvoted
+        # three to one by last year's goals. Capped at RATE_PRIOR_WINDOW
+        # matches, a long prior season and a short one say the same thing.
+        current = self._season(8, ends=self.CURRENT_END, goals=0)
+        long_prior = self._season(38, ends=self.PRIOR_END, goals=1)
+        short_prior = self._season(
+            int(RATE_PRIOR_WINDOW), ends=self.PRIOR_END, goals=1
+        )
+        long_rate = self._row(current=current, prior=long_prior)["goals_per90"]
+        short_rate = self._row(current=current, prior=short_prior)["goals_per90"]
+        self.assertAlmostEqual(long_rate, short_rate, places=3)
+        # Eight blank matches now outweigh last season: well under half the
+        # goal-a-game rate last season claimed.
+        self.assertLess(long_rate, 0.4)
+        # ... and the reported scale says how much of last season was used.
+        row = self._row(current=current, prior=long_prior)
+        self.assertLess(row["prior_season_scale"], row["prior_season_weight"])
+        self.assertAlmostEqual(
+            row["prior_season_scale"],
+            row["prior_season_weight"] * RATE_PRIOR_WINDOW / 38,
+            places=5,
+        )
+
+    def test_rates_are_shrunk_towards_the_role_average(self) -> None:
+        # Two goals in two matches is not a goal-a-game striker: with the role
+        # average in the pool as pseudo-matches, the rate lands between the
+        # sample and the average, and moves towards the sample as it grows.
+        anchor = RolePrior(0.3, 0.2, 0.0, 3.0, 0.2, 80.0)
+        two = self._season(2, ends=self.CURRENT_END, goals=1)
+        twenty = self._season(20, ends=self.CURRENT_END, goals=1)
+        rate_two = self._row(current=two, prior=([], []), role_prior=anchor)["goals_per90"]
+        rate_twenty = self._row(current=twenty, prior=([], []), role_prior=anchor)["goals_per90"]
+        self.assertGreater(rate_two, 0.3)
+        self.assertLess(rate_two, 0.7)
+        self.assertGreater(rate_twenty, rate_two)
+        self.assertAlmostEqual(
+            rate_two,
+            shrunk_per90(2, 180, 0.3, pseudo_matches=RATE_SHRINK_MATCHES),
+            places=4,
+        )
 
     def test_the_current_season_is_never_discounted(self) -> None:
         # "Current results always take priority": with the same number of
@@ -408,6 +513,47 @@ class ApplyNewcomerPriorTest(unittest.TestCase):
         # Offensive rates are discounted; the yellow-card penalty is not.
         self.assertEqual(0.7, row["goals_per90"])
         self.assertEqual(0.3, row["yellows_per90"])
+
+    def test_priced_appearance_prior(self) -> None:
+        # At the median price the role base applies; a unit above or below
+        # moves it by the slope; keepers start much lower; the range is clamped.
+        self.assertEqual(NEWCOMER_P_APPEARANCE, newcomer_appearance_prior("FORWARD", 6.0, 6.0))
+        self.assertAlmostEqual(
+            NEWCOMER_P_APPEARANCE + NEWCOMER_PRICE_SLOPE,
+            newcomer_appearance_prior("MIDFIELDER", 7.0, 6.0),
+            places=4,
+        )
+        self.assertLess(
+            newcomer_appearance_prior("DEFENDER", 4.5, 6.0), NEWCOMER_P_APPEARANCE
+        )
+        self.assertLess(
+            newcomer_appearance_prior("GOALKEEPER", 5.0, 5.0), NEWCOMER_P_APPEARANCE
+        )
+        self.assertEqual(0.65, newcomer_appearance_prior("FORWARD", 20.0, 6.0))
+        self.assertEqual(0.03, newcomer_appearance_prior("FORWARD", 1.0, 6.0))
+        # No price, or no median to compare with: the base.
+        self.assertEqual(NEWCOMER_P_APPEARANCE, newcomer_appearance_prior("FORWARD", None, 6.0))
+
+    def test_a_missed_club_match_cuts_the_assumption_fast(self) -> None:
+        # The assumption is worth NEWCOMER_PRIOR_MATCHES matches of evidence,
+        # so a club match the newcomer sat out halves it and two quarter it.
+        def p_after(missed: int) -> float:
+            row = {
+                "is_available": True, "p_appearance": 0.0, "expected_minutes": 0.0,
+                "appearance_share": 0.0, "start_share": 0.0, "goals_per90": 0.0,
+                "assists_per90": 0.0, "saves_per90": 0.0, "recoveries_per90": 0.0,
+                "yellows_per90": 0.0,
+            }
+            _apply_newcomer_prior(
+                row, RolePrior(1.0, 0.5, 0.0, 2.0, 0.3, 90.0), is_available=True,
+                prior_share=NEWCOMER_PRIOR_MATCHES, current_share=float(missed),
+                p_base=0.4,
+            )
+            return row["p_appearance"]
+
+        self.assertEqual(0.4, p_after(0))
+        self.assertAlmostEqual(0.2, p_after(1), places=4)
+        self.assertLess(p_after(2), 0.15)
 
     def test_unavailable_newcomer_has_zero_appearance(self) -> None:
         row = {
@@ -637,6 +783,17 @@ class CrossSeasonIntegrationTest(unittest.TestCase):
             )
 
     # -- tests ---------------------------------------------------------------
+    def test_a_later_season_is_never_the_prior_of_an_earlier_one(self) -> None:
+        # Backtesting 2025/26 with 2026/27 imported used to pick 2026/27 as the
+        # "prior" season for the opening tour, because nothing started earlier
+        # and the fallback took any other season. That is the future.
+        report = build_feature_dataset(
+            self.session_factory, season_ref="59", tour_ref="1772"
+        )
+        self.assertIsNone(report["prior_run_id"])
+        self.assertFalse(report["cross_season"])
+        self.assertEqual(0.0, report["prior_season_weight"])
+
     def test_features_source_from_prior_season(self) -> None:
         report = build_feature_dataset(
             self.session_factory, season_ref="75", tour_ref=self.ACTIVE_TOUR
@@ -662,7 +819,17 @@ class CrossSeasonIntegrationTest(unittest.TestCase):
         self.assertEqual(STAT_SOURCE_PRIOR, newcomer["stat_source"])
         self.assertTrue(newcomer["is_newcomer"])
         self.assertFalse(newcomer["has_history"])
-        self.assertEqual(NEWCOMER_P_APPEARANCE, newcomer["p_appearance"])
+        # Priced at 5 against a forward median well above it, the newcomer is
+        # assumed to play far less often than the flat base.
+        forward_prices = sorted(
+            row["price"] for row in report["rows"] if row["role"] == "FORWARD"
+        )
+        median = forward_prices[len(forward_prices) // 2]
+        self.assertEqual(
+            newcomer_appearance_prior("FORWARD", 5.0, median),
+            newcomer["p_appearance"],
+        )
+        self.assertLess(newcomer["p_appearance"], NEWCOMER_P_APPEARANCE)
 
     def test_forecast_labels_source_and_persists_it(self) -> None:
         report = run_forecast(

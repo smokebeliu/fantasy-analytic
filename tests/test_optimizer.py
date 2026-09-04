@@ -346,6 +346,61 @@ class TransfersModeTest(unittest.TestCase):
             )["objective_expected_points"],
         )
 
+    def test_a_marginal_transfer_is_not_proposed(self) -> None:
+        # The pool's expected points climb in steps of 0.5 per player, so the
+        # optimal squad's weakest forward can be swapped for the next one up
+        # for exactly half a point. On live data such a swap once spent the
+        # last transfer of the week for +0.05 points: below the minimum gain
+        # it is noise, not advice, and the plan must leave it alone.
+        by_id = {c.player_season_id: c for c in self.pool}
+        forwards = sorted(
+            (c for c in self.pool if c.role == "FORWARD"),
+            key=lambda c: c.expected_points,
+        )
+        current = [pid for pid in self.optimal_ids if by_id[pid].role != "FORWARD"]
+        kept_forwards = sorted(
+            (by_id[pid] for pid in self.optimal_ids if by_id[pid].role == "FORWARD"),
+            key=lambda c: c.expected_points,
+        )
+        # Replace the best forward by one worth 0.3 points less: a swap back
+        # gains 0.3, which is real but below the threshold.
+        downgraded = replace(
+            forwards[0],
+            player_season_id=99001,
+            fantasy_player_id="99001",
+            expected_points=round(kept_forwards[-1].expected_points - 0.3, 4),
+            price=kept_forwards[-1].price,
+            club_id=kept_forwards[-1].club_id,
+        )
+        pool = [*self.pool, downgraded]
+        current = current + [c.player_season_id for c in kept_forwards[:-1]] + [99001]
+
+        strict = solve_squad(pool, self.rules, current_ids=current, max_transfers=3)
+        self.assertEqual(0, strict["transfers"]["made"])
+        self.assertEqual(0.5, strict["transfers"]["min_gain"])
+
+        greedy = solve_squad(
+            pool, self.rules, current_ids=current, max_transfers=3, min_transfer_gain=0
+        )
+        self.assertEqual(1, greedy["transfers"]["made"])
+        self.assertAlmostEqual(
+            0.3, greedy["transfers"]["pairs"][0]["delta_expected_points"], places=3
+        )
+        self.assertEqual(0, greedy["transfers"]["min_gain"])
+
+        # A swap that clears the bar is still made under the default.
+        big_drop = replace(downgraded, expected_points=round(downgraded.expected_points - 2.0, 4))
+        pool = [*self.pool, big_drop]
+        cleared = solve_squad(pool, self.rules, current_ids=current, max_transfers=3)
+        self.assertEqual(1, cleared["transfers"]["made"])
+        self.assertEqual(validate_squad(cleared, self.rules), [])
+
+    def test_negative_minimum_gain_is_rejected(self) -> None:
+        with self.assertRaises(OptimizerError):
+            solve_squad(
+                self.pool, self.rules, current_ids=self.optimal_ids, min_transfer_gain=-1
+            )
+
     def test_transfer_limit_caps_changes(self) -> None:
         worse = self._worse_squad_ids()
         limited = solve_squad(

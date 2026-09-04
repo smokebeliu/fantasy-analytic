@@ -73,7 +73,17 @@ from .db.models import (
 #   calendar and a postponement can leave a club playing twice inside one.
 # 1.5.0 treats a red card as a one-match ban: the player is unavailable for the
 #   target tour until his club has played a later match before the cutoff.
-FEATURE_VERSION = "1.5.0"
+# 1.6.0 stops last season outvoting this one. The prior-season *rates* used to
+#   enter the pool at ``weight x every match of last season``, so a 30-match
+#   season still carried twice the evidence of six new matches half-way through
+#   the autumn; now last season is worth at most ``RATE_PRIOR_WINDOW`` matches
+#   before the weight is applied. Per-90 rates are additionally shrunk towards
+#   the league's role average with ``RATE_SHRINK_MATCHES`` pseudo-matches, so a
+#   newcomer's two goals in three games no longer read as a 1.0 goals-per-90
+#   striker. The league role priors are pooled from both seasons, so a first
+#   imported season also scores its newcomers from something. A *later* season
+#   is never used as the prior of an earlier one.
+FEATURE_VERSION = "1.6.0"
 
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
 
@@ -88,12 +98,29 @@ ROLLING_WINDOWS = (3, 5, 10)
 STAT_SOURCE_CURRENT = "current_season"
 STAT_SOURCE_PRIOR = "prior_season"
 
-# Documented priors applied to a newcomer that has no history in the prior
-# season (step 14). Offensive/defensive per-90 rates default to the role average
-# from the prior season, discounted because an unknown player is riskier than a
-# proven one; the appearance probability is a conservative constant. These are
-# deliberately position-based; refining them by price/club is left to step 18.
-NEWCOMER_P_APPEARANCE = 0.5
+# Documented priors applied to a newcomer that has no history in either season
+# (step 14). Offensive/defensive per-90 rates default to the league's role
+# average, discounted because an unknown player is riskier than a proven one.
+#
+# The appearance probability is priced (1.6.0). Measured over the opening tour
+# of four seasons (RPL and La Liga 2025/26 and 2026/27, 963 newcomers), a
+# newcomer at his position's median price plays about one time in four, one
+# priced a unit above the median plays more than one time in three, one priced
+# a unit below plays one time in six — and only one keeper in fourteen plays at
+# all. The old flat one-in-two over-predicted every one of them. Above the
+# median the slope is steeper than below it, but a single slope, clamped, is
+# close enough and easy to reason about.
+NEWCOMER_P_APPEARANCE = 0.25
+NEWCOMER_P_APPEARANCE_GOALKEEPER = 0.10
+NEWCOMER_PRICE_SLOPE = 0.12
+NEWCOMER_P_APPEARANCE_MIN = 0.03
+NEWCOMER_P_APPEARANCE_MAX = 0.65
+# A newcomer's assumed appearance probability is worth this many matches of
+# evidence against his club's actual matches: after one match spent off the
+# pitch it counts for less than half, after two for a quarter. The same four
+# seasons say a newcomer who missed his club's first match plays the second
+# one time in twenty, so the assumption has to give way fast.
+NEWCOMER_PRIOR_MATCHES = 1.0
 NEWCOMER_RATE_FACTOR = 0.7
 
 # A player is credited with a "start" when they played at least this many
@@ -103,15 +130,61 @@ START_MINUTES_THRESHOLD = 60
 
 # How fast last season stops mattering, in matches of the new one. Every
 # ``PRIOR_SEASON_HALF_LIFE`` matches the weight of a prior-season observation
-# halves, so last season is the whole story before a ball is kicked, still the
-# larger half after four matches, a fifth after ten and noise by the winter
-# break. The current season is never discounted, which is what makes it win as
-# soon as it has anything to say.
-PRIOR_SEASON_HALF_LIFE = 5.0
+# halves, so last season is the whole story before a ball is kicked, half of it
+# after three matches, a quarter after six and a tenth by the tenth. The
+# current season is never discounted, which is what makes it win as soon as it
+# has anything to say. Shortened from 5 to 3 in 1.6.0: on the 2025/26 RPL and
+# La Liga seasons (backtested with 2024/25 as the prior) the shorter half-life
+# lowered the whole-pool MAE in both leagues (1.048 -> 1.022 and 1.209 -> 1.190)
+# and raised the realised squad points of the RPL; two matches was a step too
+# far (squads lost points in both leagues).
+PRIOR_SEASON_HALF_LIFE = 3.0
 
 # Below this weight the prior season is not loaded at all: it can no longer move
 # a rate by a measurable amount and loading it costs a full extra season scan.
+# The weight is judged on how far the *season* has progressed (the median number
+# of matches a club has played), not on any one player.
 PRIOR_SEASON_MIN_WEIGHT = 0.01
+
+# How many matches of evidence last season may bring to a player's *rates*
+# (goals, assists, saves, recoveries, cards per 90). Without a cap the prior
+# season enters the pool at its full length, so at ``PRIOR_SEASON_HALF_LIFE``
+# matches of the new season — where its weight is one half — a 30-match season
+# still outweighs the five fresh matches three to one, and a player whose role
+# or club changed over the summer keeps last year's numbers well into the
+# autumn. Capped at this many matches, the two seasons meet as equals once the
+# new one is ``RATE_PRIOR_WINDOW x weight`` matches old, and the current season
+# takes over from there. The window is applied *before* the half-life weight.
+# Backtests of 2025/26 could not tell 4, 8 and 12 apart, so the cap is set
+# where it makes the intent legible rather than where it scores best.
+RATE_PRIOR_WINDOW = 8.0
+
+# Pseudo-matches of the league's role average mixed into every player's per-90
+# rates (empirical-Bayes shrinkage). Three games with two goals are not a
+# 1.0-goals-per-90 striker; with five pseudo-matches of the average forward's
+# rate in the pool they read as well under half that until the sample grows.
+# The same pseudo-count tames a keeper's saves and a defender's recoveries
+# after a single match, which is where the largest over-predictions of the
+# first weeks come from. A player with a full season behind him is barely
+# moved. Five beat two and three on every backtest metric in both leagues, and
+# it is also what closed most of the gap between the optimizer's projected and
+# realised squad points (La Liga 2025/26: +12% optimism down to +5%).
+RATE_SHRINK_MATCHES = 5.0
+
+# The same two ideas for the *club* strengths the match model runs on. Last
+# season's results are admitted for at most ``STRENGTH_PRIOR_WINDOW`` matches
+# per club before the half-life weight (a full season at weight one half used
+# to bring nineteen matches against three fresh ones, so a side whose defence
+# fell apart over the summer kept last year's clean-sheet odds into October).
+# Every venue strength is then shrunk towards the league's venue average with
+# ``STRENGTH_SHRINK_MATCHES`` pseudo-matches: strengths are kept per venue, so
+# three matches into a season a promoted club is described by one or two home
+# results, and one 3-0 should not make it the league's best attack. Over a
+# whole backtested season neither knob moves any metric (the opening weeks are
+# too small a share of it), so they are set for the opening weeks, where the
+# next-tour forecast is what people actually look at.
+STRENGTH_PRIOR_WINDOW = 12.0
+STRENGTH_SHRINK_MATCHES = 3.0
 
 # How many matches of evidence each season may contribute when the two are
 # blended into a *share* (appearance and start shares, and the appearance
@@ -214,6 +287,11 @@ class RolePrior:
     recoveries_per90: float
     yellows_per90: float
     mean_minutes: float
+    points_per90: float = 0.0
+
+    def rate(self, key: str) -> float:
+        """The per-90 rate for an event key of :func:`_event_totals`."""
+        return float(getattr(self, f"{key}_per90", 0.0) or 0.0)
 
 
 @dataclass(frozen=True)
@@ -318,7 +396,7 @@ def per90(total: float, minutes: float) -> float:
 
 
 def prior_season_weight(
-    elapsed_matches: int, *, half_life: float = PRIOR_SEASON_HALF_LIFE
+    elapsed_matches: int, *, half_life: float | None = None
 ) -> float:
     """How much one prior-season observation still counts.
 
@@ -330,9 +408,74 @@ def prior_season_weight(
     """
     if elapsed_matches <= 0:
         return 1.0
+    if half_life is None:
+        half_life = PRIOR_SEASON_HALF_LIFE
     if half_life <= 0:
         return 0.0
     return round(0.5 ** (elapsed_matches / half_life), 6)
+
+
+def rate_prior_scale(
+    prior_matches: int, weight: float, *, window: float | None = None
+) -> float:
+    """What each of last season's totals is multiplied by before pooling.
+
+    Last season is admitted at ``weight`` per match but for at most ``window``
+    matches' worth of evidence, so a full season is scaled down to the window
+    first and then discounted by the half-life weight. A short prior season
+    (fewer matches than the window) is taken as it is.
+    """
+    if prior_matches <= 0 or weight <= 0:
+        return 0.0
+    cap = RATE_PRIOR_WINDOW if window is None else window
+    if cap <= 0:
+        return 0.0
+    return round(weight * min(1.0, cap / prior_matches), 6)
+
+
+def shrunk_per90(
+    events: float,
+    minutes: float,
+    prior_rate: float,
+    *,
+    pseudo_matches: float | None = None,
+) -> float:
+    """Per-90 rate shrunk towards ``prior_rate`` with a pseudo-count of minutes.
+
+    The prior contributes ``pseudo_matches x 90`` minutes at ``prior_rate``, so
+    it decides the rate when the player has no minutes and fades as real
+    minutes accumulate: after one full match it still holds three quarters of
+    the vote (at the default three pseudo-matches), after a dozen a fifth.
+    """
+    count = RATE_SHRINK_MATCHES if pseudo_matches is None else pseudo_matches
+    pseudo_minutes = max(0.0, float(count)) * 90.0
+    total_minutes = max(0.0, float(minutes)) + pseudo_minutes
+    if total_minutes <= 0:
+        return 0.0
+    pooled = max(0.0, float(events)) + max(0.0, float(prior_rate)) * pseudo_minutes / 90.0
+    return round(pooled / total_minutes * 90.0, 4)
+
+
+def newcomer_appearance_prior(
+    role: str, price: float | None, median_price: float | None
+) -> float:
+    """Assumed probability that a newcomer features, from his price.
+
+    The price is the one signal the snapshot carries about a player nobody has
+    seen play: a club does not pay for a bench warmer. The prior is the role's
+    base at the role's median price, rising and falling with the price by
+    ``NEWCOMER_PRICE_SLOPE`` per unit, clamped to a sensible range. Without a
+    price (or a median to compare it with) the base applies as it is.
+    """
+    base = (
+        NEWCOMER_P_APPEARANCE_GOALKEEPER
+        if role == "GOALKEEPER"
+        else NEWCOMER_P_APPEARANCE
+    )
+    if price is None or median_price is None:
+        return base
+    value = base + NEWCOMER_PRICE_SLOPE * (float(price) - float(median_price))
+    return round(min(NEWCOMER_P_APPEARANCE_MAX, max(NEWCOMER_P_APPEARANCE_MIN, value)), 4)
 
 
 def share_blend_weights(
@@ -443,15 +586,16 @@ FEATURE_DICTIONARY: tuple[dict[str, str], ...] = (
     {"name": "current_appearances", "description": "Appearances in the target season before the cutoff, unweighted (what the leakage audit recomputes)."},
     {"name": "current_minutes", "description": "Minutes in the target season before the cutoff, unweighted."},
     {"name": "current_points", "description": "Fantasy points in the target season before the cutoff, unweighted."},
-    {"name": "points_per90", "description": "Blended points per 90 minutes; 0.0 when no minutes."},
-    {"name": "goals_per90", "description": "Blended goals per 90 minutes; 0.0 when no minutes."},
-    {"name": "assists_per90", "description": "Blended assists per 90 minutes; 0.0 when no minutes."},
-    {"name": "saves_per90", "description": "Blended goalkeeper saves per 90 minutes; 0.0 when no minutes."},
-    {"name": "recoveries_per90", "description": "Blended ball recoveries per 90 minutes; 0.0 when no minutes."},
-    {"name": "yellows_per90", "description": "Blended yellow cards per 90 minutes; 0.0 when no minutes."},
+    {"name": "points_per90", "description": "Blended points per 90 minutes, shrunk towards the league's role average with RATE_SHRINK_MATCHES pseudo-matches."},
+    {"name": "goals_per90", "description": "Blended goals per 90 minutes, shrunk towards the role average the same way."},
+    {"name": "assists_per90", "description": "Blended assists per 90 minutes, shrunk towards the role average."},
+    {"name": "saves_per90", "description": "Blended goalkeeper saves per 90 minutes, shrunk towards the role average."},
+    {"name": "recoveries_per90", "description": "Blended ball recoveries per 90 minutes, shrunk towards the role average."},
+    {"name": "yellows_per90", "description": "Blended yellow cards per 90 minutes, shrunk towards the role average."},
     {"name": "club_matches_before", "description": "Target-season club matches played before the cutoff (how far the prior weight has decayed)."},
     {"name": "prior_club_matches", "description": "Prior-season matches of the club the player played for last season."},
     {"name": "prior_season_weight", "description": "What one prior-season appearance of this player is still worth, 1.0 before the season starts down to 0 as it progresses."},
+    {"name": "prior_season_scale", "description": "The factor last season's totals were actually pooled at: prior_season_weight capped so last season brings at most RATE_PRIOR_WINDOW matches of evidence."},
     {"name": "appearance_share", "description": "Blended share of the club's matches the player was on the pitch for, recency-weighted within the current season; 0.0 when neither season has a match."},
     {"name": "start_share", "description": "Blended share of the club's matches the player started (>= 60 minutes); 0.0 when none."},
     {"name": "p_appearance", "description": "Probability of playing the fixture — the appearance share above; 0.0 when unavailable."},
@@ -797,17 +941,18 @@ def _load_season_clubs(session, season_id: int) -> dict[int, dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _role_priors(
+def _role_totals(
     appearances_by_ps: dict[int, list[Appearance]],
     role_by_ps: dict[int, str],
-) -> dict[str, RolePrior]:
-    """Aggregate the prior season into per-role per-90 priors for newcomers.
+    totals: dict[str, dict[str, int]] | None = None,
+) -> dict[str, dict[str, int]]:
+    """Sum every played appearance of a season into per-role event totals.
 
-    Rates are pooled across every appearance of a role (so they are minute-
-    weighted), and ``mean_minutes`` is the average minutes of a single
-    appearance. A role without any prior appearance yields an all-zero prior.
+    Passing ``totals`` accumulates into it, which is how the two seasons are
+    pooled into one league-wide prior.
     """
-    totals: dict[str, dict[str, int]] = {}
+    if totals is None:
+        totals = {}
     for ps_id, appearances in appearances_by_ps.items():
         role = role_by_ps.get(ps_id)
         if role is None:
@@ -817,6 +962,7 @@ def _role_priors(
             {
                 "minutes": 0,
                 "count": 0,
+                "points": 0,
                 "goals": 0,
                 "assists": 0,
                 "saves": 0,
@@ -829,12 +975,16 @@ def _role_priors(
                 continue
             agg["minutes"] += appearance.minutes
             agg["count"] += 1
+            agg["points"] += appearance.points
             agg["goals"] += appearance.goals
             agg["assists"] += appearance.assists
             agg["saves"] += appearance.saves
             agg["recoveries"] += appearance.ball_recoveries
             agg["yellows"] += appearance.yellow_cards
+    return totals
 
+
+def _priors_from_totals(totals: dict[str, dict[str, int]]) -> dict[str, RolePrior]:
     priors: dict[str, RolePrior] = {}
     for role, agg in totals.items():
         minutes = agg["minutes"]
@@ -845,8 +995,56 @@ def _role_priors(
             recoveries_per90=per90(agg["recoveries"], minutes),
             yellows_per90=per90(agg["yellows"], minutes),
             mean_minutes=round(minutes / agg["count"], 2) if agg["count"] else 0.0,
+            points_per90=per90(agg["points"], minutes),
         )
     return priors
+
+
+def _role_priors(
+    appearances_by_ps: dict[int, list[Appearance]],
+    role_by_ps: dict[int, str],
+) -> dict[str, RolePrior]:
+    """Aggregate a season into per-role per-90 priors.
+
+    Rates are pooled across every appearance of a role (so they are minute-
+    weighted), and ``mean_minutes`` is the average minutes of a single
+    appearance. A role without any appearance yields no prior. The result is
+    what newcomers are scored from (step 14) and what every player's own rates
+    are shrunk towards (:func:`shrunk_per90`).
+    """
+    return _priors_from_totals(_role_totals(appearances_by_ps, role_by_ps))
+
+
+def _league_role_priors(
+    current_appearances: dict[int, list[Appearance]],
+    current_roles: dict[int, str],
+    prior: PriorContext | None,
+    *,
+    cutoff: datetime,
+    exclude_match_ids: frozenset[int],
+) -> dict[str, RolePrior]:
+    """Role priors pooled from both seasons, leakage-free.
+
+    The current season's appearances are cut at the tour deadline and the
+    target tour's matches are dropped by id, exactly as a player's own history
+    is, so the prior can never carry the tour being predicted. Both seasons are
+    pooled unweighted: a league average built from thousands of minutes is
+    stable, and the point of it is to be a stable anchor.
+    """
+    filtered = {
+        ps_id: played_before_cutoff(
+            items, cutoff, exclude_match_ids=exclude_match_ids
+        )
+        for ps_id, items in current_appearances.items()
+    }
+    totals = _role_totals(filtered, current_roles)
+    if prior is not None:
+        prior_roles = {
+            player.player_season_id: player.role
+            for player in prior.by_player_id.values()
+        }
+        totals = _role_totals(prior.appearances, prior_roles, totals)
+    return _priors_from_totals(totals)
 
 
 def resolve_prior_run(session, season: Season, *, require_earlier: bool = False):
@@ -888,8 +1086,18 @@ def resolve_prior_run(session, season: Season, *, require_earlier: bool = False)
     ]
     if require_earlier:
         pool = earlier
+    elif earlier:
+        pool = earlier
     else:
-        pool = earlier or rows
+        # Nothing is known to start earlier. Only when the *dates* are unknown
+        # is another season a reasonable stand-in; a season that is known to
+        # start later is the future, and forecasting a 2024/25 tour from
+        # 2025/26 would be leakage in a backtest and nonsense in production.
+        pool = [
+            item
+            for item in rows
+            if item[1] is None or target_start is None
+        ]
     if not pool:
         return None
 
@@ -1002,13 +1210,21 @@ def _weighted_mean(pairs: list[tuple[float, float]]) -> tuple[float, float]:
 
 def _club_strengths(
     club_matches: dict[int, list[tuple[ClubMatch, float]]],
+    *,
+    shrink_matches: float | None = None,
 ) -> tuple[dict[int, dict[str, float]], dict[str, float]]:
     """Per-club home/away attack & defence, plus league averages for fills.
 
     Every match carries the weight of the season it belongs to, so a club whose
     new season is two matches old is still described mostly by last season
-    rather than by a single 4-0 that happened to be its opener.
+    rather than by a single 4-0 that happened to be its opener. Each venue
+    strength is additionally shrunk towards the league's venue average with
+    ``shrink_matches`` pseudo-matches (default :data:`STRENGTH_SHRINK_MATCHES`),
+    so a club with one home result is mostly the league average at home and a
+    club with none is exactly that.
     """
+    pseudo = STRENGTH_SHRINK_MATCHES if shrink_matches is None else shrink_matches
+    pseudo = max(0.0, float(pseudo))
     league_pairs: dict[str, list[tuple[float, float]]] = {
         "home_attack": [],
         "home_defense": [],
@@ -1033,15 +1249,24 @@ def _club_strengths(
             side = [(m, w) for m, w in matches if m.is_home is is_home]
             attack, weight = _weighted_mean([(m.goals_scored, w) for m, w in side])
             defense, _ = _weighted_mean([(m.goals_conceded, w) for m, w in side])
-            entry[f"{venue}_attack"] = (
-                round(attack, 4) if weight > 0 else league[f"{venue}_attack"]
-            )
-            entry[f"{venue}_defense"] = (
-                round(defense, 4) if weight > 0 else league[f"{venue}_defense"]
-            )
+            for key, value in (("attack", attack), ("defense", defense)):
+                anchor = league[f"{venue}_{key}"]
+                if weight > 0:
+                    pooled = (value * weight + anchor * pseudo) / (weight + pseudo)
+                    entry[f"{venue}_{key}"] = round(pooled, 4)
+                else:
+                    entry[f"{venue}_{key}"] = anchor
             entry[f"matches_{venue}"] = len(side)
         strengths[club_id] = entry
     return strengths, league
+
+
+def _season_progress(club_matches: dict[int, list[ClubMatch]]) -> int:
+    """How many matches into the season the league is: the median club's count."""
+    counts = sorted(len(matches) for matches in club_matches.values())
+    if not counts:
+        return 0
+    return counts[len(counts) // 2]
 
 
 def _blended_club_matches(
@@ -1051,14 +1276,21 @@ def _blended_club_matches(
     """Weigh each club's matches by the season they belong to.
 
     A club's own new-season matches are the yardstick for how far last season's
-    still count, so a side that has played once is still described almost
-    entirely by last season while a side twenty matches in barely is.
+    still count, so a side that has played once is still described mostly by
+    last season while a side twenty matches in barely is. Last season is
+    admitted for at most :data:`STRENGTH_PRIOR_WINDOW` matches' worth of
+    evidence (:func:`rate_prior_scale`), so a finished season cannot outvote
+    the new one merely by being longer.
     """
     blended: dict[int, list[tuple[ClubMatch, float]]] = {}
     for club_id, matches in current.items():
         blended[club_id] = [(match, 1.0) for match in matches]
     for club_id, matches in prior.items():
-        weight = prior_season_weight(len(current.get(club_id, [])))
+        weight = rate_prior_scale(
+            len(matches),
+            prior_season_weight(len(current.get(club_id, []))),
+            window=STRENGTH_PRIOR_WINDOW,
+        )
         if weight <= 0:
             continue
         blended.setdefault(club_id, []).extend(
@@ -1167,14 +1399,24 @@ def _build_row(
     league: dict[str, float],
     is_newcomer: bool = False,
     newcomer_prior: RolePrior | None = None,
+    role_prior: RolePrior | None = None,
+    role_median_price: float | None = None,
+    prior_available: bool = False,
 ) -> dict[str, Any]:
     """Build one player's feature row from both seasons of his history.
 
     The two seasons are kept apart until the very end and then blended, because
     they answer the same questions with different authority: what happened this
     season counts in full, what happened last season counts less with every
-    match played (:func:`prior_season_weight`). Only matches actually played
-    count as appearances, so a permanent substitute never looks ever-present.
+    match played (:func:`prior_season_weight`) and for at most
+    :data:`RATE_PRIOR_WINDOW` matches' worth (:func:`rate_prior_scale`). Only
+    matches actually played count as appearances, so a permanent substitute
+    never looks ever-present.
+
+    ``role_prior`` is the league's average for the player's position; every
+    per-90 rate is shrunk towards it with :data:`RATE_SHRINK_MATCHES`
+    pseudo-matches (:func:`shrunk_per90`), so a rate built from one or two
+    matches is read with the scepticism it deserves.
 
     ``fixtures`` is every match the club plays in the target tour, in kickoff
     order — normally one, but a fantasy tour is a slice of the calendar rather
@@ -1201,6 +1443,15 @@ def _build_row(
     current_clubs = club_matches
     prior_clubs = prior_club_matches or []
 
+    # A newcomer is a player with no appearance in either season *before the
+    # cutoff*. Judging it on the raw lists instead made a backtest's opening
+    # tour treat every player who would play later in the season as a known
+    # quantity with an empty history, and reserved the newcomer prior for the
+    # handful who never play at all — which is exactly backwards.
+    if not current and not prior:
+        is_newcomer = True
+        newcomer_prior = newcomer_prior or role_prior
+
     # How much last season still counts. Rates are judged on the player's own
     # matches — a signing who has not played yet keeps last season's profile
     # intact — while whether he features is judged on his club's, because eight
@@ -1220,10 +1471,12 @@ def _build_row(
         # The label is what the frontend separates the two seasons by, so it
         # means "these numbers are last season's", not "last season is in the
         # blend". Once the player has kicked a ball this season it is his own
-        # season being reported, however much last season still weighs.
+        # season being reported, however much last season still weighs. A
+        # newcomer scored from the priors carries the label too, but only
+        # when there is a last season for the priors to have come from.
         "stat_source": (
             STAT_SOURCE_PRIOR
-            if not current and (prior or newcomer_prior is not None)
+            if not current and (prior or (is_newcomer and prior_available))
             else STAT_SOURCE_CURRENT
         ),
         "prior_season_weight": rate_prior_weight if prior else 0.0,
@@ -1252,13 +1505,16 @@ def _build_row(
         row[f"assists_sum_{window_size}"] = stats["assists_sum"]
         row[f"minutes_avg_{window_size}"] = stats["minutes_avg"]
 
-    # Totals and per-90 rates: last season's contribution enters at its weight,
-    # which is why the totals are fractional early in a season.
+    # Totals and per-90 rates: last season's contribution enters at its weight
+    # and for at most a window of matches, which is why the totals are
+    # fractional early in a season.
     now_totals = _event_totals(current)
     was_totals = _event_totals(prior)
+    prior_scale = rate_prior_scale(was_totals["appearances"], rate_prior_weight)
+    row["prior_season_scale"] = prior_scale
 
     def _blended(key: str) -> float:
-        return now_totals[key] + rate_prior_weight * was_totals[key]
+        return now_totals[key] + prior_scale * was_totals[key]
 
     total_minutes = _blended("minutes")
     total_points = _blended("points")
@@ -1268,12 +1524,14 @@ def _build_row(
     row["total_appearances"] = round(_blended("appearances"), 4)
     row["total_minutes"] = round(total_minutes, 4)
     row["total_points"] = round(total_points, 4)
-    row["points_per90"] = per90(total_points, total_minutes)
-    row["goals_per90"] = per90(_blended("goals"), total_minutes)
-    row["assists_per90"] = per90(_blended("assists"), total_minutes)
-    row["saves_per90"] = per90(_blended("saves"), total_minutes)
-    row["recoveries_per90"] = per90(_blended("recoveries"), total_minutes)
-    row["yellows_per90"] = per90(_blended("yellows"), total_minutes)
+    # Every rate is shrunk towards the league's role average; without a prior
+    # (a role nobody has played yet) the shrinkage target is zero, which is the
+    # pre-1.6.0 behaviour of trusting the sample as it stands.
+    anchor = role_prior or RolePrior(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    for key in ("points", "goals", "assists", "saves", "recoveries", "yellows"):
+        row[f"{key}_per90"] = shrunk_per90(
+            _blended(key), total_minutes, anchor.rate(key)
+        )
     row["has_history"] = bool(blended_history)
 
     # Appearance and start shares, blended between the two seasons. Each side is
@@ -1372,8 +1630,14 @@ def _build_row(
             row,
             newcomer_prior,
             is_available=is_available,
-            prior_share=carry_weight,
-            current_share=share_now_weight,
+            # The assumption is worth NEWCOMER_PRIOR_MATCHES matches, decayed
+            # like every other prior-season quantity, against every match the
+            # club has actually played without him.
+            prior_share=share_prior_weight * NEWCOMER_PRIOR_MATCHES,
+            current_share=float(len(current_clubs)),
+            p_base=newcomer_appearance_prior(
+                player["role"], row["price"], role_median_price
+            ),
         )
 
     return row
@@ -1386,6 +1650,7 @@ def _apply_newcomer_prior(
     is_available: bool,
     prior_share: float = 1.0,
     current_share: float = 0.0,
+    p_base: float | None = None,
 ) -> None:
     """Overwrite the empty history-derived features with role priors in place.
 
@@ -1395,19 +1660,20 @@ def _apply_newcomer_prior(
     from the position prior while the totals stay zero and ``has_history`` stays
     ``False`` (the row is explicitly flagged as a newcomer).
 
-    The assumed appearance probability is blended down the same way every other
-    share is: an unknown signing is given the benefit of the doubt before a ball
-    is kicked, but once his club has played matches he has not, that silence is
-    evidence and the prior fades against it.
+    The assumed appearance probability (``p_base``, by default the flat
+    :data:`NEWCOMER_P_APPEARANCE`; :func:`newcomer_appearance_prior` prices it)
+    is blended down the same way every other share is: an unknown signing is
+    given some benefit of the doubt before a ball is kicked, but once his club
+    has played matches he has not, that silence is evidence and the prior fades
+    against it.
     """
     weight = (
         blend(0.0, current_share, 1.0, prior_share)
         if (current_share + prior_share) > 0
         else 1.0
     )
-    p_appearance = round(
-        NEWCOMER_P_APPEARANCE * weight if is_available else 0.0, 4
-    )
+    base = NEWCOMER_P_APPEARANCE if p_base is None else float(p_base)
+    p_appearance = round(base * weight if is_available else 0.0, 4)
     mean_minutes = max(0.0, prior.mean_minutes)
     full_ratio = min(max(mean_minutes / 90.0, 0.0), 1.0)
 
@@ -1462,9 +1728,11 @@ def build_feature_dataset(
         # tour but a permanent part of the history, weighed down by how much of
         # the new season has been played (:func:`prior_season_weight`). It stops
         # being loaded once that weight can no longer move a number, which for a
-        # fully played season means backtesting is unaffected.
+        # fully played season means backtesting is unaffected. The season's
+        # progress is the median club's match count, so one club's postponed
+        # games neither hold the prior open nor shut it early.
         prior_run = resolve_prior_run(session, season) if season else None
-        season_weight = prior_season_weight(len(club_matches))
+        season_weight = prior_season_weight(_season_progress(club_matches))
         prior = (
             _load_prior_context(session, prior_run, cutoff)
             if prior_run is not None and season_weight >= PRIOR_SEASON_MIN_WEIGHT
@@ -1475,6 +1743,29 @@ def build_feature_dataset(
         strengths, league = _club_strengths(
             _blended_club_matches(club_matches, prior.club_matches if prior else {})
         )
+
+        # League-wide role averages from both seasons: the anchor every
+        # player's rates are shrunk towards, and the prior a newcomer starts
+        # from when last season knows nothing about him.
+        role_priors = _league_role_priors(
+            appearances,
+            {p["player_season_id"]: p["role"] for p in players},
+            prior,
+            cutoff=cutoff,
+            exclude_match_ids=target_match_ids,
+        )
+
+        # The median price per position, the yardstick a newcomer's assumed
+        # appearance probability is read against.
+        prices_by_role: dict[str, list[float]] = {}
+        for player in players:
+            snapshot = snapshots.get(player["player_season_id"])
+            if snapshot and snapshot["price"] is not None:
+                prices_by_role.setdefault(player["role"], []).append(snapshot["price"])
+        median_price_by_role = {
+            role: sorted(prices)[len(prices) // 2]
+            for role, prices in prices_by_role.items()
+        }
 
         # Map a club id to its display name via any of its season-club rows.
         club_names: dict[int, str] = {}
@@ -1519,6 +1810,14 @@ def build_feature_dataset(
             )
             if source["is_newcomer"]:
                 newcomers += 1
+            # A newcomer is scored from the league's pooled role prior; the
+            # prior-season-only one is the fallback for a role that nobody has
+            # played yet this season.
+            newcomer_prior = (
+                role_priors.get(player["role"]) or source["newcomer_prior"]
+                if source["is_newcomer"]
+                else None
+            )
             row = _build_row(
                 player=player,
                 fixtures=club_fixtures,
@@ -1534,10 +1833,15 @@ def build_feature_dataset(
                 strengths=strengths,
                 league=league,
                 is_newcomer=source["is_newcomer"],
-                newcomer_prior=source["newcomer_prior"],
+                newcomer_prior=newcomer_prior,
+                role_prior=role_priors.get(player["role"]),
+                role_median_price=median_price_by_role.get(player["role"]),
+                prior_available=prior is not None,
             )
             if row["stat_source"] == STAT_SOURCE_PRIOR:
                 prior_sourced += 1
+            if row["is_newcomer"] and not source["is_newcomer"]:
+                newcomers += 1
             rows.append(row)
 
         rows.sort(key=lambda r: (r["club_name"], -r["points_sum_5"], r["player_name"]))
@@ -1586,12 +1890,20 @@ __all__ = [
     "PRIOR_RECENCY_DECAY",
     "PRIOR_SEASON_HALF_LIFE",
     "PRIOR_SEASON_MIN_WEIGHT",
+    "RATE_PRIOR_WINDOW",
+    "RATE_SHRINK_MATCHES",
+    "STRENGTH_PRIOR_WINDOW",
+    "STRENGTH_SHRINK_MATCHES",
     "SHARE_BLEND_WINDOW",
     "UNAVAILABLE_STATUSES",
     "STAT_SOURCE_CURRENT",
     "STAT_SOURCE_PRIOR",
     "NEWCOMER_P_APPEARANCE",
+    "NEWCOMER_P_APPEARANCE_GOALKEEPER",
+    "NEWCOMER_PRICE_SLOPE",
+    "NEWCOMER_PRIOR_MATCHES",
     "NEWCOMER_RATE_FACTOR",
+    "newcomer_appearance_prior",
     "FEATURE_DICTIONARY",
     "FeaturesError",
     "Appearance",
@@ -1604,6 +1916,8 @@ __all__ = [
     "decayed_mean",
     "decayed_share",
     "prior_season_weight",
+    "rate_prior_scale",
+    "shrunk_per90",
     "share_blend_weights",
     "recent_before_cutoff",
     "played_before_cutoff",

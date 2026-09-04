@@ -68,9 +68,9 @@ identities (`players.stat_player_id`, `clubs.stat_team_id`), while the fixture,
 venue and opponent always come from the active season.
 
 - **How much it counts.** One prior-season observation is worth
-  `0.5 ** (matches / PRIOR_SEASON_HALF_LIFE)` with a half-life of 5 matches: the
-  whole story before a ball is kicked, the larger half after four matches, a
-  fifth after ten, noise by the winter break. The current season is never
+  `0.5 ** (matches / PRIOR_SEASON_HALF_LIFE)` with a half-life of 3 matches
+  (5 before 1.6.0): the whole story before a ball is kicked, half of it after
+  three matches, a quarter after six, a tenth by the tenth. The current season is never
   discounted, so it wins as soon as it has anything to say. Below
   `PRIOR_SEASON_MIN_WEIGHT` (0.01) the prior season is not even loaded, which is
   why backtesting a fully played season is unaffected. `prior_season_weight`
@@ -82,6 +82,23 @@ venue and opponent always come from the active season.
   evidence that matters there. The two shares additionally cap each season at
   `SHARE_BLEND_WINDOW` (5) effective matches, so a finished 38-match season
   cannot outvote the one being played merely by being longer.
+- **Last season is worth a window, not a season (1.6.0).** The per-90 rates
+  used to pool last season at `weight x every match`, so with the weight at
+  one half a 30-match season still brought three times the evidence of five
+  new matches and a player whose role or club changed over the summer kept
+  last year's numbers into the autumn. Now last season's totals are scaled to
+  at most `RATE_PRIOR_WINDOW` matches *before* the weight is applied
+  (`prior_season_scale = prior_season_weight x min(1, window / prior matches)`),
+  so the two seasons meet as equals once the new one is a few matches old and
+  the current one takes over from there.
+- **Shrinkage towards the role average (1.6.0).** Every per-90 rate is
+  pooled with `RATE_SHRINK_MATCHES` pseudo-matches of the league's average for
+  the player's position (built from both seasons, cut at the deadline). Two
+  goals in three games therefore read as roughly half a goal a game rather
+  than a goal a game, a keeper's single nine-save match does not make him a
+  nine-save keeper, and a player with a season behind him is barely moved.
+  The same pooled role averages are what a newcomer starts from, so a first
+  imported season scores its newcomers too.
 - **Rolling windows.** `points_avg_{3,5,10}` and friends run across the season
   boundary: while this season is shorter than the window it is topped up from
   last one, and each new appearance pushes one of last season's out.
@@ -91,13 +108,22 @@ venue and opponent always come from the active season.
 - **Departed players.** A player who is not registered in the active season has
   no `player_season` there and simply produces no row (and no optimizer
   candidate).
-- **Newcomers.** A player with no appearance in *either* season is a newcomer:
-  `is_newcomer` is `true`, `has_history` is `false`, and the event rates are
-  filled from documented **role priors** — the prior season's per-90 role
-  averages discounted by `NEWCOMER_RATE_FACTOR` (0.7), with a conservative
-  `NEWCOMER_P_APPEARANCE` (0.5) play probability that itself fades as his club
-  plays matches he does not. These priors are position-based; refining them by
-  price/club is left to step 18.
+- **Newcomers.** A player with no appearance in *either* season before the
+  cutoff is a newcomer: `is_newcomer` is `true`, `has_history` is `false`, and
+  the event rates are filled from documented **role priors** — the pooled
+  per-90 role averages discounted by `NEWCOMER_RATE_FACTOR` (0.7). His play
+  probability is **priced** (1.6.0): `NEWCOMER_P_APPEARANCE` (0.25) at his
+  position's median price, `NEWCOMER_P_APPEARANCE_GOALKEEPER` (0.10) for a
+  keeper, plus `NEWCOMER_PRICE_SLOPE` (0.12) per price unit above or below the
+  median, clamped to `[0.03, 0.65]`. Over the opening tour of four seasons a
+  median-priced newcomer played one time in four and a keeper one in fourteen,
+  so the old flat one-in-two over-predicted every one of them. The assumption
+  is worth `NEWCOMER_PRIOR_MATCHES` (1) match of evidence and fades against
+  every club match he sits out — a newcomer who missed the opener plays the
+  second match one time in twenty. Before 1.6.0 the newcomer test read the
+  raw appearance list rather than the one cut at the deadline, so a backtest's
+  opening tour treated everyone who would play later as a known player with an
+  empty history and kept the newcomer prior for those who never play at all.
 - **Provenance label.** Every row carries `stat_source` (`current_season` or
   `prior_season`), so the frontend can visually separate last season's numbers
   from the ones collected this season (steps 12–13). It means "these numbers are
@@ -177,13 +203,14 @@ which used to forecast them at exactly zero for the whole following season.
 | `assists_sum_{3,5,10}` | Assists over the last *N* appearances. |
 | `minutes_avg_{3,5,10}` | Mean minutes over the last *N* appearances. |
 | `appearances_{3,5,10}` | Appearances actually found in the last-*N* window. |
-| `total_appearances`, `total_minutes`, `total_points` | Blended totals: this season's plus last season's at the prior weight, so they are fractional early in a season. |
+| `total_appearances`, `total_minutes`, `total_points` | Blended totals: this season's plus last season's at `prior_season_scale`, so they are fractional early in a season. |
 | `current_appearances`, `current_minutes`, `current_points` | The target season's own totals before the cutoff, unweighted — what the backtest's leakage audit recomputes. |
-| `points_per90`, `goals_per90`, `assists_per90` | Blended per-90 rates. |
-| `saves_per90`, `recoveries_per90`, `yellows_per90` | Blended goalkeeper-save, ball-recovery and yellow-card per-90 rates (consumed by the step-7 event forecast). |
+| `points_per90`, `goals_per90`, `assists_per90` | Blended per-90 rates, shrunk towards the league's role average with `RATE_SHRINK_MATCHES` pseudo-matches. |
+| `saves_per90`, `recoveries_per90`, `yellows_per90` | Blended goalkeeper-save, ball-recovery and yellow-card per-90 rates, shrunk the same way (consumed by the step-7 event forecast). |
 | `club_matches_before` | Target-season club matches before the cutoff (how far the prior weight has decayed). |
 | `prior_club_matches` | Prior-season matches of the club the player played for last season. |
 | `prior_season_weight` | What one prior-season appearance of this player is still worth (1.0 before the season starts, down to 0). |
+| `prior_season_scale` | The factor last season's totals were actually pooled at: `prior_season_weight` capped so last season brings at most `RATE_PRIOR_WINDOW` matches of evidence. |
 | `appearance_share` | Blended, recency-weighted share of club matches the player was on the pitch for. |
 | `start_share` | Blended share of club matches the player started (>= 60 minutes). |
 | `p_appearance` | Probability of playing the fixture — the appearance share above; `0.0` when unavailable. |

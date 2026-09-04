@@ -25,6 +25,7 @@ from fantasy_analytics.db import (
 )
 from fantasy_analytics.features import (
     FEATURE_VERSION,
+    PRIOR_SEASON_HALF_LIFE,
     UNAVAILABLE_STATUSES,
     Appearance,
     ClubMatch,
@@ -133,7 +134,7 @@ class PureHelperTest(unittest.TestCase):
                 (ClubMatch(3, datetime(2025, 7, 1, tzinfo=timezone.utc), False, 0, 3), 1.0),
             ],
         }
-        strengths, league = _club_strengths(club_matches)
+        strengths, league = _club_strengths(club_matches, shrink_matches=0)
 
         self.assertEqual(3.0, strengths[1]["home_attack"])
         self.assertEqual(0.0, strengths[1]["home_defense"])
@@ -156,10 +157,36 @@ class PureHelperTest(unittest.TestCase):
         # once this season is not suddenly a one-goal-a-game side.
         now = ClubMatch(1, datetime(2025, 8, 1, tzinfo=timezone.utc), True, 1, 0)
         then = ClubMatch(2, datetime(2025, 5, 1, tzinfo=timezone.utc), True, 3, 0)
-        strengths, _ = _club_strengths({1: [(now, 1.0), (then, 1.0)]})
+        strengths, _ = _club_strengths(
+            {1: [(now, 1.0), (then, 1.0)]}, shrink_matches=0
+        )
         self.assertEqual(2.0, strengths[1]["home_attack"])
-        discounted, _ = _club_strengths({1: [(now, 1.0), (then, 0.25)]})
+        discounted, _ = _club_strengths(
+            {1: [(now, 1.0), (then, 0.25)]}, shrink_matches=0
+        )
         self.assertEqual(1.4, discounted[1]["home_attack"])
+
+    def test_a_venue_strength_is_shrunk_towards_the_league_average(self) -> None:
+        # One 3-0 at home does not make a promoted club the league's best
+        # attack: with pseudo-matches of the league average in the pool it sits
+        # between its own result and the average, and a club with no home
+        # match is exactly the average.
+        when = datetime(2025, 8, 1, tzinfo=timezone.utc)
+        club_matches = {
+            1: [(ClubMatch(1, when, True, 3, 0), 1.0)],
+            2: [(ClubMatch(2, when, True, 1, 1), 1.0)],
+            3: [(ClubMatch(3, when, True, 1, 1), 1.0)],
+        }
+        strengths, league = _club_strengths(club_matches, shrink_matches=2)
+        self.assertAlmostEqual(5.0 / 3.0, league["home_attack"], places=4)
+        # (3 x 1 + 5/3 x 2) / 3
+        self.assertAlmostEqual((3 + 10 / 3) / 3, strengths[1]["home_attack"], places=3)
+        self.assertLess(strengths[1]["home_attack"], 3.0)
+        self.assertGreater(strengths[1]["home_attack"], league["home_attack"])
+        self.assertEqual(league["away_attack"], strengths[1]["away_attack"])
+        # Without pseudo-matches the raw mean comes back.
+        raw, _ = _club_strengths(club_matches, shrink_matches=0)
+        self.assertEqual(3.0, raw[1]["home_attack"])
 
     def test_injury_is_an_unavailable_status(self) -> None:
         self.assertIn("INJURY", UNAVAILABLE_STATUSES)
@@ -215,8 +242,12 @@ class HistoryBlendTest(unittest.TestCase):
 
     def test_prior_weight_starts_whole_and_halves_every_half_life(self) -> None:
         self.assertEqual(1.0, prior_season_weight(0))
-        self.assertAlmostEqual(0.5, prior_season_weight(5), places=6)
-        self.assertAlmostEqual(0.25, prior_season_weight(10), places=6)
+        self.assertAlmostEqual(0.5, prior_season_weight(5, half_life=5), places=6)
+        self.assertAlmostEqual(0.25, prior_season_weight(10, half_life=5), places=6)
+        # The default half-life is the module constant.
+        self.assertAlmostEqual(
+            0.5, prior_season_weight(int(PRIOR_SEASON_HALF_LIFE)), places=6
+        )
         self.assertLess(prior_season_weight(30), 0.02)
 
     def test_prior_weight_is_strictly_decreasing(self) -> None:

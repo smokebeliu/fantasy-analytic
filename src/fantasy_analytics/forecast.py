@@ -64,7 +64,15 @@ from .odds import DEFAULT_ODDS_WEIGHT, attach_odds_to_features, blend_goal_means
 #   against a weak defence lifts attacking points, a priced-up shutout lifts
 #   clean-sheet points. The optimizer is unchanged — it still maximises
 #   expected_points.
-MODEL_VERSION = "1.3.0"
+# 1.4.0 scores the per-block rewards (saves, recoveries, goals conceded)
+#   *conditionally on playing*: the Poisson mean is the count of a match the
+#   player actually plays, the whole-block expectation is taken of that, and
+#   only then is it weighted by the probability of playing. Feeding the
+#   appearance-discounted mean into the floor used to under-pay every rotation
+#   player's recoveries by a third. The concession penalty is also scaled to the
+#   minutes the player is on the pitch for, since Sports.ru only counts goals
+#   conceded while he is on it.
+MODEL_VERSION = "1.4.0"
 
 # Model names persisted alongside every forecast row.
 MODEL_EVENT = "poisson_events"
@@ -370,7 +378,9 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
         float(row.get("appearance_share") or 0.0),
     )
 
-    # Per-match event counts, which do not depend on which match it is.
+    # Per-match event counts, which do not depend on which match it is. They
+    # are unconditional expectations: the rate over the minutes the player is
+    # expected to play, appearance probability included.
     exp_goals = _expected_from_rate(float(row.get("goals_per90") or 0.0), expected_minutes)
     exp_assists = _expected_from_rate(
         float(row.get("assists_per90") or 0.0), expected_minutes
@@ -382,16 +392,34 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
     exp_yellows = _expected_from_rate(
         float(row.get("yellows_per90") or 0.0), expected_minutes
     )
+    # The same counts for a match the player actually plays. The block rewards
+    # need these: ``E[floor(N/3)]`` of a Poisson with half the mean is much less
+    # than half of ``E[floor(N/3)]``, so a rotation player's saves and
+    # recoveries were under-paid whenever the appearance-discounted mean was
+    # fed into the floor. ``minutes_share`` is how much of a match he is on the
+    # pitch for when he plays, which is what the concession penalty scales by.
+    minutes_if_playing = expected_minutes / p_appearance if p_appearance > 0 else 0.0
+    minutes_share = min(1.0, max(0.0, minutes_if_playing / 90.0))
+    cond_saves = _expected_from_rate(
+        float(row.get("saves_per90") or 0.0), minutes_if_playing
+    )
+    cond_recoveries = _expected_from_rate(
+        float(row.get("recoveries_per90") or 0.0), minutes_if_playing
+    )
 
     # Points contributed by each component. The appearance bonus mixes full and
     # substitute probabilities; every other reward is a rate times its value.
     appearance_pts = scoring.appearance_full * p_full + scoring.appearance_sub * p_sub
     # The three block rewards are paid per completed threshold, so each one is
-    # the expected number of *whole* blocks rather than the count divided by the
-    # block size.
-    save_pts = scoring.save_per_three * expected_threshold_count(exp_saves, 3)
-    recovery_pts = scoring.recovery_per_three * expected_threshold_count(
-        exp_recoveries, 3
+    # the expected number of *whole* blocks in a match he plays, weighted by
+    # the probability that he does.
+    save_pts = (
+        scoring.save_per_three * expected_threshold_count(cond_saves, 3) * p_appearance
+    )
+    recovery_pts = (
+        scoring.recovery_per_three
+        * expected_threshold_count(cond_recoveries, 3)
+        * p_appearance
     )
     yellow_pts = scoring.yellow_card * exp_yellows
 
@@ -404,7 +432,9 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
     # ``shutout_stake`` prices what a goal against costs; the marginal rate is
     # the concession penalty per goal, which is the same in every match.
     conceded_per_goal = (
-        (-scoring.conceded_per_two / 2.0) * p_appearance if playing else 0.0
+        (-scoring.conceded_per_two / 2.0) * p_appearance * minutes_share
+        if playing
+        else 0.0
     )
 
     for fixture in tour_fixtures(row):
@@ -428,10 +458,12 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
         # A clean sheet only counts for a full appearance.
         clean_sheet_pts = scoring.clean_sheet * p_full * p_clean_sheet
         # The concession penalty is weighted by playing at all, since a player
-        # who never comes on concedes nothing.
+        # who never comes on concedes nothing, and only the goals scored while
+        # he is on the pitch count against him, so the match rate is scaled by
+        # the share of the match he plays.
         conceded_pts = (
             scoring.conceded_per_two
-            * expected_threshold_count(goals_against, 2)
+            * expected_threshold_count(goals_against * minutes_share, 2)
             * p_appearance
         )
         # Attacking points follow the match scoring rate: a favourite against

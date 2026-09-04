@@ -230,6 +230,48 @@ class EventModelTest(unittest.TestCase):
         self.assertAlmostEqual(c["clean_sheet"], math.exp(-1.0), places=3)
         self.assertGreater(result["uncertainty"], 0.0)
 
+    def test_block_rewards_are_conditional_on_playing(self) -> None:
+        # A rotation player who plays half the time, a full match when he does:
+        # his recoveries are the whole-block expectation of a *played* match,
+        # weighted by the chance he plays — not the floor of a halved mean,
+        # which is far less than half (1.4.0).
+        half = _feature_row(
+            role="DEFENDER", p_appearance=0.5, expected_minutes=45.0,
+            start_share=0.5, appearance_share=0.5, recoveries_per90=6.0,
+        )
+        full = _feature_row(
+            role="DEFENDER", p_appearance=1.0, expected_minutes=90.0, recoveries_per90=6.0,
+        )
+        half_pts = forecast_event_model(half)["components"]["recoveries"]
+        full_pts = forecast_event_model(full)["components"]["recoveries"]
+        self.assertAlmostEqual(half_pts, 0.5 * full_pts, places=4)
+        self.assertAlmostEqual(full_pts, expected_threshold_count(6.0, 3), places=4)
+        self.assertGreater(half_pts, expected_threshold_count(3.0, 3))
+
+    def test_concession_penalty_scales_with_minutes_on_the_pitch(self) -> None:
+        # Sports.ru only counts the goals conceded while the player is on the
+        # pitch, so a 30-minute substitute faces a third of the match rate.
+        starter = _feature_row(
+            role="DEFENDER", p_appearance=1.0, expected_minutes=90.0,
+            club_defense=3.0, opponent_attack=3.0,
+        )
+        substitute = _feature_row(
+            role="DEFENDER", p_appearance=1.0, expected_minutes=30.0,
+            start_share=0.0, appearance_share=1.0,
+            club_defense=3.0, opponent_attack=3.0,
+        )
+        starter_pts = forecast_event_model(starter)["components"]["conceded"]
+        sub_pts = forecast_event_model(substitute)["components"]["conceded"]
+        self.assertAlmostEqual(starter_pts, -expected_threshold_count(3.0, 2), places=4)
+        self.assertAlmostEqual(sub_pts, -expected_threshold_count(1.0, 2), places=4)
+        self.assertGreater(sub_pts, starter_pts)
+        # The exposure the optimizer prices follows the same share.
+        self.assertAlmostEqual(
+            forecast_event_model(substitute)["fixture"]["shutout_stake"],
+            0.5 / 3.0,
+            places=4,
+        )
+
     def test_unavailable_player_scores_zero(self) -> None:
         row = _feature_row(is_available=False, goals_per90=1.0)
         result = forecast_event_model(row)

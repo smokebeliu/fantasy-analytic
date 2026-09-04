@@ -579,6 +579,17 @@
               }
             ]
           },
+          "odds": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OddsStatusModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Last 1x2 refresh for this league's imported season"
+          },
           "season": {
             "anyOf": [
               {
@@ -968,6 +979,183 @@
           "reason"
         ],
         "title": "NightlySkippedLeague",
+        "type": "object"
+      },
+      "OddsRefreshResponse": {
+        "description": "Result of fetching the 1x2 line for one league.",
+        "properties": {
+          "calendar_matches": {
+            "default": 0,
+            "title": "Calendar Matches",
+            "type": "integer"
+          },
+          "competition_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Name"
+          },
+          "fetched": {
+            "default": 0,
+            "title": "Fetched",
+            "type": "integer"
+          },
+          "forecast_rows": {
+            "default": 0,
+            "title": "Forecast Rows",
+            "type": "integer"
+          },
+          "linked": {
+            "default": 0,
+            "title": "Linked",
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "season_id": {
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "season_name": {
+            "title": "Season Name",
+            "type": "string"
+          },
+          "sports_tag_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sports Tag Id"
+          },
+          "stored": {
+            "default": 0,
+            "title": "Stored",
+            "type": "integer"
+          },
+          "synced_at": {
+            "title": "Synced At",
+            "type": "string"
+          },
+          "tour_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tour Id"
+          },
+          "tour_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tour Name"
+          },
+          "tournament_slug": {
+            "title": "Tournament Slug",
+            "type": "string"
+          },
+          "unmatched": {
+            "default": 0,
+            "title": "Unmatched",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tournament_slug",
+          "season_id",
+          "season_name",
+          "synced_at"
+        ],
+        "title": "OddsRefreshResponse",
+        "type": "object"
+      },
+      "OddsStatusModel": {
+        "description": "Compact odds block on the admin refresh status.",
+        "properties": {
+          "matches": {
+            "default": 0,
+            "title": "Matches",
+            "type": "integer"
+          },
+          "season_id": {
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "sports_tag_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sports Tag Id"
+          },
+          "synced_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Synced At"
+          },
+          "tour_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tour Id"
+          },
+          "tour_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tour Name"
+          }
+        },
+        "required": [
+          "season_id"
+        ],
+        "title": "OddsStatusModel",
         "type": "object"
       },
       "OptimizerResponse": {
@@ -2617,6 +2805,19 @@
             "description": "Override the tour's transfer limit",
             "title": "Max Transfers"
           },
+          "min_transfer_gain": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Least expected-points gain a single transfer must bring to be proposed (default 0.5; 0 proposes any gain)",
+            "title": "Min Transfer Gain"
+          },
           "model": {
             "default": "poisson_events",
             "description": "Forecast model to optimize on",
@@ -2845,6 +3046,49 @@
           }
         },
         "summary": "Get Run",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/ingestion/{tournament_slug}/odds": {
+      "post": {
+        "description": "Fetch the 1x2 line for one league and rebuild the next-tour forecast.\n\nAddressed at the same calendar widget Sports.ru uses for tournament\nodds. The optimizer is not touched: expected points change, and the\nsquad picker follows them.",
+        "operationId": "refresh_competition_odds_admin_ingestion__tournament_slug__odds_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_slug",
+            "required": true,
+            "schema": {
+              "title": "Tournament Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OddsRefreshResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Refresh Competition Odds",
         "tags": [
           "admin"
         ]
