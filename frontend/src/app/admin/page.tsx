@@ -66,6 +66,7 @@ export default async function AdminPage() {
       )}
 
       <RefreshPanel
+        key={slug ?? "no-league"}
         initialStatus={status}
         initialError={loadError}
         competitions={competitions}

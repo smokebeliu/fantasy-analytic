@@ -197,6 +197,81 @@ describe("RefreshPanel", () => {
     expect(refreshIngestion).toHaveBeenCalledWith("italy", {});
   });
 
+  it("drops the previous league's state when the league changes", async () => {
+    getIngestionStatus.mockResolvedValue(status());
+    // A failure to start leaves an error about the league that was selected.
+    refreshIngestion.mockRejectedValue(
+      new ApiError(500, "internal", "Импорт не запустился"),
+    );
+
+    renderPanel();
+    await waitFor(() => expect(getIngestionStatus).toHaveBeenCalledWith("russia"));
+    await userEvent.selectOptions(screen.getByTestId("refresh-season"), "59");
+    await userEvent.click(screen.getByTestId("refresh-button"));
+    await screen.findByTestId("refresh-action-error");
+
+    // The next league answers slowly: nothing of the previous one may survive
+    // until (or after) its status arrives.
+    let resolveItaly: (value: IngestionStatusResponse) => void = () => {};
+    getIngestionStatus.mockImplementation(
+      () =>
+        new Promise<IngestionStatusResponse>((resolve) => {
+          resolveItaly = resolve;
+        }),
+    );
+
+    await userEvent.selectOptions(screen.getByTestId("refresh-league"), "italy");
+
+    expect(screen.queryByTestId("refresh-action-error")).toBeNull();
+    expect(screen.getByTestId("refresh-snapshot")).toHaveTextContent(
+      "Активного снапшота нет",
+    );
+    expect(screen.getByTestId("refresh-progress")).toHaveTextContent(
+      "Обновление ещё не запускалось",
+    );
+    // A season of the old league means nothing here.
+    expect((screen.getByTestId("refresh-season") as HTMLSelectElement).value).toBe(
+      "latest",
+    );
+
+    resolveItaly(status({ tournament_slug: "italy", competition: ITALY }));
+    await waitFor(() =>
+      expect(screen.getByTestId("refresh-snapshot-league")).toHaveTextContent(
+        "Италия",
+      ),
+    );
+  });
+
+  it("ignores a status that arrives after the league was changed", async () => {
+    let resolveRussia: (value: IngestionStatusResponse) => void = () => {};
+    getIngestionStatus.mockImplementationOnce(
+      () =>
+        new Promise<IngestionStatusResponse>((resolve) => {
+          resolveRussia = resolve;
+        }),
+    );
+    getIngestionStatus.mockResolvedValue(
+      status({ tournament_slug: "italy", competition: ITALY }),
+    );
+
+    renderPanel({ initialStatus: null });
+    await waitFor(() => expect(getIngestionStatus).toHaveBeenCalledWith("russia"));
+    await userEvent.selectOptions(screen.getByTestId("refresh-league"), "italy");
+    await waitFor(() =>
+      expect(screen.getByTestId("refresh-snapshot-league")).toHaveTextContent(
+        "Италия",
+      ),
+    );
+
+    // The in-flight request for the league that was left must not overwrite it.
+    resolveRussia(status());
+    await waitFor(() =>
+      expect(screen.getByTestId("refresh-snapshot-league")).toHaveTextContent(
+        "Италия",
+      ),
+    );
+  });
+
   it("offers the league's own seasons and disables an absent active season", async () => {
     getIngestionStatus.mockResolvedValue(status());
     renderPanel();

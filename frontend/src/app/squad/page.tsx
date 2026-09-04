@@ -1,5 +1,5 @@
 import { api, ApiError } from "@/lib/api";
-import { leagueSeasonId, loadLeagueContext } from "@/lib/league";
+import { leagueKey, leagueSeasonId, loadLeagueContext } from "@/lib/league";
 import { SquadBuilder } from "@/components/SquadBuilder";
 import type { SeasonDetailModel, TourModel } from "@/lib/types";
 
@@ -67,6 +67,7 @@ export default async function SquadPage() {
 
       {!loadError && season != null && defaultTour != null && (
         <SquadBuilder
+          key={leagueKey(competition)}
           seasonId={season.season_id}
           fantasySeasonId={season.fantasy_season_id}
           competitionSlug={competition?.slug ?? season.competition_slug ?? ""}

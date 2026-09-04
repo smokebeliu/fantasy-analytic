@@ -69,3 +69,20 @@ export function leagueSeasonId(
 ): number | null {
   return competition?.latest_season?.season_id ?? null;
 }
+
+/**
+ * Identity of the league a page is rendering, for use as a React `key` on the
+ * client components below it.
+ *
+ * Switching leagues re-renders the server tree, and React would otherwise keep
+ * the client state of the components in it — a squad of players from the
+ * previous league, a pasted team link, a club filter, a tour id that no longer
+ * exists in the new league (which silently disables the import button). Keying
+ * the subtree on the league unmounts it instead, so a league change starts from
+ * a clean screen. The season is part of the key because a first import moves a
+ * league onto a season whose tour ids are equally foreign to that state.
+ */
+export function leagueKey(competition: CompetitionModel | null): string {
+  if (!competition) return "no-league";
+  return `${competition.slug}:${competition.latest_season?.season_id ?? "none"}`;
+}

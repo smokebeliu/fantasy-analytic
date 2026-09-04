@@ -5,9 +5,12 @@ import { LeagueSwitcher } from "@/components/LeagueSwitcher";
 import type { CompetitionModel } from "@/lib/types";
 
 const routerRefresh = vi.fn();
+const routerReplace = vi.fn();
+let pathname = "/";
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ refresh: routerRefresh }),
+  useRouter: () => ({ refresh: routerRefresh, replace: routerReplace }),
+  usePathname: () => pathname,
 }));
 
 function competition(
@@ -57,6 +60,8 @@ const SPAIN = competition({
 describe("LeagueSwitcher", () => {
   beforeEach(() => {
     routerRefresh.mockReset();
+    routerReplace.mockReset();
+    pathname = "/";
   });
 
   it("lists every imported league with its season", () => {
@@ -91,6 +96,25 @@ describe("LeagueSwitcher", () => {
     // Without the refresh the header would keep showing the previous league's
     // freshness while the page below it changed.
     await waitFor(() => expect(routerRefresh).toHaveBeenCalled());
+  });
+
+  it("leaves a player of the old league instead of re-rendering the page", async () => {
+    pathname = "/players/123";
+    const onSelect = vi.fn().mockResolvedValue(undefined);
+    render(
+      <LeagueSwitcher
+        competitions={[competition(), SPAIN]}
+        selectedSlug="russia"
+        onSelect={onSelect}
+      />,
+    );
+
+    await userEvent.selectOptions(screen.getByTestId("league-select"), "spain");
+
+    // Player 123 belongs to the league that was just left; the page cannot be
+    // re-rendered for the new one, so the switcher goes back to the tour list.
+    await waitFor(() => expect(routerReplace).toHaveBeenCalledWith("/"));
+    expect(routerRefresh).not.toHaveBeenCalled();
   });
 
   it("does not persist a no-op re-selection of the current league", async () => {

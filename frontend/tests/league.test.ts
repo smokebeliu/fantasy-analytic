@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { leagueSeasonId, pickCompetition } from "@/lib/league";
+import { leagueKey, leagueSeasonId, pickCompetition } from "@/lib/league";
 import type { CompetitionModel } from "@/lib/types";
 
 function competition(
@@ -65,5 +65,28 @@ describe("leagueSeasonId", () => {
       leagueSeasonId(competition("russia", { latest_season: null })),
     ).toBeNull();
     expect(leagueSeasonId(null)).toBeNull();
+  });
+});
+
+describe("leagueKey", () => {
+  it("changes with the league, so its screens remount instead of keeping state", () => {
+    expect(leagueKey(competition("russia"))).not.toBe(
+      leagueKey(competition("spain")),
+    );
+  });
+
+  it("changes when the league moves onto another season", () => {
+    const before = competition("russia");
+    const after = competition("russia", {
+      latest_season: { ...before.latest_season!, season_id: 8 },
+    });
+    // The tour ids of the previous season are as foreign to the new one as
+    // another league's would be.
+    expect(leagueKey(after)).not.toBe(leagueKey(before));
+  });
+
+  it("is stable while the league is unchanged", () => {
+    expect(leagueKey(competition("russia"))).toBe(leagueKey(competition("russia")));
+    expect(leagueKey(null)).toBe(leagueKey(null));
   });
 });
