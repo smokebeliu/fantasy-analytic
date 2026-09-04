@@ -1702,3 +1702,59 @@ class StepTwentyThreeOptimizerTest(unittest.TestCase):
         self.assertAlmostEqual(
             sum(p["expected_points"] for p in starters), solution["starting_expected_points"]
         )
+
+    def test_horizon_counts_only_the_best_eleven_of_the_roster(self) -> None:
+        # Every outfield player in the pool has a strong run of fixtures ahead
+        # and starts now; the tours ahead are already covered by the eleven.
+        pool = [c for c in self._pool() if c.role != "FORWARD"]
+        for index, candidate in enumerate(pool):
+            pool[index] = self._candidate(
+                candidate.player_season_id, candidate.role, candidate.expected_points,
+                future=10.0, price=4.0, club=candidate.club_id,
+            )
+        pool.append(self._candidate(311, "FORWARD", 3.5, future=10.0, price=4.0, club=311))
+        pool.append(self._candidate(312, "FORWARD", 3.0, future=10.0, price=4.0, club=312))
+        # Two candidates for the last forward slot, neither of whom starts now.
+        # The dearer one has a fine run ahead, but he would not start then
+        # either, so the horizon must not count him; the cheaper one wins on
+        # spend. Summing future points over all fifteen would buy the dearer.
+        pool.append(self._candidate(300, "FORWARD", 0.5, future=0.0, price=4.0, club=300))
+        pool.append(self._candidate(301, "FORWARD", 0.5, future=4.0, price=4.5, club=301))
+        solution = solve_squad(pool, self._rules())
+        ids = {p["player_season_id"] for p in solution["squad"]}
+        self.assertIn(300, ids)
+        self.assertNotIn(301, ids)
+        # The horizon eleven is reported: eleven players, all with a run ahead.
+        horizon = [p for p in solution["squad"] if p["is_horizon_starter"]]
+        self.assertEqual(11, len(horizon))
+        self.assertAlmostEqual(110.0, solution["horizon_expected_points"])
+        self.assertNotIn(300, {p["player_season_id"] for p in horizon})
+
+    def test_horizon_eleven_respects_the_starting_role_limits(self) -> None:
+        # The three forwards carry all the future points. Only an eleven under
+        # the starting limits (at most three forwards, at least one keeper and
+        # three defenders) may be counted, so the keeper and defenders with no
+        # run ahead still fill the horizon eleven.
+        pool = self._pool()
+        forwards = [c for c in pool if c.role == "FORWARD"]
+        pool = [c for c in pool if c.role != "FORWARD"]
+        for candidate in forwards:
+            pool.append(self._candidate(
+                candidate.player_season_id, "FORWARD", candidate.expected_points,
+                future=8.0, price=4.0, club=candidate.club_id,
+            ))
+        solution = solve_squad(pool, self._rules())
+        horizon = [p for p in solution["squad"] if p["is_horizon_starter"]]
+        by_role = {}
+        for entry in horizon:
+            by_role[entry["role"]] = by_role.get(entry["role"], 0) + 1
+        self.assertEqual(11, len(horizon))
+        self.assertEqual(1, by_role["GOALKEEPER"])
+        self.assertGreaterEqual(by_role["DEFENDER"], 3)
+        self.assertLessEqual(by_role["FORWARD"], 3)
+        self.assertAlmostEqual(3 * 8.0, solution["horizon_expected_points"])
+
+    def test_no_horizon_reports_zero_and_marks_nobody(self) -> None:
+        solution = solve_squad(self._pool(), self._rules())
+        self.assertEqual(0.0, solution["horizon_expected_points"])
+        self.assertFalse(any(p["is_horizon_starter"] for p in solution["squad"]))

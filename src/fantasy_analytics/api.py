@@ -64,6 +64,7 @@ from .api_schemas import (
     NightlyRefreshStatus,
     MatchListResponse,
     MatchModel,
+    FullRefreshStatus,
     OddsRefreshResponse,
     OptimizerResponse,
     PlayerDetailModel,
@@ -97,6 +98,7 @@ from .db import (
 from .db.job_repository import ACTIVE_STATUSES
 from .db.models import IngestionJob
 from .forecast_service import ensure_tour_forecasts
+from .full_refresh import FullRefreshBusy, FullRefreshError, FullRefreshManager
 from .ingestion_progress import STAGES
 from .nightly_refresh import (
     NightlyRefreshSettings,
@@ -406,6 +408,13 @@ def create_app(
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        # A full refresh in flight is cut short with the process; its jobs
+        # keep running in their workers and stay visible per league.
+        full_task = app.state.full_refresh._task
+        if full_task is not None and not full_task.done():
+            full_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await full_task
 
     app = FastAPI(
         title="Fantasy Analytics API",
@@ -429,6 +438,9 @@ def create_app(
     app.state.refresh_odds = refresh_odds
     app.state.nightly_refresh = nightly_refresh or NightlyRefreshSettings(
         enabled=False
+    )
+    app.state.full_refresh = FullRefreshManager(
+        session_factory, spawn_worker, refresh_odds
     )
 
     # ------------------------------------------------------------------
@@ -734,6 +746,7 @@ def create_app(
         model: str,
         current_squad: list[str] | None,
         max_transfers: int | None,
+        budget: float | None = None,
         locked: list[str] | None = None,
         locked_starters: list[str] | None = None,
         formation: str | None = None,
@@ -754,6 +767,7 @@ def create_app(
                 model=model,
                 current_squad=current_squad,
                 max_transfers=max_transfers,
+                budget=budget,
                 locked=locked,
                 locked_starters=locked_starters,
                 formation=formation,
@@ -801,6 +815,7 @@ def create_app(
             model=request.model,
             current_squad=request.current_squad,
             max_transfers=request.max_transfers,
+            budget=request.budget,
             locked=request.locked,
             locked_starters=request.locked_starters,
             formation=request.formation,
@@ -1070,6 +1085,37 @@ def create_app(
             settings=app.state.nightly_refresh,
             force=force,
         )
+
+    @app.get(
+        "/admin/ingestion/full-refresh",
+        response_model=FullRefreshStatus,
+        tags=["admin"],
+    )
+    def get_full_refresh() -> dict[str, Any]:
+        """Show the one-button refresh: the run in flight, or the last one."""
+        return app.state.full_refresh.status()
+
+    @app.post(
+        "/admin/ingestion/full-refresh",
+        response_model=FullRefreshStatus,
+        status_code=202,
+        tags=["admin"],
+    )
+    async def start_full_refresh() -> dict[str, Any]:
+        """Refresh everything: every imported league, both seasons, then odds.
+
+        For each imported league in catalogue order the latest completed
+        season is imported, then the current one (when the league has one),
+        then the 1x2 line is fetched and the next-tour forecast rebuilt. The
+        steps run one after another as regular ingestion jobs; poll the GET
+        for progress. A ``409`` means a full refresh is already running.
+        """
+        try:
+            return await app.state.full_refresh.start()
+        except FullRefreshBusy as error:
+            raise api_error(409, str(error), type_="conflict") from error
+        except FullRefreshError as error:
+            raise api_error(422, str(error), type_="full_refresh_error") from error
 
     @app.post(
         "/admin/ingestion/{tournament_slug}/refresh",

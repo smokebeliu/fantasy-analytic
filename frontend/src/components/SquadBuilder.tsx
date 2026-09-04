@@ -98,6 +98,11 @@ export function SquadBuilder({
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [importNote, setImportNote] = useState<string | null>(null);
+  // Money and transfers the Sports.ru import reported for this squad. They
+  // replace the season's opening budget and the tour's full allowance until
+  // the squad is cleared or another team is imported.
+  const [importedBudget, setImportedBudget] = useState<number | null>(null);
+  const [importedTransfersLeft, setImportedTransfersLeft] = useState<number | null>(null);
 
   const poolHover = usePlayerHoverCard();
 
@@ -107,8 +112,8 @@ export function SquadBuilder({
   );
 
   const limits = useMemo(
-    () => resolveSquadLimits(rules, selectedTour?.max_same_team_players),
-    [rules, selectedTour],
+    () => resolveSquadLimits(rules, selectedTour?.max_same_team_players, importedBudget),
+    [rules, selectedTour, importedBudget],
   );
 
   const validation = useMemo(
@@ -121,7 +126,11 @@ export function SquadBuilder({
   // The tour's own free-transfer allowance is the default and the maximum: the
   // solver does not price the penalty the game charges for extra transfers, so
   // suggesting more of them than the tour gives away would be misleading.
-  const allowedTransfers = selectedTour?.total_transfers ?? 3;
+  const tourTransfers = selectedTour?.total_transfers ?? 3;
+  const allowedTransfers =
+    importedTransfersLeft != null
+      ? Math.min(importedTransfersLeft, tourTransfers)
+      : tourTransfers;
   const transferLimit = Math.min(maxTransfers ?? allowedTransfers, allowedTransfers);
 
   // With nothing pinned and no formation chosen there is nothing for the
@@ -308,6 +317,8 @@ export function SquadBuilder({
       setSelected(resolved);
       setLocked(new Set());
       setResult(null);
+      setImportedBudget(res.budget ?? null);
+      setImportedTransfersLeft(res.transfers_left ?? null);
       const missingNames = res.missing
         .map((item) => item.player_name || item.fantasy_player_id)
         .filter(Boolean);
@@ -316,6 +327,13 @@ export function SquadBuilder({
         bits.push(`текущий тур Sports.ru: ${res.remote_tour.name}`);
       }
       bits.push(`${resolved.length} игроков на выбранный тур`);
+      if (res.budget != null) {
+        const bank = res.current_balance != null ? ` (в банке ${formatPrice(res.current_balance)})` : "";
+        bits.push(`бюджет ${formatPrice(res.budget)}${bank}`);
+      }
+      if (res.transfers_left != null) {
+        bits.push(`замен осталось: ${res.transfers_left}`);
+      }
       if (missingNames.length > 0) {
         bits.push(`не найдены в снимке: ${missingNames.join(", ")}`);
       }
@@ -349,6 +367,7 @@ export function SquadBuilder({
         tour: selectedTour.fantasy_tour_id,
         model,
         max_transfers: transferLimit,
+        ...(importedBudget != null ? { budget: importedBudget } : {}),
         ...(lockedRefs.length > 0 ? { locked: lockedRefs } : {}),
         ...(formation ? { formation } : {}),
       });
@@ -655,7 +674,11 @@ export function SquadBuilder({
               {selected.length > 0 && (
                 <button
                   className="btn btn--ghost btn--sm btn--danger"
-                  onClick={() => setSelected([])}
+                  onClick={() => {
+                    setSelected([]);
+                    setImportedBudget(null);
+                    setImportedTransfersLeft(null);
+                  }}
                 >
                   Очистить
                 </button>

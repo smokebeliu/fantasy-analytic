@@ -45,6 +45,9 @@ def _remote_payload(
     tour_info = {
         "tour": {"id": "2349", "name": "3 тур", "status": "OPENED"} if include_tour else None,
         "totalPrice": 97.5,
+        "currentBalance": 2.5,
+        "transfersLeft": 3,
+        "transfersDone": 0,
         "players": players,
     }
     return {
@@ -138,6 +141,27 @@ class ExtractRemoteSquadTest(unittest.TestCase):
         self.assertEqual("2349", remote.tour["fantasy_tour_id"])
         self.assertEqual(["68704", "68789"], [p.fantasy_player_id for p in remote.players])
         self.assertTrue(remote.players[1].is_captain)
+
+    def test_reads_the_bank_and_the_transfers_left(self) -> None:
+        remote = extract_remote_squad(_remote_payload())
+        assert remote is not None
+        self.assertEqual(97.5, remote.total_price)
+        self.assertEqual(2.5, remote.current_balance)
+        self.assertEqual(100.0, remote.budget)
+        self.assertEqual(3, remote.transfers_left)
+        self.assertEqual(0, remote.transfers_done)
+
+    def test_missing_money_fields_leave_the_budget_unknown(self) -> None:
+        payload = _remote_payload()
+        info = payload["data"]["fantasyQueries"]["squads"][0]["currentTourInfo"]
+        del info["currentBalance"]
+        info["transfersLeft"] = "not a number"
+        remote = extract_remote_squad(payload)
+        assert remote is not None
+        self.assertEqual(97.5, remote.total_price)
+        self.assertIsNone(remote.current_balance)
+        self.assertIsNone(remote.budget)
+        self.assertIsNone(remote.transfers_left)
 
     def test_empty_squads_list_is_missing(self) -> None:
         self.assertIsNone(

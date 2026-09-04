@@ -89,6 +89,12 @@ class RequestContractTest(unittest.TestCase):
         with self.assertRaises(pydantic.ValidationError):
             TransfersRequest(current_squad=["111"], max_transfers=-1)
 
+    def test_transfers_request_rejects_a_non_positive_budget(self) -> None:
+        with self.assertRaises(pydantic.ValidationError):
+            TransfersRequest(current_squad=["111"], budget=0)
+        self.assertEqual(101.5, TransfersRequest(current_squad=["111"], budget=101.5).budget)
+        self.assertIsNone(TransfersRequest(current_squad=["111"]).budget)
+
     def test_invalid_model_is_rejected(self) -> None:
         with self.assertRaises(pydantic.ValidationError):
             SquadRequest(model="not-a-model")
@@ -280,6 +286,37 @@ class OfflineAppTest(unittest.TestCase):
         response = self._client().post("/optimizer/transfers", json={"tour": "1786"})
         self.assertEqual(422, response.status_code)
         self.assertEqual("validation_error", response.json()["error"]["type"])
+
+    def test_optimizer_transfers_passes_the_squad_budget_through(self) -> None:
+        # The imported team's own money (value plus bank) replaces the season's
+        # opening budget; omitting it leaves the optimizer on the season's.
+        stub = {
+            "optimizer_version": "1.6.0",
+            "model": "poisson_events",
+            "mode": "transfers",
+            "generated_at": "2026-09-04T00:00:00+00:00",
+            "run_id": 1,
+            "season_id": 1,
+            "season": {},
+            "tour": {},
+            "rules": {},
+            "counts": {},
+            "solution": {"status": "OPTIMAL"},
+            "valid": True,
+        }
+        with mock.patch(
+            "fantasy_analytics.api.build_squad_optimization", return_value=stub
+        ) as builder:
+            response = self._client().post(
+                "/optimizer/transfers",
+                json={"tour": "1786", "current_squad": ["111"], "budget": 101.5},
+            )
+            self.assertEqual(200, response.status_code)
+            self.assertEqual(101.5, builder.call_args.kwargs["budget"])
+            self._client().post(
+                "/optimizer/transfers", json={"tour": "1786", "current_squad": ["111"]}
+            )
+            self.assertIsNone(builder.call_args.kwargs["budget"])
 
     def test_import_squad_rejects_an_invalid_url_without_a_database(self) -> None:
         response = self._client().post(

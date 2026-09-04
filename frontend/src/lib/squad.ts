@@ -55,14 +55,18 @@ export function parseRoleLimits(
   return limits;
 }
 
+// ``budget`` overrides the season's opening budget with the money a manager
+// really has (team value plus bank, from the Sports.ru import): prices drift,
+// so mid-season a squad is rarely worth exactly the opening budget.
 export function resolveSquadLimits(
   rules: SeasonRulesModel | null | undefined,
   maxSameTeam: number | null | undefined,
+  budget?: number | null,
 ): SquadLimits {
   const totalPlayers = rules?.total_players ?? 15;
   const startingPlayers = rules?.starting_players ?? 11;
   return {
-    totalBudget: rules?.total_budget ?? 100,
+    totalBudget: budget ?? rules?.total_budget ?? 100,
     totalPlayers,
     startingPlayers,
     maxSameTeam: maxSameTeam ?? totalPlayers,

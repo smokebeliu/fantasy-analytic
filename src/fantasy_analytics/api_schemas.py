@@ -402,6 +402,15 @@ class TransfersRequest(SquadRequest):
         ge=0,
         description="Override the tour's transfer limit",
     )
+    budget: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Money the plan may spend on the whole roster (team value plus "
+            "bank, as reported by the squad import); defaults to the season's "
+            "opening budget"
+        ),
+    )
     min_transfer_gain: float | None = Field(
         default=None,
         ge=0,
@@ -485,6 +494,22 @@ class ImportSquadResponse(BaseModel):
     remote_tour: RemoteTourRef | None = None
     players: list[PlayerModel]
     missing: list[MissingImportedPlayer] = Field(default_factory=list)
+    total_price: float | None = Field(
+        default=None, description="What the roster is worth on Sports.ru"
+    )
+    current_balance: float | None = Field(
+        default=None, description="Money left in the bank on Sports.ru"
+    )
+    budget: float | None = Field(
+        default=None,
+        description="total_price + current_balance: the money a transfer plan may spend",
+    )
+    transfers_left: int | None = Field(
+        default=None, description="Free transfers still available this tour"
+    )
+    transfers_done: int | None = Field(
+        default=None, description="Transfers already made this tour"
+    )
 
 
 class SquadPlayerModel(BaseModel):
@@ -653,6 +678,43 @@ class IngestionStatusResponse(BaseModel):
         default=None,
         description="Last 1x2 refresh for this league's imported season",
     )
+
+
+class FullRefreshStepModel(BaseModel):
+    """One step of the one-button refresh: a season import or a league's odds."""
+
+    tournament_slug: str
+    competition_name: str | None = None
+    kind: Literal["latest_completed", "current_season", "odds"]
+    status: Literal["pending", "running", "succeeded", "failed", "skipped"]
+    job_id: int | None = Field(
+        default=None, description="The ingestion job an import step created or waited for"
+    )
+    detail: str | None = None
+    error: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class FullRefreshRunModel(BaseModel):
+    """A full refresh: every imported league, both seasons, then odds, in order."""
+
+    id: int
+    status: Literal["running", "succeeded", "failed"]
+    started_at: str
+    finished_at: str | None = None
+    total_steps: int
+    completed_steps: int
+    failed_steps: int
+    current_step: FullRefreshStepModel | None = None
+    steps: list[FullRefreshStepModel]
+
+
+class FullRefreshStatus(BaseModel):
+    """The run in flight, or the last one this process ran (none after a restart)."""
+
+    is_running: bool
+    run: FullRefreshRunModel | None = None
 
 
 class OddsRefreshResponse(BaseModel):

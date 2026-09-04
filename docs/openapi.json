@@ -187,6 +187,206 @@
         "title": "CompetitionModel",
         "type": "object"
       },
+      "FullRefreshRunModel": {
+        "description": "A full refresh: every imported league, both seasons, then odds, in order.",
+        "properties": {
+          "completed_steps": {
+            "title": "Completed Steps",
+            "type": "integer"
+          },
+          "current_step": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FullRefreshStepModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failed_steps": {
+            "title": "Failed Steps",
+            "type": "integer"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "succeeded",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/FullRefreshStepModel"
+            },
+            "title": "Steps",
+            "type": "array"
+          },
+          "total_steps": {
+            "title": "Total Steps",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "started_at",
+          "total_steps",
+          "completed_steps",
+          "failed_steps",
+          "steps"
+        ],
+        "title": "FullRefreshRunModel",
+        "type": "object"
+      },
+      "FullRefreshStatus": {
+        "description": "The run in flight, or the last one this process ran (none after a restart).",
+        "properties": {
+          "is_running": {
+            "title": "Is Running",
+            "type": "boolean"
+          },
+          "run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FullRefreshRunModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "is_running"
+        ],
+        "title": "FullRefreshStatus",
+        "type": "object"
+      },
+      "FullRefreshStepModel": {
+        "description": "One step of the one-button refresh: a season import or a league's odds.",
+        "properties": {
+          "competition_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Name"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The ingestion job an import step created or waited for",
+            "title": "Job Id"
+          },
+          "kind": {
+            "enum": [
+              "latest_completed",
+              "current_season",
+              "odds"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "succeeded",
+              "failed",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tournament_slug": {
+            "title": "Tournament Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tournament_slug",
+          "kind",
+          "status"
+        ],
+        "title": "FullRefreshStepModel",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -260,6 +460,18 @@
       },
       "ImportSquadResponse": {
         "properties": {
+          "budget": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "total_price + current_balance: the money a transfer plan may spend",
+            "title": "Budget"
+          },
           "competition_name": {
             "anyOf": [
               {
@@ -274,6 +486,18 @@
           "competition_slug": {
             "title": "Competition Slug",
             "type": "string"
+          },
+          "current_balance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Money left in the bank on Sports.ru",
+            "title": "Current Balance"
           },
           "missing": {
             "items": {
@@ -310,6 +534,42 @@
           "squad_name": {
             "title": "Squad Name",
             "type": "string"
+          },
+          "total_price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the roster is worth on Sports.ru",
+            "title": "Total Price"
+          },
+          "transfers_done": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Transfers already made this tour",
+            "title": "Transfers Done"
+          },
+          "transfers_left": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Free transfers still available this tour",
+            "title": "Transfers Left"
           }
         },
         "required": [
@@ -2744,6 +3004,19 @@
       },
       "TransfersRequest": {
         "properties": {
+          "budget": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Money the plan may spend on the whole roster (team value plus bank, as reported by the squad import); defaults to the season's opening budget",
+            "title": "Budget"
+          },
           "captain_risk_weight": {
             "anyOf": [
               {
@@ -3008,6 +3281,48 @@
           }
         },
         "summary": "Sync Competition Catalogue",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/ingestion/full-refresh": {
+      "get": {
+        "description": "Show the one-button refresh: the run in flight, or the last one.",
+        "operationId": "get_full_refresh_admin_ingestion_full_refresh_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FullRefreshStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Full Refresh",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "Refresh everything: every imported league, both seasons, then odds.\n\nFor each imported league in catalogue order the latest completed\nseason is imported, then the current one (when the league has one),\nthen the 1x2 line is fetched and the next-tour forecast rebuilt. The\nsteps run one after another as regular ingestion jobs; poll the GET\nfor progress. A ``409`` means a full refresh is already running.",
+        "operationId": "start_full_refresh_admin_ingestion_full_refresh_post",
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FullRefreshStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Start Full Refresh",
         "tags": [
           "admin"
         ]

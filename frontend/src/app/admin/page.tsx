@@ -1,13 +1,19 @@
 import { api, ApiError } from "@/lib/api";
 import { LEAGUE_COOKIE } from "@/lib/league";
+import { FullRefreshPanel } from "@/components/FullRefreshPanel";
 import { RefreshPanel } from "@/components/RefreshPanel";
 import { cookies } from "next/headers";
-import type { CompetitionModel, IngestionStatusResponse } from "@/lib/types";
+import type {
+  CompetitionModel,
+  FullRefreshStatus,
+  IngestionStatusResponse,
+} from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 export default async function AdminPage() {
   let status: IngestionStatusResponse | null = null;
+  let fullRefresh: FullRefreshStatus | null = null;
   let competitions: CompetitionModel[] = [];
   let loadError: string | null = null;
 
@@ -43,6 +49,15 @@ export default async function AdminPage() {
           : "Не удалось получить состояние обновления от API аналитики.";
     }
   }
+  // The one-button run lives in the API process; a page opened mid-run shows
+  // it straight away. Failing to read it is not fatal: the panel re-fetches.
+  if (loadError === null) {
+    try {
+      fullRefresh = await api.getFullRefresh();
+    } catch {
+      fullRefresh = null;
+    }
+  }
 
   return (
     <div>
@@ -63,6 +78,10 @@ export default async function AdminPage() {
             Sports.ru, затем выберите лигу и запустите импорт.
           </div>
         </div>
+      )}
+
+      {competitions.some((item) => item.is_imported) && (
+        <FullRefreshPanel initialStatus={fullRefresh} />
       )}
 
       <RefreshPanel

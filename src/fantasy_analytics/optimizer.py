@@ -42,7 +42,7 @@ of scope.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Iterable, Sequence
 
@@ -74,7 +74,13 @@ from .forecast import MODEL_EVENT, ForecastError, build_forecast_dataset
 #   ``future_points`` — the discounted forecast of the following tours — which
 #   the roster (not the eleven) is chosen on, so a transfer is judged on the
 #   run of fixtures it buys rather than on one tour.
-OPTIMIZER_VERSION = "1.5.0"
+# 1.6.0 counts the horizon the way the game will: only the best eleven the
+#   roster can field in the tours ahead earn their ``future_points``, under
+#   the tour's starting-role limits, instead of every one of the fifteen. The
+#   old sum made four bench players' next-tour forecasts (~40 points on a
+#   two-tour horizon) weigh nearly as much as the current eleven, so a plan
+#   preferred cheap depth over a star who would actually start.
+OPTIMIZER_VERSION = "1.6.0"
 
 # Search configuration, in *deterministic* time: a machine-independent measure of
 # work rather than wall clock, so the same request returns the same squad on any
@@ -1002,9 +1008,11 @@ def solve_squad(
     that many standard deviations of a player's forecast to his captain score,
     and ``transfer_gain_sigma`` (default :data:`DEFAULT_TRANSFER_GAIN_SIGMA`)
     widens the transfer threshold by that many standard deviations of both
-    players' forecasts. A candidate's ``future_points`` count towards the
-    roster in every mode, so a squad with a horizon keeps players whose good
-    fixtures are still to come.
+    players' forecasts. A candidate's ``future_points`` count in every mode
+    through the best eleven the chosen roster can field in the tours ahead
+    (``solution["horizon_expected_points"]``), so a squad with a horizon keeps
+    players whose good fixtures are still to come without paying for a bench
+    that will not play.
 
     Raises :class:`OptimizerError` when the pool is too small or the constraints
     cannot be satisfied.
@@ -1155,11 +1163,35 @@ def solve_squad(
             model.Add(together >= start[left] + start[right] - 1)
             clash_terms.append((together, charge))
 
+    # The tours ahead (step 23 horizon): the roster earns the discounted
+    # forecast of the following tours through the best eleven it could field
+    # there, not through all fifteen. The future eleven is free of the pins
+    # and the formation, which bind this tour only, but keeps the role limits
+    # so a bench of five forwards cannot all be counted. Nothing to count means
+    # no variables: a tour without a horizon keeps the model bit-identical.
+    future_start: list[cp_model.IntVar] = []
+    if any(candidate.future_points_scaled > 0 for candidate in candidates):
+        future_start = [model.NewBoolVar(f"future_start_{i}") for i in range(n)]
+        model.Add(sum(future_start) == rules.starting_players)
+        for i in range(n):
+            model.Add(future_start[i] <= pick[i])
+        for role in ROLES:
+            idx = by_role[role]
+            start_min, start_max = rules.starting_limits.get(
+                role, (0, rules.starting_players)
+            )
+            model.Add(sum(future_start[i] for i in idx) >= start_min)
+            model.Add(sum(future_start[i] for i in idx) <= start_max)
+    future_term = sum(
+        candidates[i].future_points_scaled * future_start[i] for i in range(n)
+    ) if future_start else 0
+
     # Objective: maximise starting + captain points less the fixture charge, then
     # keep as many current players as possible, then spend as little as possible.
     # The captain is chosen on the upper tail of his forecast, the eleven on
     # the mean, and the roster additionally on what the following tours are
-    # forecast to bring (zero unless the caller built a horizon).
+    # forecast to bring to its best eleven (zero unless the caller built a
+    # horizon).
     captain_scores = [
         candidates[i].points_scaled
         + int(round(risk_weight * candidates[i].uncertainty_scaled))
@@ -1168,7 +1200,7 @@ def solve_squad(
     points_term = (
         sum(candidates[i].points_scaled * start[i] for i in range(n))
         + sum(captain_scores[i] * captain[i] for i in range(n))
-        + sum(candidates[i].future_points_scaled * pick[i] for i in range(n))
+        + future_term
         - sum(charge * together for together, charge in clash_terms)
     )
     if transfers_meta is not None and (
@@ -1233,6 +1265,14 @@ def solve_squad(
 
     starters = [candidates[i] for i in starters_idx]
     bench_idx = [i for i in picked if i not in set(starters_idx)]
+    horizon_idx = (
+        [i for i in picked if solver.Value(future_start[i]) == 1]
+        if future_start
+        else []
+    )
+    horizon_points = round(
+        sum(candidates[i].future_points for i in horizon_idx), 4
+    )
 
     # Vice-captain: the best remaining starter (deterministic tie-break by id).
     ordered_starters = sorted(
@@ -1267,6 +1307,7 @@ def solve_squad(
     squad: list[dict[str, Any]] = []
     bench_rank = {idx: rank for rank, idx in enumerate(bench_ordered)}
     locked_set = set(locked_idx)
+    horizon_set = set(horizon_idx)
     for i in picked:
         entry = _candidate_public(candidates[i])
         entry["is_starter"] = i in set(starters_idx)
@@ -1274,6 +1315,7 @@ def solve_squad(
         entry["is_vice_captain"] = i == vice_idx
         entry["bench_order"] = bench_rank.get(i)
         entry["is_locked"] = i in locked_set
+        entry["is_horizon_starter"] = i in horizon_set
         squad.append(entry)
     squad.sort(
         key=lambda e: (
@@ -1294,6 +1336,10 @@ def solve_squad(
         "fixture_penalty": fixture_penalty,
         "fixtures": fixture_report,
         "starting_expected_points": starting_points,
+        # What the best eleven of this roster is forecast to bring in the tours
+        # ahead (discounted); 0 without a horizon. Never part of
+        # ``objective_expected_points``, which stays this tour's.
+        "horizon_expected_points": horizon_points,
         "formation": _formation(starters),
         "total_price": total_price,
         "unused_budget": round(rules.total_budget - total_price, 2),
@@ -1781,6 +1827,7 @@ def build_squad_optimization(
     model: str = MODEL_EVENT,
     current_squad: Sequence[str | int] | None = None,
     max_transfers: int | None = None,
+    budget: float | None = None,
     locked: Sequence[str | int] | None = None,
     locked_starters: Sequence[str | int] | None = None,
     formation: str | None = None,
@@ -1799,6 +1846,9 @@ def build_squad_optimization(
     so the result is reproducible from
     ``(run_id, tour, model, optimizer, fixture_conflict_weight, solve_limit)``.
     When ``current_squad`` is given the optimizer runs in limited-transfers mode;
+    ``budget`` then replaces the season's opening budget with the money the
+    manager actually has (team value plus bank), since prices drift and a
+    squad is rarely worth exactly the opening budget mid-season.
     ``locked``/``locked_starters``/``formation`` pin the user's own choices into
     either mode. Pins whose club has no fixture this tour are kept as zero-point
     candidates so "fill around locked" still works through a blank.
@@ -1867,6 +1917,10 @@ def build_squad_optimization(
         rules = load_squad_rules(
             session, forecast["season_id"], forecast["tour"]["tour_id"]
         )
+        if budget is not None:
+            if budget <= 0:
+                raise OptimizerError("budget must be positive")
+            rules = replace(rules, total_budget=float(budget))
         candidates = _extend_candidates_for_pins(
             session,
             candidates,
@@ -1927,6 +1981,7 @@ def build_squad_optimization(
         "cutoff": forecast["cutoff"],
         "rules": {
             "total_budget": rules.total_budget,
+            "budget_source": "squad" if budget is not None else "season",
             "total_players": rules.total_players,
             "starting_players": rules.starting_players,
             "full_limits": {r: list(v) for r, v in rules.full_limits.items()},

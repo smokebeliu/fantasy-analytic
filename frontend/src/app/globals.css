@@ -1396,6 +1396,18 @@ table.players th.num {
   border-color: var(--border-strong);
   background: var(--accent-soft);
 }
+.stage-list__item.is-failed {
+  color: var(--danger, #b42318);
+  font-weight: 600;
+}
+
+.full-refresh {
+  margin-bottom: 16px;
+}
+
+.full-refresh .stage-list {
+  margin-top: 8px;
+}
 
 .chip--published {
   color: var(--success);

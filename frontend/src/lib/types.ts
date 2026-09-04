@@ -209,6 +209,13 @@ export interface ImportSquadResponse {
   remote_tour?: RemoteTourRef | null;
   players: PlayerModel[];
   missing: MissingImportedPlayer[];
+  // Money and transfers as Sports.ru reports them for the current tour. The
+  // budget is team value plus bank — what a transfer plan may really spend.
+  total_price?: number | null;
+  current_balance?: number | null;
+  budget?: number | null;
+  transfers_left?: number | null;
+  transfers_done?: number | null;
 }
 
 export interface PlayerHistoryEntry {
@@ -330,6 +337,9 @@ export interface OptimizerSolution {
   fixture_penalty?: number;
   fixtures?: OptimizerFixtures | null;
   starting_expected_points: number;
+  // What the roster's best eleven is forecast to bring in the tours ahead
+  // (discounted); 0 without a horizon.
+  horizon_expected_points?: number;
   formation: string;
   total_price: number;
   unused_budget: number;
@@ -449,6 +459,44 @@ export interface OddsRefreshResponse {
   tour_name?: string | null;
   run_id?: number | null;
   forecast_rows: number;
+}
+
+// The one-button refresh: every imported league, both seasons, then odds.
+export type FullRefreshStepKind = "latest_completed" | "current_season" | "odds";
+export type FullRefreshStepStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "skipped";
+
+export interface FullRefreshStep {
+  tournament_slug: string;
+  competition_name?: string | null;
+  kind: FullRefreshStepKind;
+  status: FullRefreshStepStatus;
+  job_id?: number | null;
+  detail?: string | null;
+  error?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface FullRefreshRun {
+  id: number;
+  status: "running" | "succeeded" | "failed";
+  started_at: string;
+  finished_at?: string | null;
+  total_steps: number;
+  completed_steps: number;
+  failed_steps: number;
+  current_step?: FullRefreshStep | null;
+  steps: FullRefreshStep[];
+}
+
+export interface FullRefreshStatus {
+  is_running: boolean;
+  run?: FullRefreshRun | null;
 }
 
 export interface RefreshRequestBody {

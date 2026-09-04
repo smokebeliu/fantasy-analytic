@@ -3,6 +3,7 @@ import type {
   CompetitionListResponse,
   CompetitionModel,
   ForecastModel,
+  FullRefreshStatus,
   IngestionJob,
   IngestionStatusResponse,
   ImportSquadResponse,
@@ -189,6 +190,7 @@ export const api = {
     competition?: string;
     model?: ForecastModel;
     max_transfers?: number | null;
+    budget?: number | null;
     run_id?: number;
     locked?: string[];
     locked_starters?: string[];
@@ -223,6 +225,15 @@ export const api = {
 
   syncCompetitions: () =>
     request<CatalogueSyncResponse>("/admin/competitions/sync", {
+      method: "POST",
+    }),
+
+  // The one-button refresh (every imported league, both seasons, odds). The
+  // POST returns 202 with the planned run, or 409 while one is in flight.
+  getFullRefresh: () => request<FullRefreshStatus>("/admin/ingestion/full-refresh"),
+
+  startFullRefresh: () =>
+    request<FullRefreshStatus>("/admin/ingestion/full-refresh", {
       method: "POST",
     }),
 

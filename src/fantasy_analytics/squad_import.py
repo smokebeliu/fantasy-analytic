@@ -84,6 +84,20 @@ class RemoteSquad:
     season_id: str
     tour: dict[str, Any] | None
     players: tuple[RemoteSquadPlayer, ...]
+    # The manager's money and transfer allowance as Sports.ru reports them for
+    # the current tour: what the roster is worth, what is left in the bank,
+    # and how many free transfers remain. ``None`` when the payload omits one.
+    total_price: float | None = None
+    current_balance: float | None = None
+    transfers_left: int | None = None
+    transfers_done: int | None = None
+
+    @property
+    def budget(self) -> float | None:
+        """Team value plus bank: the money a transfer plan may actually spend."""
+        if self.total_price is None or self.current_balance is None:
+            return None
+        return round(self.total_price + self.current_balance, 2)
 
 
 FetchPayload = Callable[[str], dict[str, Any]]
@@ -195,6 +209,7 @@ def extract_remote_squad(payload: dict[str, Any]) -> RemoteSquad | None:
                 club_name=str(team.get("name") or "") or None,
             )
         )
+    money = tour_info if isinstance(tour_info, dict) else {}
     return RemoteSquad(
         squad_id=str(raw["id"]),
         name=str(raw.get("name") or ""),
@@ -203,7 +218,25 @@ def extract_remote_squad(payload: dict[str, Any]) -> RemoteSquad | None:
         season_id=str(season.get("id") or ""),
         tour=tour,
         players=tuple(players),
+        total_price=_optional_float(money.get("totalPrice")),
+        current_balance=_optional_float(money.get("currentBalance")),
+        transfers_left=_optional_int(money.get("transfersLeft")),
+        transfers_done=_optional_int(money.get("transfersDone")),
     )
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_league_name(payload: dict[str, Any]) -> str | None:
@@ -327,6 +360,15 @@ def import_squad_from_url(
         "remote_tour": remote.tour,
         "players": players,
         "missing": missing,
+        # Money and transfers as the game sees them, so the builder can plan
+        # from the manager's real budget (team value + bank) and the transfers
+        # actually left rather than the season's opening budget and the tour's
+        # full allowance.
+        "total_price": remote.total_price,
+        "current_balance": remote.current_balance,
+        "budget": remote.budget,
+        "transfers_left": remote.transfers_left,
+        "transfers_done": remote.transfers_done,
     }
 
 

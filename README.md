@@ -351,8 +351,11 @@ forecast to his captain score (the armband goes to the upper tail, not the
 mean); `--transfer-gain-sigma` widens the transfer threshold by that many
 standard deviations of both forecasts; `--horizon-tours N` (with
 `--horizon-decay`) forecasts the next tours from the target tour's cutoff and
-chooses the roster on their discounted sum, so a transfer is judged on the run
-of fixtures it buys. The bench is ordered to maximise what the automatic
+lets the roster earn their discounted sum through the best eleven it could
+field there (`solution.horizon_expected_points`, `is_horizon_starter` on each
+player), so a transfer is judged on the run of fixtures it buys without a
+bench that will not play outweighing a star who will. The bench is ordered to
+maximise what the automatic
 substitutions are expected to bring, given how likely each starter is to miss
 the match. Every result is
 re-checked by an independent validator, an infeasible problem raises a clear
@@ -580,6 +583,23 @@ curl http://127.0.0.1:8000/admin/ingestion/nightly
 curl -X POST 'http://127.0.0.1:8000/admin/ingestion/nightly?force=true'
 ```
 
+**Everything in one go.** After a model change the whole dataset has to be
+rebuilt, which used to mean every league twice plus the odds button. The
+*full refresh* does that sequence for every imported league, in catalogue
+order and strictly one step after another: the latest completed season (the
+forecast's prior), then the current season (skipped when the league has none),
+then the 1x2 line with the next-tour forecast rebuilt. Each import is a regular
+job (`trigger_type=full_refresh`) visible in the per-league panel; a failing
+step is recorded and the run carries on, ending `failed` so the screen says
+where. The run itself is orchestrated in the API process and is not persisted:
+a restart mid-run ends it, and the button is simply pressed again. The admin
+screen has it as «Обновить все лиги и котировки» above the per-league panel.
+
+```bash
+curl -X POST http://127.0.0.1:8000/admin/ingestion/full-refresh   # 202, or 409 while running
+curl http://127.0.0.1:8000/admin/ingestion/full-refresh           # steps and their state
+```
+
 The same sweep is also a one-shot CLI, useful if you prefer the host crontab
 over the in-process scheduler:
 
@@ -695,7 +715,12 @@ spells out, because the labels alone cannot:
   formation is chosen it is unavailable with the reason on the button: it would
   return the same squad as building from scratch;
 - **`Оптимизировать замены (N)`** keeps the squad you own and suggests at most `N`
-  replacements, `N` defaulting to the tour's own allowance (three in the RPL). The
+  replacements, `N` defaulting to the tour's own allowance (three in the RPL) or,
+  after a Sports.ru import, to the transfers the team actually has left. The
+  import also brings the team's money (its value plus the bank, `budget` in the
+  response), which replaces the season's opening budget in the builder and in
+  the plan (`budget` on `POST /optimizer/transfers`), since prices drift and a
+  squad is rarely worth exactly the opening budget mid-season. The
   result is one row per swap — who leaves, who arrives, the points gained and
   whether the replacement is dearer or cheaper — and it does *not* overwrite your
   squad, because the whole point is to compare the two.
