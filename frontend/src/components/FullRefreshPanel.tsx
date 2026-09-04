@@ -40,8 +40,11 @@ export function stepSummary(step: FullRefreshStep): string {
 
 export function FullRefreshPanel({
   initialStatus = null,
+  hasImportedLeague = true,
 }: {
   initialStatus?: FullRefreshStatus | null;
+  /** False before any league has data: the button then explains itself. */
+  hasImportedLeague?: boolean;
 }) {
   const router = useRouter();
   const [status, setStatus] = useState<FullRefreshStatus | null>(initialStatus);
@@ -155,11 +158,16 @@ export function FullRefreshPanel({
       <button
         className="btn btn--primary"
         data-testid="full-refresh-button"
-        disabled={running || starting}
+        disabled={running || starting || !hasImportedLeague}
         onClick={() => void start()}
       >
         {running ? "Обновление идёт…" : "Обновить все лиги и котировки"}
       </button>
+      {!hasImportedLeague && (
+        <p className="inline-note" data-testid="full-refresh-empty">
+          Пока ни одна лига не импортирована: сначала запустите импорт лиги ниже.
+        </p>
+      )}
       {error && (
         <div className="error-inline" role="alert" data-testid="full-refresh-error">
           {error}
