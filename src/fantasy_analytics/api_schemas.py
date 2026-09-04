@@ -393,6 +393,14 @@ class TransfersRequest(SquadRequest):
         ge=0,
         description="Override the tour's transfer limit",
     )
+    min_transfer_gain: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Least expected-points gain a single transfer must bring to be "
+            "proposed (default 0.5; 0 proposes any gain)"
+        ),
+    )
 
 
 class ImportSquadRequest(BaseModel):

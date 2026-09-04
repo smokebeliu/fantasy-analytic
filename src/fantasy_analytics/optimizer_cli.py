@@ -26,6 +26,7 @@ from .db import create_db_engine, create_session_factory
 from .forecast import MODEL_EVENT, MODEL_MEAN, MODEL_RECENT
 from .optimizer import (
     DEFAULT_FIXTURE_CONFLICT_WEIGHT,
+    DEFAULT_MIN_TRANSFER_GAIN,
     OptimizerError,
     build_squad_optimization,
 )
@@ -83,6 +84,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-transfers",
         type=int,
         help="Override the tour's transfer limit (limited-transfers mode only)",
+    )
+    parser.add_argument(
+        "--min-transfer-gain",
+        type=float,
+        help=(
+            "Least expected-points gain a transfer must bring to be proposed "
+            f"(default: {DEFAULT_MIN_TRANSFER_GAIN}; 0 proposes any gain)"
+        ),
     )
     parser.add_argument(
         "--locked",
@@ -236,6 +245,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             locked_starters=_parse_ids(args.locked_starters),
             formation=args.formation,
             fixture_conflict_weight=args.fixture_conflict_weight,
+            min_transfer_gain=args.min_transfer_gain,
         )
     except OptimizerError as error:
         print(f"Optimization failed: {error}", file=sys.stderr)

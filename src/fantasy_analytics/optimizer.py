@@ -63,7 +63,9 @@ from .forecast import MODEL_EVENT, ForecastError, build_forecast_dataset
 
 # Bumped whenever the optimizer model or its constraints change so squads built
 # by different code revisions never get silently compared.
-OPTIMIZER_VERSION = "1.3.2"
+# 1.4.0 makes a transfer pay for itself: in limited-transfers mode a swap is
+#   only proposed when it gains at least ``min_transfer_gain`` expected points.
+OPTIMIZER_VERSION = "1.4.0"
 
 # Search configuration, in *deterministic* time: a machine-independent measure of
 # work rather than wall clock, so the same request returns the same squad on any
@@ -94,6 +96,16 @@ DEFAULT_SOLVE_LIMIT = 8.0
 # score. The default is calibrated on the live snapshot to be small enough that a
 # clash which is genuinely better on expected points is still selected.
 DEFAULT_FIXTURE_CONFLICT_WEIGHT = 0.25
+
+# The least a transfer has to gain, in expected points, to be proposed at all
+# (limited-transfers mode). The forecast of a player who plays is off by about
+# two points on average, so a swap that gains a twentieth of a point is noise
+# dressed up as advice — and on live data the plan happily spent the third
+# transfer of the week for +0.05 points and two units of budget. Every current
+# player is credited with this much for staying, so a newcomer to the squad
+# has to beat the player he replaces by at least this margin. Zero restores the
+# pure "any gain is a gain" objective (ties still favour keeping players).
+DEFAULT_MIN_TRANSFER_GAIN = 0.5
 
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
 
@@ -784,15 +796,19 @@ def solve_squad(
     formation: str | None = None,
     fixture_conflict_weight: float | None = None,
     solve_limit: float | None = None,
+    min_transfer_gain: float | None = None,
 ) -> dict[str, Any]:
     """Solve the squad-selection integer program and return an explanation.
 
     With ``current_ids`` the solver runs in *limited-transfers* mode: at most
     ``max_transfers`` (defaulting to the tour's ``total_transfers``) of the
-    current players may be replaced. Otherwise it builds a fresh squad. In that
-    mode ``solution["transfers"]`` describes both sides of every swap — ``out``
-    and ``in`` carry full player entries and ``pairs`` matches them up with the
-    points and price each swap costs or gains.
+    current players may be replaced, and a replacement is only made when it
+    gains at least ``min_transfer_gain`` expected points (defaulting to
+    :data:`DEFAULT_MIN_TRANSFER_GAIN`) over the player it replaces. Otherwise
+    it builds a fresh squad. In transfers mode ``solution["transfers"]``
+    describes both sides of every swap — ``out`` and ``in`` carry full player
+    entries and ``pairs`` matches them up with the points and price each swap
+    costs or gains.
 
     ``locked_ids`` pins players into the roster and ``locked_starter_ids`` pins
     them into the starting eleven (which also pins them into the roster);
@@ -897,6 +913,13 @@ def solve_squad(
             )
         if allowed < 0:
             raise OptimizerError("max_transfers must be non-negative")
+        min_gain = (
+            DEFAULT_MIN_TRANSFER_GAIN
+            if min_transfer_gain is None
+            else float(min_transfer_gain)
+        )
+        if min_gain < 0:
+            raise OptimizerError("min_transfer_gain must be non-negative")
         id_to_index = {c.player_season_id: i for i, c in enumerate(candidates)}
         present = [id_to_index[pid] for pid in current_ids if pid in id_to_index]
         missing = [pid for pid in current_ids if pid not in id_to_index]
@@ -907,6 +930,7 @@ def solve_squad(
             "allowed": allowed,
             "current_present": present,
             "missing": missing,
+            "min_gain": min_gain,
         }
 
     # Fixture awareness (step 16): a pair of starters that meet each other in
@@ -938,6 +962,14 @@ def solve_squad(
     points_term = sum(
         candidates[i].points_scaled * (start[i] + captain[i]) for i in range(n)
     ) - sum(charge * together for together, charge in clash_terms)
+    if transfers_meta is not None and transfers_meta["min_gain"] > 0:
+        # A swap has to pay for itself: every current player kept is worth the
+        # minimum gain in points, so a newcomer to the squad only gets in by
+        # beating the player he replaces by at least that much.
+        stay_bonus = int(round(transfers_meta["min_gain"] * _POINTS_SCALE))
+        points_term += stay_bonus * sum(
+            pick[i] for i in transfers_meta["current_present"]
+        )
     spend_term = sum(candidates[i].price_cents * pick[i] for i in range(n))
     points_weight, keep_weight = _objective_weights(rules)
     objective = points_term * points_weight - spend_term
@@ -1084,6 +1116,7 @@ def solve_squad(
         ]
         result["transfers"] = {
             "allowed": transfers_meta["allowed"],
+            "min_gain": transfers_meta["min_gain"],
             "made": len(brought_in),
             "kept": len(kept),
             "in": brought_in,
@@ -1521,6 +1554,7 @@ def build_squad_optimization(
     formation: str | None = None,
     fixture_conflict_weight: float | None = None,
     solve_limit: float | None = None,
+    min_transfer_gain: float | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build the optimal squad for a tour and return a JSON-serialisable report.
@@ -1587,6 +1621,7 @@ def build_squad_optimization(
         formation=formation,
         fixture_conflict_weight=fixture_conflict_weight,
         solve_limit=solve_limit,
+        min_transfer_gain=min_transfer_gain,
     )
 
     violations = validate_squad(
@@ -1636,6 +1671,7 @@ def build_squad_optimization(
 
 __all__ = [
     "DEFAULT_FIXTURE_CONFLICT_WEIGHT",
+    "DEFAULT_MIN_TRANSFER_GAIN",
     "DEFAULT_SOLVE_LIMIT",
     "OPTIMIZER_VERSION",
     "ROLES",
