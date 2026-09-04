@@ -80,9 +80,10 @@ export default async function AdminPage() {
         </div>
       )}
 
-      {competitions.some((item) => item.is_imported) && (
-        <FullRefreshPanel initialStatus={fullRefresh} />
-      )}
+      <FullRefreshPanel
+        initialStatus={fullRefresh}
+        hasImportedLeague={competitions.some((item) => item.is_imported)}
+      />
 
       <RefreshPanel
         key={slug ?? "no-league"}
