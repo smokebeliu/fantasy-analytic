@@ -83,7 +83,24 @@ from .db.models import (
 #   striker. The league role priors are pooled from both seasons, so a first
 #   imported season also scores its newcomers from something. A *later* season
 #   is never used as the prior of an earlier one.
-FEATURE_VERSION = "1.6.0"
+# 1.7.0 (step 23) closes the events the forecast never saw and sharpens the
+#   ones it did. ``ninety_share`` (full 90-minute matches) feeds the extra
+#   point midfielders and forwards earn for a full match; ``reds_per90``,
+#   ``own_goals_per90``, ``pen_missed_per90``, ``pen_saved_per90`` and
+#   ``pen_conceded_per90`` price the rare events, shrunk hard towards the
+#   role average. The current season's rates decay by ``CURRENT_RATE_DECAY``
+#   per match so April weighs more than August, club strengths decay the same
+#   way (``CLUB_RECENCY_DECAY``) and are pooled across venues with a league
+#   home factor (``STRENGTH_VENUE_MODE``). A player who changed club within
+#   the season has his appearance share judged on the matches he was actually
+#   available for (``club_id`` on every appearance). A straight red card
+#   discounts the *second* match after it as well as ruling out the first, a
+#   ban whose end date the snapshot carries is honoured, and a "questionable"
+#   status halves the appearance probability instead of zeroing it. Shrinkage
+#   anchors can be the average of the player's *price bucket* within his role
+#   (``PRICE_BUCKET_PRIORS``) and ownership can lift a low appearance share
+#   (``OWNERSHIP_APPEARANCE_WEIGHT``).
+FEATURE_VERSION = "1.7.0"
 
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
 
@@ -128,6 +145,11 @@ NEWCOMER_RATE_FACTOR = 0.7
 # a documented approximation based on minutes played.
 START_MINUTES_THRESHOLD = 60
 
+# A "full match": the threshold at which midfielders and forwards earn an
+# extra appearance point (scoring ``rpl-2025-2026.3``). Sports.ru caps the
+# recorded minutes at 90, so a player who saw the final whistle is at 90.
+NINETY_MINUTES_THRESHOLD = 90
+
 # How fast last season stops mattering, in matches of the new one. Every
 # ``PRIOR_SEASON_HALF_LIFE`` matches the weight of a prior-season observation
 # halves, so last season is the whole story before a ball is kicked, half of it
@@ -169,7 +191,73 @@ RATE_PRIOR_WINDOW = 8.0
 # moved. Five beat two and three on every backtest metric in both leagues, and
 # it is also what closed most of the gap between the optimizer's projected and
 # realised squad points (La Liga 2025/26: +12% optimism down to +5%).
-RATE_SHRINK_MATCHES = 5.0
+# Raised to eight in 1.7.0 together with the in-season decay below: over the
+# four full seasons backtested (RPL and La Liga 2024/25 and 2025/26) eight
+# beat five on the played-player MAE in every league and cut the gap between
+# the forecast and the fact of the top-25 to within 2% (RPL) and 6% (La Liga),
+# at squad points equal within noise; twelve gained nothing more.
+RATE_SHRINK_MATCHES = 8.0
+
+# Pseudo-matches for the rare events (red cards, own goals, penalties missed,
+# saved and conceded). A red card is one match in a hundred; two of them in a
+# season say almost nothing about a player, so his rate is held close to the
+# role average for far longer than his goals are.
+RARE_EVENT_SHRINK_MATCHES = 20.0
+
+# Recency decay applied to the *current* season's matches when a player's
+# per-90 rates are pooled: the most recent appearance weighs 1, the one before
+# it ``CURRENT_RATE_DECAY``, and so on. At 1.0 every match of the season
+# counts the same, which is what 1.6.0 did. Swept together with
+# ``RATE_SHRINK_MATCHES`` on the four full seasons (step 23): 0.95 lowered
+# the played-player MAE in both leagues against 1.0 (RPL 1.943 -> 1.938, La
+# Liga 1.998 -> 1.995) and improved the rank correlation; 0.9 was no better
+# and made the top-25 forecast pessimistic.
+CURRENT_RATE_DECAY = 0.95
+
+# The same decay for a club's own results in the match model: a 4-0 in August
+# and a 4-0 last week should not describe the club equally in April. Neutral
+# over a full season (0.95 and 0.9 moved no metric beyond noise in either
+# direction, step 23), so it is left at 1.0.
+CLUB_RECENCY_DECAY = 1.0
+
+# How venue enters the club strengths. ``split`` keeps separate home and away
+# strengths (each estimated from half the club's matches); ``pooled``
+# estimates one attack and one defence per club from every match, normalised
+# by the league's home/away factor, and multiplies the factor back in at the
+# fixture venue — twice the sample for the same information. Pooled won the
+# step-23 sweep: a higher rank correlation in every league and, on RPL
+# 2024/25, 80 more realised squad points over the season.
+STRENGTH_VENUE_MODE = "pooled"
+
+# Shrinkage anchors by price bucket. With ``PRICE_BUCKET_PRIORS`` the per-90
+# rates are shrunk towards the average of the player's price tercile within
+# his role rather than the whole role: a 4.5 midfielder and a 10.0 midfielder
+# are not drawn from the same population. A bucket needs at least
+# ``PRICE_BUCKET_MIN_MINUTES`` of play to be used; otherwise the role average
+# stands in. Prices in a backtest are the snapshot's (end-of-season) prices,
+# so the effect measured there is an upper bound (see the step-23 card).
+PRICE_BUCKET_PRIORS = False
+PRICE_BUCKETS = 3
+PRICE_BUCKET_MIN_MINUTES = 3000.0
+
+# Ownership as evidence that a player features: a player picked by
+# ``OWNERSHIP_FULL_PERCENT`` percent of managers is, in practice, a starter.
+# The implied probability only ever *raises* the history-based share, and only
+# at ``OWNERSHIP_APPEARANCE_WEIGHT``; at 0 ownership is ignored. Ownership is
+# a point-in-time snapshot value, so it cannot be validated on a historical
+# tour without looking into the future — the default is set from the current
+# seasons only and kept small.
+OWNERSHIP_APPEARANCE_WEIGHT = 0.0
+OWNERSHIP_FULL_PERCENT = 15.0
+
+# A straight red card is served in the next match for certain; roughly a third
+# of them (the ones for violent conduct) run to a second match. Second yellows
+# are one match. Measured over 2024/25 and 2025/26 in both leagues (step 23).
+STRAIGHT_RED_SECOND_MATCH_SHARE = 0.35
+
+# A player marked out whose stated return date has passed, or whose status is
+# "questionable", plays at this share of his usual appearance probability.
+QUESTIONABLE_APPEARANCE_FACTOR = 0.5
 
 # The same two ideas for the *club* strengths the match model runs on. Last
 # season's results are admitted for at most ``STRENGTH_PRIOR_WINDOW`` matches
@@ -223,6 +311,16 @@ UNAVAILABLE_STATUSES = frozenset(
     }
 )
 
+# Statuses that mean "may or may not play" rather than "out". Sports.ru's two
+# imported leagues only use FIERY / INJURY / DISQUALIFICATION / UNKNOWN today,
+# so this set is a documented hook for a status the source may add.
+QUESTIONABLE_STATUSES = frozenset({"QUESTIONABLE", "DOUBTFUL", "FIFTY_FIFTY"})
+
+# Bans (and only bans) end on the date the snapshot describes: a player whose
+# disqualification has run out by the fixture is simply available. An injury
+# with a past return date is treated as questionable.
+BAN_STATUSES = frozenset({"DISQUALIFICATION", "DISQUALIFIED", "SUSPENDED", "SUSPENSION"})
+
 
 class FeaturesError(RuntimeError):
     """Raised when a run, season or target tour cannot be resolved."""
@@ -242,6 +340,13 @@ class Appearance:
     ball_recoveries: int = 0
     yellow_cards: int = 0
     red_cards: int = 0
+    own_goals: int = 0
+    penalties_missed: int = 0  # missed, hit the post or saved: all cost the same
+    penalties_saved: int = 0
+    penalty_conceded: int = 0
+    # The club the player was registered with for this match; ``None`` when
+    # the source did not say. A within-season transfer shows up as a change.
+    club_id: int | None = None
 
     @property
     def played(self) -> bool:
@@ -288,10 +393,23 @@ class RolePrior:
     yellows_per90: float
     mean_minutes: float
     points_per90: float = 0.0
+    reds_per90: float = 0.0
+    own_goals_per90: float = 0.0
+    pen_missed_per90: float = 0.0
+    pen_saved_per90: float = 0.0
+    pen_conceded_per90: float = 0.0
+    # Share of the role's starts (>= 60 minutes) that ran the full 90.
+    ninety_of_starts: float = 0.0
 
     def rate(self, key: str) -> float:
         """The per-90 rate for an event key of :func:`_event_totals`."""
         return float(getattr(self, f"{key}_per90", 0.0) or 0.0)
+
+
+# Events whose rates are shrunk with the ordinary pseudo-count, and the rare
+# ones that get the heavy one.
+RATE_KEYS = ("points", "goals", "assists", "saves", "recoveries", "yellows")
+RARE_RATE_KEYS = ("reds", "own_goals", "pen_missed", "pen_saved", "pen_conceded")
 
 
 @dataclass(frozen=True)
@@ -386,6 +504,143 @@ def pending_red_card_suspension(
         )
         for match in club_matches
     )
+
+
+def red_card_ban(
+    appearances: Sequence[Appearance],
+    club_matches: Sequence[ClubMatch],
+) -> tuple[int, bool] | None:
+    """Describe the most recent red card: ``(club matches since, straight)``.
+
+    ``None`` when there is no red card. A second yellow (a red on top of a
+    yellow in the same match) is a one-match ban; a straight red is served in
+    the next match for certain and, about a third of the time, in the one
+    after as well (:data:`STRAIGHT_RED_SECOND_MATCH_SHARE`). The club matches
+    are the ones played before the cutoff, so "matches since" is how much of
+    the ban has already been served.
+    """
+    reds = [item for item in appearances if item.red_cards > 0]
+    if not reds:
+        return None
+    last_red = max(reds, key=lambda item: (item.scheduled_at, item.match_id))
+    since = sum(
+        1
+        for match in club_matches
+        if match.scheduled_at > last_red.scheduled_at
+        or (
+            match.scheduled_at == last_red.scheduled_at
+            and match.match_id != last_red.match_id
+        )
+    )
+    return since, last_red.yellow_cards == 0
+
+
+def red_card_availability_factor(
+    appearances: Sequence[Appearance],
+    club_matches: Sequence[ClubMatch],
+) -> float:
+    """What a red card leaves of the appearance probability for the next match.
+
+    0 while the ban is certainly still running (the next match after the
+    sending-off), ``1 - STRAIGHT_RED_SECOND_MATCH_SHARE`` for the second match
+    after a straight red, 1 otherwise.
+    """
+    ban = red_card_ban(appearances, club_matches)
+    if ban is None:
+        return 1.0
+    since, straight = ban
+    if since == 0:
+        return 0.0
+    if straight and since == 1:
+        return round(1.0 - STRAIGHT_RED_SECOND_MATCH_SHARE, 4)
+    return 1.0
+
+
+def parse_status_date(description: str | None) -> datetime | None:
+    """Read an ISO date (``2026-09-01``) out of a snapshot status description.
+
+    Sports.ru writes the end of a disqualification as a bare date; anything
+    else (the status echoed back, free text, nothing) yields ``None``.
+    """
+    if not description:
+        return None
+    text = str(description).strip()
+    for length in (10, 19, 20, 25):
+        candidate = text[:length]
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed
+    return None
+
+
+def status_availability(
+    status: str | None,
+    description: str | None,
+    fixture_at: datetime | None,
+) -> tuple[bool, float]:
+    """Turn the snapshot status into ``(is_available, appearance factor)``.
+
+    An unavailable status keeps the player out — unless the description dates
+    the end of a *ban* before the fixture, in which case he is back at full
+    strength, or dates the end of an injury before the fixture, in which case
+    he is back but questionable. A questionable status is available at
+    :data:`QUESTIONABLE_APPEARANCE_FACTOR`. Everything else is available at 1.
+    """
+    key = (status or "").upper()
+    if key in QUESTIONABLE_STATUSES:
+        return True, QUESTIONABLE_APPEARANCE_FACTOR
+    if key not in UNAVAILABLE_STATUSES:
+        return True, 1.0
+    until = parse_status_date(description)
+    if until is None or fixture_at is None or until > fixture_at:
+        return False, 0.0
+    if key in BAN_STATUSES:
+        return True, 1.0
+    return True, QUESTIONABLE_APPEARANCE_FACTOR
+
+
+def ownership_appearance(selected_by: float | None) -> float | None:
+    """Appearance probability implied by ownership, or ``None`` without it."""
+    if selected_by is None:
+        return None
+    return round(min(1.0, max(0.0, float(selected_by) / OWNERSHIP_FULL_PERCENT)), 4)
+
+
+def participation_matches(
+    active_club_id: int | None,
+    appearances: Sequence[Appearance],
+    club_matches_by_club: dict[int, list[ClubMatch]],
+) -> list[ClubMatch]:
+    """The club matches a player could have featured in this season.
+
+    Normally his current club's matches. A player who changed club within
+    the season is judged on his *old* club's matches up to his last
+    appearance for it and on his new club's matches after that: the new
+    club's August, played without him, is not evidence that he sits on its
+    bench. Returned most recent first, like every club-match list.
+    """
+    active = list(club_matches_by_club.get(active_club_id, [])) if active_club_id is not None else []
+    elsewhere = [
+        item
+        for item in appearances
+        if item.played and item.club_id is not None and item.club_id != active_club_id
+    ]
+    if not elsewhere:
+        return sorted(active, key=lambda m: m.scheduled_at, reverse=True)
+    last_other = max(elsewhere, key=lambda item: (item.scheduled_at, item.match_id))
+    old = [
+        match
+        for match in club_matches_by_club.get(last_other.club_id, [])
+        if match.scheduled_at <= last_other.scheduled_at
+    ]
+    new = [match for match in active if match.scheduled_at > last_other.scheduled_at]
+    merged = [*old, *new]
+    merged.sort(key=lambda m: m.scheduled_at, reverse=True)
+    return merged
 
 
 def per90(total: float, minutes: float) -> float:
@@ -598,7 +853,15 @@ FEATURE_DICTIONARY: tuple[dict[str, str], ...] = (
     {"name": "prior_season_scale", "description": "The factor last season's totals were actually pooled at: prior_season_weight capped so last season brings at most RATE_PRIOR_WINDOW matches of evidence."},
     {"name": "appearance_share", "description": "Blended share of the club's matches the player was on the pitch for, recency-weighted within the current season; 0.0 when neither season has a match."},
     {"name": "start_share", "description": "Blended share of the club's matches the player started (>= 60 minutes); 0.0 when none."},
-    {"name": "p_appearance", "description": "Probability of playing the fixture — the appearance share above; 0.0 when unavailable."},
+    {"name": "ninety_share", "description": "Blended share of the club's matches the player played in full (90 minutes); 0.0 when none."},
+    {"name": "reds_per90", "description": "Blended red cards per 90 minutes, shrunk hard (RARE_EVENT_SHRINK_MATCHES) towards the role average."},
+    {"name": "own_goals_per90", "description": "Blended own goals per 90 minutes, shrunk the same way."},
+    {"name": "pen_missed_per90", "description": "Blended penalties missed (off target, post or saved) per 90 minutes, shrunk the same way."},
+    {"name": "pen_saved_per90", "description": "Blended penalties saved per 90 minutes (goalkeepers), shrunk the same way."},
+    {"name": "pen_conceded_per90", "description": "Blended penalties conceded per 90 minutes, shrunk the same way."},
+    {"name": "availability_factor", "description": "Multiplier applied to the appearance share: 0 when marked out or banned, 0.5 when questionable or just back, 0.65 for the second match after a straight red, else 1."},
+    {"name": "club_matches_available", "description": "Club matches the player was eligible for this season (his old club's up to a transfer, his new club's after it)."},
+    {"name": "p_appearance", "description": "Probability of playing the fixture — the appearance share above, times availability_factor, lifted by ownership when OWNERSHIP_APPEARANCE_WEIGHT is set; 0.0 when unavailable."},
     {"name": "expected_minutes", "description": "Expected minutes: p_appearance x blended mean minutes when appearing."},
     {"name": "club_attack", "description": "Club goals scored per match at the fixture venue (home/away), blended across seasons; league mean when no venue matches at all."},
     {"name": "club_defense", "description": "Club goals conceded per match at the fixture venue; league mean when no venue matches at all."},
@@ -846,9 +1109,17 @@ def load_appearances(
             PlayerMatchStats.ball_recoveries,
             PlayerMatchStats.yellow_cards,
             PlayerMatchStats.red_cards,
+            PlayerMatchStats.own_goals,
+            PlayerMatchStats.penalties_missed,
+            PlayerMatchStats.penalties_post,
+            PlayerMatchStats.penalties_target,
+            PlayerMatchStats.penalties_saved,
+            PlayerMatchStats.penalty_conceded,
+            SeasonClub.club_id,
         )
         .join(Match, PlayerMatchStats.match_id == Match.id)
         .join(PlayerSeason, PlayerMatchStats.player_season_id == PlayerSeason.id)
+        .outerjoin(SeasonClub, PlayerMatchStats.season_club_id == SeasonClub.id)
         .where(
             PlayerSeason.season_id == season_id,
             PlayerMatchStats.ingestion_run_id == run_id,
@@ -868,6 +1139,15 @@ def load_appearances(
                 ball_recoveries=row.ball_recoveries,
                 yellow_cards=row.yellow_cards,
                 red_cards=row.red_cards,
+                own_goals=row.own_goals or 0,
+                penalties_missed=(
+                    (row.penalties_missed or 0)
+                    + (row.penalties_post or 0)
+                    + (row.penalties_target or 0)
+                ),
+                penalties_saved=row.penalties_saved or 0,
+                penalty_conceded=row.penalty_conceded or 0,
+                club_id=row.club_id,
             )
         )
     return by_player
@@ -957,47 +1237,151 @@ def _role_totals(
         role = role_by_ps.get(ps_id)
         if role is None:
             continue
-        agg = totals.setdefault(
-            role,
-            {
-                "minutes": 0,
-                "count": 0,
-                "points": 0,
-                "goals": 0,
-                "assists": 0,
-                "saves": 0,
-                "recoveries": 0,
-                "yellows": 0,
-            },
-        )
-        for appearance in appearances:
-            if not appearance.played:
-                continue
-            agg["minutes"] += appearance.minutes
-            agg["count"] += 1
-            agg["points"] += appearance.points
-            agg["goals"] += appearance.goals
-            agg["assists"] += appearance.assists
-            agg["saves"] += appearance.saves
-            agg["recoveries"] += appearance.ball_recoveries
-            agg["yellows"] += appearance.yellow_cards
+        agg = totals.setdefault(role, _empty_totals())
+        _accumulate_totals(agg, appearances)
     return totals
 
 
+def _empty_totals() -> dict[str, int]:
+    return {
+        "minutes": 0,
+        "count": 0,
+        "starts": 0,
+        "ninety": 0,
+        "points": 0,
+        "goals": 0,
+        "assists": 0,
+        "saves": 0,
+        "recoveries": 0,
+        "yellows": 0,
+        "reds": 0,
+        "own_goals": 0,
+        "pen_missed": 0,
+        "pen_saved": 0,
+        "pen_conceded": 0,
+    }
+
+
+def _accumulate_totals(agg: dict[str, int], appearances: Sequence[Appearance]) -> None:
+    for appearance in appearances:
+        if not appearance.played:
+            continue
+        agg["minutes"] += appearance.minutes
+        agg["count"] += 1
+        agg["starts"] += appearance.minutes >= START_MINUTES_THRESHOLD
+        agg["ninety"] += appearance.minutes >= NINETY_MINUTES_THRESHOLD
+        agg["points"] += appearance.points
+        agg["goals"] += appearance.goals
+        agg["assists"] += appearance.assists
+        agg["saves"] += appearance.saves
+        agg["recoveries"] += appearance.ball_recoveries
+        agg["yellows"] += appearance.yellow_cards
+        agg["reds"] += appearance.red_cards
+        agg["own_goals"] += appearance.own_goals
+        agg["pen_missed"] += appearance.penalties_missed
+        agg["pen_saved"] += appearance.penalties_saved
+        agg["pen_conceded"] += appearance.penalty_conceded
+
+
+def _prior_from_totals(agg: dict[str, int]) -> RolePrior:
+    minutes = agg["minutes"]
+    return RolePrior(
+        goals_per90=per90(agg["goals"], minutes),
+        assists_per90=per90(agg["assists"], minutes),
+        saves_per90=per90(agg["saves"], minutes),
+        recoveries_per90=per90(agg["recoveries"], minutes),
+        yellows_per90=per90(agg["yellows"], minutes),
+        mean_minutes=round(minutes / agg["count"], 2) if agg["count"] else 0.0,
+        points_per90=per90(agg["points"], minutes),
+        reds_per90=per90(agg["reds"], minutes),
+        own_goals_per90=per90(agg["own_goals"], minutes),
+        pen_missed_per90=per90(agg["pen_missed"], minutes),
+        pen_saved_per90=per90(agg["pen_saved"], minutes),
+        pen_conceded_per90=per90(agg["pen_conceded"], minutes),
+        ninety_of_starts=(
+            round(agg["ninety"] / agg["starts"], 4) if agg["starts"] else 0.0
+        ),
+    )
+
+
 def _priors_from_totals(totals: dict[str, dict[str, int]]) -> dict[str, RolePrior]:
-    priors: dict[str, RolePrior] = {}
-    for role, agg in totals.items():
-        minutes = agg["minutes"]
-        priors[role] = RolePrior(
-            goals_per90=per90(agg["goals"], minutes),
-            assists_per90=per90(agg["assists"], minutes),
-            saves_per90=per90(agg["saves"], minutes),
-            recoveries_per90=per90(agg["recoveries"], minutes),
-            yellows_per90=per90(agg["yellows"], minutes),
-            mean_minutes=round(minutes / agg["count"], 2) if agg["count"] else 0.0,
-            points_per90=per90(agg["points"], minutes),
+    return {role: _prior_from_totals(agg) for role, agg in totals.items()}
+
+
+def price_bucket(price: float | None, edges: Sequence[float]) -> int | None:
+    """Index of the price bucket a price falls in, given ascending inner edges."""
+    if price is None:
+        return None
+    bucket = 0
+    for edge in edges:
+        if float(price) > edge:
+            bucket += 1
+    return bucket
+
+
+def price_bucket_edges(prices: Sequence[float], buckets: int = PRICE_BUCKETS) -> list[float]:
+    """Inner quantile edges splitting ``prices`` into ``buckets`` groups."""
+    ordered = sorted(float(p) for p in prices)
+    if len(ordered) < buckets or buckets < 2:
+        return []
+    return [ordered[len(ordered) * k // buckets] for k in range(1, buckets)]
+
+
+def _price_bucket_priors(
+    current_appearances: dict[int, list[Appearance]],
+    current_roles: dict[int, str],
+    current_prices: dict[int, float],
+    prior: PriorContext | None,
+    prior_prices: dict[int, float],
+    *,
+    cutoff: datetime,
+    exclude_match_ids: frozenset[int],
+) -> tuple[dict[str, list[float]], dict[tuple[str, int], RolePrior]]:
+    """Per-(role, price bucket) priors, pooled from both seasons.
+
+    Buckets are terciles of the *current* snapshot's prices within each role.
+    Last season's players enter the bucket of the price they carry in the
+    current snapshot (through the shared identity), so a player without one
+    contributes to the role average only. A bucket with fewer than
+    :data:`PRICE_BUCKET_MIN_MINUTES` of play is dropped, and the role prior
+    stands in for it.
+    """
+    by_role: dict[str, list[float]] = {}
+    for ps_id, price in current_prices.items():
+        role = current_roles.get(ps_id)
+        if role is not None:
+            by_role.setdefault(role, []).append(price)
+    edges = {role: price_bucket_edges(prices) for role, prices in by_role.items()}
+
+    totals: dict[tuple[str, int], dict[str, int]] = {}
+
+    def _add(role: str | None, price: float | None, items: Sequence[Appearance]) -> None:
+        if role is None or price is None or role not in edges or not edges[role]:
+            return
+        bucket = price_bucket(price, edges[role])
+        if bucket is None:
+            return
+        _accumulate_totals(totals.setdefault((role, bucket), _empty_totals()), items)
+
+    for ps_id, items in current_appearances.items():
+        _add(
+            current_roles.get(ps_id),
+            current_prices.get(ps_id),
+            played_before_cutoff(items, cutoff, exclude_match_ids=exclude_match_ids),
         )
-    return priors
+    if prior is not None:
+        for player in prior.by_player_id.values():
+            _add(
+                player.role,
+                prior_prices.get(player.player_season_id),
+                prior.appearances.get(player.player_season_id, []),
+            )
+    priors = {
+        key: _prior_from_totals(agg)
+        for key, agg in totals.items()
+        if agg["minutes"] >= PRICE_BUCKET_MIN_MINUTES
+    }
+    return edges, priors
 
 
 def _role_priors(
@@ -1212,6 +1596,7 @@ def _club_strengths(
     club_matches: dict[int, list[tuple[ClubMatch, float]]],
     *,
     shrink_matches: float | None = None,
+    venue_mode: str | None = None,
 ) -> tuple[dict[int, dict[str, float]], dict[str, float]]:
     """Per-club home/away attack & defence, plus league averages for fills.
 
@@ -1222,9 +1607,16 @@ def _club_strengths(
     ``shrink_matches`` pseudo-matches (default :data:`STRENGTH_SHRINK_MATCHES`),
     so a club with one home result is mostly the league average at home and a
     club with none is exactly that.
+
+    In ``pooled`` venue mode (default :data:`STRENGTH_VENUE_MODE`) a club has
+    one attack and one defence estimated from *every* match, each goal count
+    divided by the league's factor for the venue it was scored at, and the
+    factor is multiplied back in for the fixture venue. Twice the sample for
+    the same information; the league averages reported are unchanged.
     """
     pseudo = STRENGTH_SHRINK_MATCHES if shrink_matches is None else shrink_matches
     pseudo = max(0.0, float(pseudo))
+    mode = STRENGTH_VENUE_MODE if venue_mode is None else venue_mode
     league_pairs: dict[str, list[tuple[float, float]]] = {
         "home_attack": [],
         "home_defense": [],
@@ -1243,8 +1635,49 @@ def _club_strengths(
     }
 
     strengths: dict[int, dict[str, float]] = {}
+    if mode == "pooled":
+        overall = {
+            key: _weighted_mean(league_pairs[f"home_{key}"] + league_pairs[f"away_{key}"])[0]
+            for key in ("attack", "defense")
+        }
+        # A venue nobody has scored at (a two-match synthetic season, or the
+        # very first weekend) has no factor to speak of; 1.0 keeps the pooled
+        # strength usable instead of dividing by zero.
+        factors = {
+            (venue, key): (
+                league[f"{venue}_{key}"] / overall[key]
+                if overall[key] > 0 and league[f"{venue}_{key}"] > 0
+                else 1.0
+            )
+            for venue in ("home", "away")
+            for key in ("attack", "defense")
+        }
+        for club_id, matches in club_matches.items():
+            entry: dict[str, float] = {}
+            for key, getter in (
+                ("attack", lambda m: m.goals_scored),
+                ("defense", lambda m: m.goals_conceded),
+            ):
+                pairs = [
+                    (getter(m) / factors[("home" if m.is_home else "away", key)], w)
+                    for m, w in matches
+                ]
+                value, weight = _weighted_mean(pairs)
+                anchor = overall[key]
+                pooled = (
+                    (value * weight + anchor * pseudo) / (weight + pseudo)
+                    if weight > 0
+                    else anchor
+                )
+                for venue in ("home", "away"):
+                    entry[f"{venue}_{key}"] = round(pooled * factors[(venue, key)], 4)
+            entry["matches_home"] = sum(1 for m, _ in matches if m.is_home)
+            entry["matches_away"] = sum(1 for m, _ in matches if not m.is_home)
+            strengths[club_id] = entry
+        return strengths, league
+
     for club_id, matches in club_matches.items():
-        entry: dict[str, float] = {}
+        entry = {}
         for venue, is_home in (("home", True), ("away", False)):
             side = [(m, w) for m, w in matches if m.is_home is is_home]
             attack, weight = _weighted_mean([(m.goals_scored, w) for m, w in side])
@@ -1284,7 +1717,11 @@ def _blended_club_matches(
     """
     blended: dict[int, list[tuple[ClubMatch, float]]] = {}
     for club_id, matches in current.items():
-        blended[club_id] = [(match, 1.0) for match in matches]
+        ordered = sorted(matches, key=lambda m: m.scheduled_at, reverse=True)
+        blended[club_id] = [
+            (match, round(CLUB_RECENCY_DECAY**index, 6))
+            for index, match in enumerate(ordered)
+        ]
     for club_id, matches in prior.items():
         weight = rate_prior_scale(
             len(matches),
@@ -1321,24 +1758,54 @@ def _venue_strength(
 # ---------------------------------------------------------------------------
 
 
-def _event_totals(history: list[Appearance]) -> dict[str, int]:
-    """Sum every counted event over a list of appearances."""
-    return {
-        "appearances": len(history),
-        "minutes": sum(a.minutes for a in history),
-        "points": sum(a.points for a in history),
-        "goals": sum(a.goals for a in history),
-        "assists": sum(a.assists for a in history),
-        "saves": sum(a.saves for a in history),
-        "recoveries": sum(a.ball_recoveries for a in history),
-        "yellows": sum(a.yellow_cards for a in history),
+def _event_totals(history: list[Appearance], decay: float = 1.0) -> dict[str, float]:
+    """Sum every counted event over a list of appearances, most recent first.
+
+    With ``decay`` below 1 the i-th most recent appearance weighs ``decay**i``,
+    so the sums are recency-weighted evidence rather than season totals; at
+    1 they are the plain totals the leakage audit recomputes.
+    """
+    totals: dict[str, float] = {
+        "appearances": 0.0,
+        "minutes": 0.0,
+        "points": 0.0,
+        "goals": 0.0,
+        "assists": 0.0,
+        "saves": 0.0,
+        "recoveries": 0.0,
+        "yellows": 0.0,
+        "reds": 0.0,
+        "own_goals": 0.0,
+        "pen_missed": 0.0,
+        "pen_saved": 0.0,
+        "pen_conceded": 0.0,
     }
+    weight = 1.0
+    for item in history:
+        totals["appearances"] += weight
+        totals["minutes"] += weight * item.minutes
+        totals["points"] += weight * item.points
+        totals["goals"] += weight * item.goals
+        totals["assists"] += weight * item.assists
+        totals["saves"] += weight * item.saves
+        totals["recoveries"] += weight * item.ball_recoveries
+        totals["yellows"] += weight * item.yellow_cards
+        totals["reds"] += weight * item.red_cards
+        totals["own_goals"] += weight * item.own_goals
+        totals["pen_missed"] += weight * item.penalties_missed
+        totals["pen_saved"] += weight * item.penalties_saved
+        totals["pen_conceded"] += weight * item.penalty_conceded
+        weight *= decay
+    if decay >= 1.0:
+        # Plain totals stay integers, which is what the audit compares.
+        return {key: int(value) for key, value in totals.items()}
+    return totals
 
 
 def _club_participation(
     club_matches: list[ClubMatch], minutes_by_match: dict[int, int], decay: float
 ) -> dict[str, float]:
-    """Recency-weighted shares of a club's matches a player played and started."""
+    """Recency-weighted shares of a club's matches a player played, started, finished."""
     played_flags = [
         minutes_by_match.get(match.match_id, 0) > 0 for match in club_matches
     ]
@@ -1346,12 +1813,18 @@ def _club_participation(
         minutes_by_match.get(match.match_id, 0) >= START_MINUTES_THRESHOLD
         for match in club_matches
     ]
+    ninety_flags = [
+        minutes_by_match.get(match.match_id, 0) >= NINETY_MINUTES_THRESHOLD
+        for match in club_matches
+    ]
     played, total = decayed_share(played_flags, decay)
     started, _ = decayed_share(start_flags, decay)
+    ninety, _ = decayed_share(ninety_flags, decay)
     return {
         "matches": len(club_matches),
         "appearance_share": played / total if total else 0.0,
         "start_share": started / total if total else 0.0,
+        "ninety_share": ninety / total if total else 0.0,
     }
 
 
@@ -1402,6 +1875,8 @@ def _build_row(
     role_prior: RolePrior | None = None,
     role_median_price: float | None = None,
     prior_available: bool = False,
+    club_matches_by_club: dict[int, list[ClubMatch]] | None = None,
+    bucket_prior: RolePrior | None = None,
 ) -> dict[str, Any]:
     """Build one player's feature row from both seasons of his history.
 
@@ -1440,7 +1915,14 @@ def _build_row(
     prior = played_before_cutoff(
         prior_appearances or [], cutoff, exclude_match_ids=target_match_ids
     )
-    current_clubs = club_matches
+    # The matches the player could have featured in: his club's, or across a
+    # within-season transfer the old club's until he left and the new club's
+    # after (``participation_matches``). Rest days stay on the current club.
+    current_clubs = (
+        participation_matches(primary.club_id, current, club_matches_by_club)
+        if club_matches_by_club is not None
+        else club_matches
+    )
     prior_clubs = prior_club_matches or []
 
     # A newcomer is a player with no appearance in either season *before the
@@ -1524,13 +2006,28 @@ def _build_row(
     row["total_appearances"] = round(_blended("appearances"), 4)
     row["total_minutes"] = round(total_minutes, 4)
     row["total_points"] = round(total_points, 4)
-    # Every rate is shrunk towards the league's role average; without a prior
-    # (a role nobody has played yet) the shrinkage target is zero, which is the
+    # The rates are pooled from the *recency-weighted* current season (a goal
+    # last week is worth more than one in August) plus last season's capped
+    # share, and shrunk towards the anchor: the player's price bucket within
+    # his role when one is known, else the league's role average; without
+    # either (a role nobody has played yet) the target is zero, which is the
     # pre-1.6.0 behaviour of trusting the sample as it stands.
-    anchor = role_prior or RolePrior(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    for key in ("points", "goals", "assists", "saves", "recoveries", "yellows"):
+    recent_totals = _event_totals(current, CURRENT_RATE_DECAY)
+    rate_minutes = recent_totals["minutes"] + prior_scale * was_totals["minutes"]
+    anchor = bucket_prior or role_prior or RolePrior(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    rare_anchor = role_prior or anchor
+    for key in RATE_KEYS:
         row[f"{key}_per90"] = shrunk_per90(
-            _blended(key), total_minutes, anchor.rate(key)
+            recent_totals[key] + prior_scale * was_totals[key],
+            rate_minutes,
+            anchor.rate(key),
+        )
+    for key in RARE_RATE_KEYS:
+        row[f"{key}_per90"] = shrunk_per90(
+            recent_totals[key] + prior_scale * was_totals[key],
+            rate_minutes,
+            rare_anchor.rate(key),
+            pseudo_matches=RARE_EVENT_SHRINK_MATCHES,
         )
     row["has_history"] = bool(blended_history)
 
@@ -1564,41 +2061,65 @@ def _build_row(
         was_share["start_share"],
         share_prior_weight_scaled,
     )
+    ninety_share = blend(
+        now_share["ninety_share"],
+        share_now_weight,
+        was_share["ninety_share"],
+        share_prior_weight_scaled,
+    )
     row["appearance_share"] = round(appearance_share, 4)
     row["start_share"] = round(start_share, 4)
+    row["ninety_share"] = round(ninety_share, 4)
+    row["club_matches_available"] = len(current_clubs)
 
-    # Availability: the snapshot status covers injuries and published bans, and
-    # a red card on the last match before the cutoff covers the one-match
-    # suspension that status may not yet (or, for a historical tour, may no
-    # longer) reflect.
+    # Availability: the snapshot status covers injuries and published bans
+    # (honouring an end date it may carry, and a "questionable" status as a
+    # half chance), and a red card on the last match before the cutoff covers
+    # the suspension that status may not yet (or, for a historical tour, may
+    # no longer) reflect — the next match for certain, the one after at a
+    # discount when the card was a straight red.
     status = snapshot["availability_status"] if snapshot else None
+    description = snapshot["status_description"] if snapshot else None
+    status_ok, status_factor = status_availability(
+        status, description, primary.scheduled_at
+    )
     card_history = recent_before_cutoff(
         [*appearances, *(prior_appearances or [])],
         cutoff,
         exclude_match_ids=target_match_ids,
     )
-    red_card_suspension = pending_red_card_suspension(
+    red_factor = red_card_availability_factor(
         card_history,
         [*current_clubs, *prior_clubs],
     )
-    is_available = (
-        (status or "").upper() not in UNAVAILABLE_STATUSES
-        and not red_card_suspension
-    )
+    red_card_suspension = red_factor <= 0.0
+    availability_factor = round(status_factor * red_factor, 4)
+    is_available = status_ok and not red_card_suspension
     row["availability_status"] = status
-    row["status_description"] = snapshot["status_description"] if snapshot else None
+    row["status_description"] = description
     row["price"] = snapshot["price"] if snapshot else None
     row["selected_by"] = snapshot["selected_by"] if snapshot else None
     row["form"] = snapshot["form"] if snapshot else None
     row["is_available"] = is_available
     row["red_card_suspension"] = red_card_suspension
+    row["availability_factor"] = availability_factor if is_available else 0.0
 
     # Appearance probability and expected minutes. The probability is the share
     # above: a whole season of evidence, recency-weighted, rather than the last
     # five matches. A five-match window is why a player who misses the run-in —
     # which is most of the league's stars, rested or injured once the table is
     # settled — used to be forecast at exactly zero for the whole next season.
-    p_appearance = round(appearance_share, 4) if is_available else 0.0
+    # Ownership, when it is allowed to speak, can only lift the share.
+    p_share = appearance_share
+    owned = ownership_appearance(row["selected_by"])
+    if OWNERSHIP_APPEARANCE_WEIGHT > 0 and owned is not None:
+        p_share = blend(
+            appearance_share,
+            1.0 - OWNERSHIP_APPEARANCE_WEIGHT,
+            max(appearance_share, owned),
+            OWNERSHIP_APPEARANCE_WEIGHT,
+        )
+    p_appearance = round(p_share * availability_factor, 4) if is_available else 0.0
     row["p_appearance"] = p_appearance
     # Minutes when he does play are a *current* fact — a squad player promoted
     # to the eleven in October plays 90 minutes now whatever he averaged in
@@ -1637,7 +2158,8 @@ def _build_row(
             current_share=float(len(current_clubs)),
             p_base=newcomer_appearance_prior(
                 player["role"], row["price"], role_median_price
-            ),
+            )
+            * (availability_factor if is_available else 0.0),
         )
 
     return row
@@ -1681,12 +2203,19 @@ def _apply_newcomer_prior(
     row["expected_minutes"] = round(p_appearance * mean_minutes, 2)
     row["appearance_share"] = p_appearance
     row["start_share"] = round(p_appearance * full_ratio, 4)
+    row["ninety_share"] = round(row["start_share"] * prior.ninety_of_starts, 4)
     row["goals_per90"] = round(prior.goals_per90 * NEWCOMER_RATE_FACTOR, 4)
     row["assists_per90"] = round(prior.assists_per90 * NEWCOMER_RATE_FACTOR, 4)
     row["saves_per90"] = round(prior.saves_per90 * NEWCOMER_RATE_FACTOR, 4)
     row["recoveries_per90"] = round(prior.recoveries_per90 * NEWCOMER_RATE_FACTOR, 4)
-    # Yellow cards are a penalty, so they are not discounted (staying cautious).
+    # Penalties (cards, own goals, missed penalties, conceded penalties) are
+    # not discounted (staying cautious); a penalty save is a reward and is.
     row["yellows_per90"] = round(prior.yellows_per90, 4)
+    row["reds_per90"] = round(prior.reds_per90, 4)
+    row["own_goals_per90"] = round(prior.own_goals_per90, 4)
+    row["pen_missed_per90"] = round(prior.pen_missed_per90, 4)
+    row["pen_conceded_per90"] = round(prior.pen_conceded_per90, 4)
+    row["pen_saved_per90"] = round(prior.pen_saved_per90 * NEWCOMER_RATE_FACTOR, 4)
 
 
 def build_feature_dataset(
@@ -1698,12 +2227,18 @@ def build_feature_dataset(
     competition_ref: str | None = None,
     now: datetime | None = None,
     feature_version: str = FEATURE_VERSION,
+    cutoff_override: datetime | None = None,
 ) -> dict[str, Any]:
     """Build the leakage-free feature dataset for a target tour.
 
     Returns a JSON-serialisable report with metadata, the feature dictionary
     and one row per player whose club plays the target tour. The dataset is
     reproducible from ``(run_id, tour, feature_version)``.
+
+    ``cutoff_override`` pulls the cutoff *earlier* than the tour's own (never
+    later): it is how a tour two weeks ahead is forecast from today's
+    knowledge, for a transfer plan or a backtest with a horizon, without the
+    tours in between leaking into its history.
     """
     generated_at = now or datetime.now(UTC)
     with session_scope(session_factory) as session:
@@ -1714,6 +2249,8 @@ def build_feature_dataset(
         tour = resolve_target_tour(session, season_id, tour_ref)
         fixtures = _load_fixtures(session, tour.id)
         cutoff = _tour_cutoff(tour, fixtures)
+        if cutoff_override is not None and cutoff_override < cutoff:
+            cutoff = cutoff_override
         target_match_ids = frozenset(f.match_id for f in fixtures)
 
         club_matches = _load_club_matches(
@@ -1767,6 +2304,34 @@ def build_feature_dataset(
             for role, prices in prices_by_role.items()
         }
 
+        # Shrinkage anchors by price bucket within the role (optional): a
+        # last-season player is bucketed by the price he carries *now*.
+        bucket_edges: dict[str, list[float]] = {}
+        bucket_priors: dict[tuple[str, int], RolePrior] = {}
+        if PRICE_BUCKET_PRIORS:
+            current_prices = {
+                p["player_season_id"]: snapshots[p["player_season_id"]]["price"]
+                for p in players
+                if p["player_season_id"] in snapshots
+                and snapshots[p["player_season_id"]]["price"] is not None
+            }
+            prior_prices: dict[int, float] = {}
+            if prior is not None:
+                for p in players:
+                    prior_player = prior.by_player_id.get(p["player_id"])
+                    price = current_prices.get(p["player_season_id"])
+                    if prior_player is not None and price is not None:
+                        prior_prices[prior_player.player_season_id] = price
+            bucket_edges, bucket_priors = _price_bucket_priors(
+                appearances,
+                {p["player_season_id"]: p["role"] for p in players},
+                current_prices,
+                prior,
+                prior_prices,
+                cutoff=cutoff,
+                exclude_match_ids=target_match_ids,
+            )
+
         # Map a club id to its display name via any of its season-club rows.
         club_names: dict[int, str] = {}
         for info in season_clubs.values():
@@ -1818,6 +2383,12 @@ def build_feature_dataset(
                 if source["is_newcomer"]
                 else None
             )
+            snapshot = snapshots.get(player["player_season_id"])
+            bucket_prior = None
+            if bucket_priors and snapshot and snapshot["price"] is not None:
+                bucket = price_bucket(snapshot["price"], bucket_edges.get(player["role"], []))
+                if bucket is not None:
+                    bucket_prior = bucket_priors.get((player["role"], bucket))
             row = _build_row(
                 player=player,
                 fixtures=club_fixtures,
@@ -1829,7 +2400,7 @@ def build_feature_dataset(
                 club_matches=source["club_matches"],
                 prior_appearances=source["prior_appearances"],
                 prior_club_matches=source["prior_club_matches"],
-                snapshot=snapshots.get(player["player_season_id"]),
+                snapshot=snapshot,
                 strengths=strengths,
                 league=league,
                 is_newcomer=source["is_newcomer"],
@@ -1837,6 +2408,8 @@ def build_feature_dataset(
                 role_prior=role_priors.get(player["role"]),
                 role_median_price=median_price_by_role.get(player["role"]),
                 prior_available=prior is not None,
+                club_matches_by_club=club_matches,
+                bucket_prior=bucket_prior,
             )
             if row["stat_source"] == STAT_SOURCE_PRIOR:
                 prior_sourced += 1
@@ -1894,7 +2467,27 @@ __all__ = [
     "RATE_SHRINK_MATCHES",
     "STRENGTH_PRIOR_WINDOW",
     "STRENGTH_SHRINK_MATCHES",
+    "STRENGTH_VENUE_MODE",
     "SHARE_BLEND_WINDOW",
+    "CURRENT_RATE_DECAY",
+    "CLUB_RECENCY_DECAY",
+    "RARE_EVENT_SHRINK_MATCHES",
+    "PRICE_BUCKET_PRIORS",
+    "OWNERSHIP_APPEARANCE_WEIGHT",
+    "STRAIGHT_RED_SECOND_MATCH_SHARE",
+    "QUESTIONABLE_APPEARANCE_FACTOR",
+    "QUESTIONABLE_STATUSES",
+    "NINETY_MINUTES_THRESHOLD",
+    "RATE_KEYS",
+    "RARE_RATE_KEYS",
+    "red_card_ban",
+    "red_card_availability_factor",
+    "parse_status_date",
+    "status_availability",
+    "ownership_appearance",
+    "participation_matches",
+    "price_bucket",
+    "price_bucket_edges",
     "UNAVAILABLE_STATUSES",
     "STAT_SOURCE_CURRENT",
     "STAT_SOURCE_PRIOR",

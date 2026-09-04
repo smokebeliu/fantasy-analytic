@@ -17,7 +17,7 @@ DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 200
 
 Role = Literal["GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD"]
-ForecastModel = Literal["poisson_events", "season_mean", "recent_form"]
+ForecastModel = Literal["poisson_events", "season_mean", "recent_form", "ridge_stack"]
 PlayerOrder = Literal["projection", "price", "name", "selected_by", "season_score"]
 
 # Formations are given as defenders-midfielders-forwards ("4-4-2"); the number of
@@ -381,6 +381,15 @@ class SquadRequest(BaseModel):
             "(default 0.25); 0 ignores the schedule but still reports clashes"
         ),
     )
+    captain_risk_weight: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Standard deviations of a player's forecast added to his captain "
+            "score, so the armband goes to the upper tail rather than the mean "
+            "(default 0.5)"
+        ),
+    )
 
 
 class TransfersRequest(SquadRequest):
@@ -400,6 +409,30 @@ class TransfersRequest(SquadRequest):
             "Least expected-points gain a single transfer must bring to be "
             "proposed (default 0.5; 0 proposes any gain)"
         ),
+    )
+    transfer_gain_sigma: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Extra margin a transfer must clear, in standard deviations of "
+            "both players' forecasts (default 0)"
+        ),
+    )
+    horizon_tours: int | None = Field(
+        default=None,
+        ge=1,
+        le=6,
+        description=(
+            "How many tours the roster is judged on: the target tour plus the "
+            "following ones, forecast from the target tour's cutoff and "
+            "discounted by horizon_decay per tour (default 2)"
+        ),
+    )
+    horizon_decay: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Discount per tour ahead for horizon_tours (default 0.7)",
     )
 
 

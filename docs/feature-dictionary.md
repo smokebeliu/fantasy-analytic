@@ -6,7 +6,7 @@ the `fantasy-features` CLI. It turns the *active* snapshot published by the
 quality gate (step 4) into a reproducible, leakage-free table with one row per
 player whose club plays a target tour.
 
-The current `feature_version` is `1.5.0`. Version `1.1.0` added the
+The current `feature_version` is `1.7.0`. Version `1.1.0` added the
 `saves_per90`, `recoveries_per90` and `yellows_per90` rates that the step-7
 event forecast consumes; version `1.2.0` added cross-season sourcing (step 14),
 the `stat_source` / `is_newcomer` labels and newcomer priors; version `1.3.0`
@@ -15,7 +15,12 @@ counting 0-minute matchday rows as appearances and estimates the appearance
 probability from the whole sourced season instead of a five-match window;
 version `1.4.0` reports every match a club plays in the target tour rather than
 only the earliest; version `1.5.0` marks a player unavailable for the target
-tour when a red card from a previous match has not yet been served.
+tour when a red card from a previous match has not yet been served; version
+`1.6.0` caps last season at a window of matches and shrinks every rate towards
+the role average (step 22); version `1.7.0` (step 23) adds the full-match
+share, the rare-event rates, recency decay inside the current season,
+within-season transfers, the second match of a straight red, ban end dates and
+the pooled venue strengths — see [Step 23](#step-23-what-the-forecast-never-saw).
 
 ## Reproducibility and leakage guarantees
 
@@ -131,6 +136,57 @@ venue and opponent always come from the active season.
   appearance however much last season still weighs. `rest_days` is `null` until
   the active club has played.
 
+## Step 23: what the forecast never saw
+
+- **The full match (`ninety_share`).** Scoring `rpl-2025-2026.3` found that a
+  midfielder or forward who plays all 90 minutes earns a third appearance
+  point — one point in 14 % of every played row, the largest reward the
+  model did not know about. `ninety_share` is the blended, recency-weighted
+  share of club matches the player finished, built exactly like
+  `start_share`, and the forecast reads `p_ninety` off it (never above the
+  start probability).
+- **Rare events.** `reds_per90`, `own_goals_per90`, `pen_missed_per90`,
+  `pen_saved_per90` and `pen_conceded_per90` are pooled like every other rate
+  but shrunk with `RARE_EVENT_SHRINK_MATCHES` (20) pseudo-matches: two red
+  cards in a season say almost nothing about a player, so his rate stays
+  close to the role average for far longer than his goals do. A missed
+  penalty is any of Sports.ru's three flavours (off target, post, saved).
+- **Recency inside the season (`CURRENT_RATE_DECAY`).** The current season's
+  appearances enter the per-90 rates at `decay ** i` for the i-th most recent
+  one, so a goal last week weighs more than one in August; the `current_*`
+  totals the leakage audit recomputes stay unweighted. Last season keeps its
+  capped, half-life-weighted share. Chosen with `RATE_SHRINK_MATCHES` on the
+  2025/26 seasons of both leagues (see the step-23 card).
+- **Club form and venue.** A club's own results decay by `CLUB_RECENCY_DECAY`
+  per match the same way (neutral over a full season, kept at 1.0). With
+  `STRENGTH_VENUE_MODE = "pooled"` a club has one attack and one defence
+  estimated from every match, each goal count divided by the league's home
+  or away factor and the factor multiplied back in at the fixture venue,
+  which doubles the sample behind every strength; `"split"` keeps separate
+  home and away estimates.
+- **Within-season transfers (`club_matches_available`).** Every appearance
+  carries the club the player was registered with for that match. A player
+  who changed club is judged on his old club's matches up to his last
+  appearance for it and on his new club's after that, so the new club's
+  August, played without him, is not read as time on its bench.
+- **Availability (`availability_factor`).** A second yellow is a one-match
+  ban; a straight red is served in the next match for certain and, about a
+  third of the time, in the one after (`STRAIGHT_RED_SECOND_MATCH_SHARE`,
+  measured over 2024/25 and 2025/26 in both leagues), so the second match is
+  discounted rather than ruled out. A disqualification whose end date the
+  snapshot carries (`status_description`, e.g. `2026-09-01`) ends on that
+  date; an injury with a past return date, or a "questionable" status
+  (`QUESTIONABLE_STATUSES`), plays at `QUESTIONABLE_APPEARANCE_FACTOR` (0.5).
+  The two imported leagues only ever carry the status name or a date in the
+  description, so the vocabulary is a hook rather than a dictionary.
+- **Crowd wisdom (off by default).** `PRICE_BUCKET_PRIORS` shrinks rates
+  towards the average of the player's price tercile within his role instead
+  of the whole role; `OWNERSHIP_APPEARANCE_WEIGHT` lets ownership lift a low
+  appearance share (a player owned by `OWNERSHIP_FULL_PERCENT` percent of
+  managers reads as a starter). Both use snapshot values that a backtest can
+  only take from the end of the season, so what they measure there is an
+  upper bound; both stayed off (see the step-23 card).
+
 ## A tour is a slice of the calendar, not a round
 
 Fantasy tours are time windows that cannot overlap, unlike league rounds, which
@@ -213,7 +269,11 @@ which used to forecast them at exactly zero for the whole following season.
 | `prior_season_scale` | The factor last season's totals were actually pooled at: `prior_season_weight` capped so last season brings at most `RATE_PRIOR_WINDOW` matches of evidence. |
 | `appearance_share` | Blended, recency-weighted share of club matches the player was on the pitch for. |
 | `start_share` | Blended share of club matches the player started (>= 60 minutes). |
-| `p_appearance` | Probability of playing the fixture — the appearance share above; `0.0` when unavailable. |
+| `ninety_share` | Blended share of club matches the player played in full (90 minutes) — the full-match bonus of scoring `.3` rides on it. |
+| `reds_per90`, `own_goals_per90`, `pen_missed_per90`, `pen_saved_per90`, `pen_conceded_per90` | Blended rare-event rates, shrunk towards the role average with `RARE_EVENT_SHRINK_MATCHES` (20) pseudo-matches. |
+| `availability_factor` | Multiplier on the appearance share: `0` when marked out or banned, `0.5` when questionable or just back from an injury with a stated return date, `1 - STRAIGHT_RED_SECOND_MATCH_SHARE` for the second match after a straight red, else `1`. |
+| `club_matches_available` | Club matches the player was eligible for this season: his old club's up to a within-season transfer, his new club's after it. |
+| `p_appearance` | Probability of playing the fixture — the appearance share above times `availability_factor`, lifted by ownership when `OWNERSHIP_APPEARANCE_WEIGHT` is set; `0.0` when unavailable. |
 | `expected_minutes` | `p_appearance` x blended mean minutes when appearing. |
 | `club_attack`, `club_defense` | Club goals scored/conceded per match at the fixture venue, blended across seasons. |
 | `opponent_attack`, `opponent_defense` | Opponent goals scored/conceded per match at their venue. |

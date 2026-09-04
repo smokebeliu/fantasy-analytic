@@ -614,3 +614,60 @@ class IngestionIntegrationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BrokenPlayerPageTest(unittest.TestCase):
+    """Sports.ru cannot serialise one player: the page is walked one by one."""
+
+    class _Client(FakeClient):
+        def __init__(self, fixture: dict, broken_position: int) -> None:
+            super().__init__(fixture)
+            self.broken_position = broken_position
+            self.single_calls: list[int] = []
+
+        def execute(self, query: str, variables=None) -> dict:
+            variables = dict(variables or {})
+            if query is PLAYERS_QUERY:
+                from fantasy_analytics.client import GraphQLRequestError
+
+                page_size = int(variables.get("pageSize") or 100)
+                page = int(variables.get("pageNum") or 1)
+                players = self._fixture["players"]["data"]["fantasyQueries"]["players"]
+                listed = players["list"]
+                if page_size > 1:
+                    raise GraphQLRequestError('got nil for non-null "statPlayer"')
+                self.single_calls.append(page)
+                if page == self.broken_position:
+                    raise GraphQLRequestError('got nil for non-null "statPlayer"')
+                chunk = listed[page - 1 : page]
+                return {
+                    "data": {
+                        "fantasyQueries": {
+                            "players": {
+                                "pageInfo": {"hasNextPage": page < len(listed)},
+                                "list": copy.deepcopy(chunk),
+                            }
+                        }
+                    }
+                }
+            return super().execute(query, variables)
+
+    def test_the_broken_player_is_skipped_and_reported(self) -> None:
+        client = self._Client(_build_fixture(), broken_position=1)
+
+        result = fetch_all(client, IngestionOptions(history_workers=1))
+
+        self.assertEqual(["222"], [str(p["id"]) for p in result.players])
+        self.assertEqual(1, len(result.skipped_players))
+        self.assertEqual(1, result.skipped_players[0]["position"])
+        self.assertIn("statPlayer", result.skipped_players[0]["error"])
+        # Positions after the broken one are still read.
+        self.assertEqual([1, 2], client.single_calls)
+
+    def test_a_clean_single_walk_reports_nothing(self) -> None:
+        client = self._Client(_build_fixture(), broken_position=99)
+
+        result = fetch_all(client, IngestionOptions(history_workers=1))
+
+        self.assertEqual(2, len(result.players))
+        self.assertEqual([], result.skipped_players)

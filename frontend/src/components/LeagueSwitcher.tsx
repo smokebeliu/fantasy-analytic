@@ -1,7 +1,7 @@
 "use client";
 
 import { useTransition } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import type { CompetitionModel } from "@/lib/types";
 
 /**
@@ -12,6 +12,10 @@ import type { CompetitionModel } from "@/lib/types";
  * test environment. The refresh afterwards is what re-renders the server tree —
  * the header's freshness, the tour list and the player table all belong to the
  * league that was just chosen.
+ *
+ * A page addressing one player of the old league (/players/123) cannot be
+ * re-rendered for the new one at all, so the switch leaves it for the tour
+ * list instead of showing a foreign player under the new league's header.
  */
 export function LeagueSwitcher({
   competitions,
@@ -23,6 +27,7 @@ export function LeagueSwitcher({
   onSelect: (slug: string) => Promise<void> | void;
 }) {
   const router = useRouter();
+  const pathname = usePathname();
   const [pending, startTransition] = useTransition();
 
   if (competitions.length === 0) {
@@ -38,7 +43,8 @@ export function LeagueSwitcher({
     if (slug === selectedSlug) return;
     startTransition(async () => {
       await onSelect(slug);
-      router.refresh();
+      if (pathname?.startsWith("/players/")) router.replace("/");
+      else router.refresh();
     });
   };
 

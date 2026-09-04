@@ -39,6 +39,7 @@ from fantasy_analytics.db import (
     migration,
 )
 from fantasy_analytics.features import (
+    CURRENT_RATE_DECAY,
     NEWCOMER_P_APPEARANCE,
     NEWCOMER_PRICE_SLOPE,
     NEWCOMER_PRIOR_MATCHES,
@@ -360,11 +361,12 @@ class BlendedHistoryRowTest(unittest.TestCase):
         self.assertEqual(0.8, row["p_appearance"])
         self.assertEqual(STAT_SOURCE_PRIOR, row["stat_source"])
         self.assertGreater(row["expected_minutes"], 60)
-        # A goal a game last season is still read as a goal-a-game striker,
-        # less the shrinkage every rate gets towards the role average (zero
-        # here, since no role prior is given).
-        self.assertGreater(row["goals_per90"], 0.6)
-        self.assertGreater(forecast_event_model(row)["expected_points"], 3.5)
+        # A goal a game last season is still read as a striker, less the
+        # shrinkage every rate gets towards the role average (zero here, since
+        # no role prior is given): eight window matches against eight
+        # pseudo-matches of nothing leave exactly half the rate.
+        self.assertGreater(row["goals_per90"], 0.45)
+        self.assertGreater(forecast_event_model(row)["expected_points"], 3.0)
 
     def test_last_season_still_counts_once_the_new_one_starts(self) -> None:
         # The plan's requirement: last season keeps informing later tours, at a
@@ -378,9 +380,10 @@ class BlendedHistoryRowTest(unittest.TestCase):
             self.assertGreater(row["goals_per90"], 0.0)
 
         self.assertEqual(weights, sorted(weights, reverse=True))
-        # A single match of the new season leaves last season the larger half
-        # of the story; two dozen decide it.
-        self.assertGreater(weights[0], 0.5)
+        # A single match of the new season leaves last season most of the
+        # story (the shrinkage pseudo-matches take the rest); two dozen
+        # decide it.
+        self.assertGreater(weights[0], 0.4)
         self.assertLess(weights[-1], 0.1)
 
     def test_last_season_cannot_outvote_this_one_by_being_longer(self) -> None:
@@ -420,9 +423,12 @@ class BlendedHistoryRowTest(unittest.TestCase):
         self.assertGreater(rate_two, 0.3)
         self.assertLess(rate_two, 0.7)
         self.assertGreater(rate_twenty, rate_two)
+        # The current season is recency-weighted: the older of the two
+        # matches enters at CURRENT_RATE_DECAY.
+        decayed = 1.0 + CURRENT_RATE_DECAY
         self.assertAlmostEqual(
             rate_two,
-            shrunk_per90(2, 180, 0.3, pseudo_matches=RATE_SHRINK_MATCHES),
+            shrunk_per90(decayed, 90 * decayed, 0.3, pseudo_matches=RATE_SHRINK_MATCHES),
             places=4,
         )
 

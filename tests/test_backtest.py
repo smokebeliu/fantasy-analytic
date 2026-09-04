@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import text
 
+from fantasy_analytics.optimizer import SquadRules
 from fantasy_analytics.backtest import (
     ACCEPT_MODEL,
     BACKTEST_VERSION,
@@ -29,7 +30,10 @@ from fantasy_analytics.backtest import (
     REVISE_MODEL,
     BacktestError,
     _pooled,
+    apply_auto_subs,
     audit_tour,
+    rank_correlation,
+    top_n_summary,
     best_eleven_points,
     decide,
     error_metrics,
@@ -652,3 +656,97 @@ class BacktestIntegrationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RankingMetricsTest(unittest.TestCase):
+    def test_perfect_order_has_correlation_one(self) -> None:
+        pairs = [(1.0, 2.0), (2.0, 4.0), (3.0, 9.0), (4.0, 10.0)]
+        self.assertAlmostEqual(1.0, rank_correlation(pairs))
+
+    def test_reversed_order_has_correlation_minus_one(self) -> None:
+        pairs = [(1.0, 9.0), (2.0, 4.0), (3.0, 2.0)]
+        self.assertAlmostEqual(-1.0, rank_correlation(pairs))
+
+    def test_ties_get_average_ranks(self) -> None:
+        # Two identical actuals share rank 1.5; the correlation stays defined.
+        pairs = [(1.0, 0.0), (2.0, 0.0), (3.0, 5.0)]
+        self.assertAlmostEqual(0.866, rank_correlation(pairs), places=3)
+
+    def test_too_few_or_constant_pairs_are_undefined(self) -> None:
+        self.assertIsNone(rank_correlation([(1.0, 2.0), (2.0, 3.0)]))
+        self.assertIsNone(rank_correlation([(1.0, 2.0), (2.0, 2.0), (3.0, 2.0)]))
+
+    def test_top_n_compares_the_forecast_slice_with_the_real_one(self) -> None:
+        pairs = [(1, 5.0, 1.0), (2, 4.0, 8.0), (3, 3.0, 9.0), (4, 1.0, 0.0)]
+        summary = top_n_summary(pairs, top=2)
+        self.assertEqual(2, summary["n"])
+        self.assertEqual(9.0, summary["predicted_points"])  # players 1 and 2
+        self.assertEqual(9.0, summary["actual_points"])  # 1 + 8
+        self.assertEqual(17.0, summary["ceiling_points"])  # players 2 and 3
+        self.assertEqual(1, summary["hits"])  # only player 2 overlaps
+
+    def test_empty_top_n(self) -> None:
+        self.assertEqual(0, top_n_summary([])["n"])
+
+
+class AutoSubTest(unittest.TestCase):
+    def _rules(self) -> SquadRules:
+        return SquadRules(
+            total_budget=100.0,
+            total_players=15,
+            starting_players=11,
+            full_limits={"GOALKEEPER": (2, 2), "DEFENDER": (5, 5), "MIDFIELDER": (5, 5), "FORWARD": (3, 3)},
+            starting_limits={"GOALKEEPER": (1, 1), "DEFENDER": (3, 5), "MIDFIELDER": (2, 5), "FORWARD": (1, 3)},
+            max_same_team=3,
+            total_transfers=2,
+        )
+
+    @staticmethod
+    def _player(pid: int, role: str) -> dict:
+        return {"player_season_id": pid, "role": role, "player_name": str(pid)}
+
+    def test_missing_starter_is_replaced_in_bench_order(self) -> None:
+        starters = [self._player(1, "GOALKEEPER")] + [
+            self._player(i, "DEFENDER") for i in (2, 3, 4)
+        ] + [self._player(i, "MIDFIELDER") for i in (5, 6, 7, 8)] + [
+            self._player(i, "FORWARD") for i in (9, 10, 11)
+        ]
+        bench = [self._player(12, "MIDFIELDER"), self._player(13, "DEFENDER"), self._player(14, "FORWARD"), self._player(15, "GOALKEEPER")]
+        played = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14}  # 11 and 12 missed
+        eleven = apply_auto_subs(starters, bench, played, self._rules())
+        ids = {p["player_season_id"] for p in eleven}
+        self.assertNotIn(11, ids)
+        self.assertNotIn(12, ids)  # first sub did not play, so he is skipped
+        self.assertIn(13, ids)  # the next one who played gets in
+        self.assertEqual(11, len(eleven))
+
+    def test_keeper_is_only_replaced_by_the_reserve_keeper(self) -> None:
+        starters = [self._player(1, "GOALKEEPER")] + [
+            self._player(i, "DEFENDER") for i in (2, 3, 4, 5)
+        ] + [self._player(i, "MIDFIELDER") for i in (6, 7, 8, 9)] + [
+            self._player(i, "FORWARD") for i in (10, 11)
+        ]
+        bench = [self._player(12, "MIDFIELDER"), self._player(15, "GOALKEEPER")]
+        played = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15}
+        eleven = apply_auto_subs(starters, bench, played, self._rules())
+        ids = {p["player_season_id"] for p in eleven}
+        self.assertIn(15, ids)
+        self.assertNotIn(12, ids)
+
+    def test_position_limit_blocks_an_illegal_sub(self) -> None:
+        starters = [self._player(1, "GOALKEEPER")] + [
+            self._player(i, "DEFENDER") for i in (2, 3, 4, 5, 6)
+        ] + [self._player(i, "MIDFIELDER") for i in (7, 8, 9)] + [
+            self._player(i, "FORWARD") for i in (10, 11)
+        ]
+        # A sixth defender may not come on for a forward.
+        bench = [self._player(12, "DEFENDER"), self._player(13, "FORWARD")]
+        played = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13}
+        eleven = apply_auto_subs(starters, bench, played, self._rules())
+        ids = {p["player_season_id"] for p in eleven}
+        self.assertNotIn(12, ids)
+        self.assertIn(13, ids)
+
+    def test_nobody_missing_keeps_the_eleven(self) -> None:
+        starters = [self._player(i, "MIDFIELDER") for i in range(11)]
+        self.assertEqual(starters, apply_auto_subs(starters, [], set(range(11)), self._rules()))

@@ -221,7 +221,8 @@
             "enum": [
               "poisson_events",
               "season_mean",
-              "recent_form"
+              "recent_form",
+              "ridge_stack"
             ],
             "title": "Model",
             "type": "string"
@@ -2503,6 +2504,19 @@
       },
       "SquadRequest": {
         "properties": {
+          "captain_risk_weight": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Standard deviations of a player's forecast added to his captain score, so the armband goes to the upper tail rather than the mean (default 0.5)",
+            "title": "Captain Risk Weight"
+          },
           "competition": {
             "anyOf": [
               {
@@ -2563,7 +2577,8 @@
             "enum": [
               "poisson_events",
               "season_mean",
-              "recent_form"
+              "recent_form",
+              "ridge_stack"
             ],
             "title": "Model",
             "type": "string"
@@ -2729,6 +2744,19 @@
       },
       "TransfersRequest": {
         "properties": {
+          "captain_risk_weight": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Standard deviations of a player's forecast added to his captain score, so the armband goes to the upper tail rather than the mean (default 0.5)",
+            "title": "Captain Risk Weight"
+          },
           "competition": {
             "anyOf": [
               {
@@ -2775,6 +2803,34 @@
             ],
             "description": "Starting formation as defenders-midfielders-forwards, e.g. '4-4-2'; goalkeepers fill the remaining starting slots",
             "title": "Formation"
+          },
+          "horizon_decay": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Discount per tour ahead for horizon_tours (default 0.7)",
+            "title": "Horizon Decay"
+          },
+          "horizon_tours": {
+            "anyOf": [
+              {
+                "maximum": 6.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How many tours the roster is judged on: the target tour plus the following ones, forecast from the target tour's cutoff and discounted by horizon_decay per tour (default 2)",
+            "title": "Horizon Tours"
           },
           "locked": {
             "description": "Fantasy (or internal) player ids forced into the squad; the remaining slots are filled optimally",
@@ -2824,7 +2880,8 @@
             "enum": [
               "poisson_events",
               "season_mean",
-              "recent_form"
+              "recent_form",
+              "ridge_stack"
             ],
             "title": "Model",
             "type": "string"
@@ -2864,6 +2921,19 @@
             ],
             "description": "Target tour fantasy id or name",
             "title": "Tour"
+          },
+          "transfer_gain_sigma": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Extra margin a transfer must clear, in standard deviations of both players' forecasts (default 0)",
+            "title": "Transfer Gain Sigma"
           }
         },
         "required": [
@@ -3608,7 +3678,8 @@
               "enum": [
                 "poisson_events",
                 "season_mean",
-                "recent_form"
+                "recent_form",
+                "ridge_stack"
               ],
               "title": "Model",
               "type": "string"
@@ -3813,7 +3884,8 @@
               "enum": [
                 "poisson_events",
                 "season_mean",
-                "recent_form"
+                "recent_form",
+                "ridge_stack"
               ],
               "title": "Model",
               "type": "string"

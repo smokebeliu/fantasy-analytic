@@ -25,8 +25,12 @@ from typing import Any, Sequence
 from .db import create_db_engine, create_session_factory
 from .forecast import MODEL_EVENT, MODEL_MEAN, MODEL_RECENT
 from .optimizer import (
+    DEFAULT_CAPTAIN_RISK_WEIGHT,
     DEFAULT_FIXTURE_CONFLICT_WEIGHT,
+    DEFAULT_HORIZON_DECAY,
+    DEFAULT_HORIZON_TOURS,
     DEFAULT_MIN_TRANSFER_GAIN,
+    DEFAULT_TRANSFER_GAIN_SIGMA,
     OptimizerError,
     build_squad_optimization,
 )
@@ -92,6 +96,35 @@ def build_parser() -> argparse.ArgumentParser:
             "Least expected-points gain a transfer must bring to be proposed "
             f"(default: {DEFAULT_MIN_TRANSFER_GAIN}; 0 proposes any gain)"
         ),
+    )
+    parser.add_argument(
+        "--transfer-gain-sigma",
+        type=float,
+        help=(
+            "Extra margin a transfer must clear, in standard deviations of both "
+            f"players' forecasts (default: {DEFAULT_TRANSFER_GAIN_SIGMA})"
+        ),
+    )
+    parser.add_argument(
+        "--captain-risk-weight",
+        type=float,
+        help=(
+            "Standard deviations of a player's forecast added to his captain "
+            f"score (default: {DEFAULT_CAPTAIN_RISK_WEIGHT})"
+        ),
+    )
+    parser.add_argument(
+        "--horizon-tours",
+        type=int,
+        help=(
+            "Tours the roster is judged on: the target one plus the following, "
+            f"forecast from the target tour's cutoff (default: {DEFAULT_HORIZON_TOURS})"
+        ),
+    )
+    parser.add_argument(
+        "--horizon-decay",
+        type=float,
+        help=f"Discount per tour ahead for --horizon-tours (default: {DEFAULT_HORIZON_DECAY})",
     )
     parser.add_argument(
         "--locked",
@@ -246,6 +279,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             formation=args.formation,
             fixture_conflict_weight=args.fixture_conflict_weight,
             min_transfer_gain=args.min_transfer_gain,
+            transfer_gain_sigma=args.transfer_gain_sigma,
+            captain_risk_weight=args.captain_risk_weight,
+            horizon_tours=args.horizon_tours,
+            horizon_decay=args.horizon_decay,
         )
     except OptimizerError as error:
         print(f"Optimization failed: {error}", file=sys.stderr)

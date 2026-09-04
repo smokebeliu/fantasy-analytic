@@ -69,6 +69,10 @@ export function RefreshPanel({
   const [season, setSeason] = useState<string>(LATEST_COMPLETED);
   const [now, setNow] = useState(() => Date.now());
 
+  // The league a response belongs to, read synchronously so a status fetch that
+  // was started for the previous league cannot land on the new one.
+  const slugRef = useRef(slug);
+
   const competition =
     competitions.find((item) => item.slug === slug) ??
     status?.competition ??
@@ -96,8 +100,11 @@ export function RefreshPanel({
   const reload = useCallback(async () => {
     if (!slug) return;
     try {
-      applyStatus(await api.getIngestionStatus(slug));
+      const next = await api.getIngestionStatus(slug);
+      if (slugRef.current !== slug) return;
+      applyStatus(next);
     } catch (error: unknown) {
+      if (slugRef.current !== slug) return;
       setLoadError(
         error instanceof ApiError
           ? error.message
@@ -121,11 +128,21 @@ export function RefreshPanel({
     void reloadRef.current();
   }, [slug]);
 
-  // A season chosen for one league means nothing for another, so the selector
-  // returns to the default whenever the league changes.
-  useEffect(() => {
+  // Everything on this screen below the league selector describes one league:
+  // the season to import, the job and its stages, the published snapshot, the
+  // errors. None of it means anything for another league, so choosing one drops
+  // all of it instead of leaving the previous league's job on screen (which is
+  // also what disables the controls) until the first poll of the new league
+  // lands — or forever, when that poll fails.
+  const changeLeague = useCallback((next: string) => {
+    slugRef.current = next;
+    setSlug(next);
     setSeason(LATEST_COMPLETED);
-  }, [slug]);
+    setStatus(null);
+    setLoadError(null);
+    setActionError(null);
+    seenJob.current = null;
+  }, []);
 
   const polling = shouldPoll(status);
 
@@ -242,7 +259,7 @@ export function RefreshPanel({
             data-testid="refresh-league"
             value={slug}
             disabled={refreshing || competitions.length === 0}
-            onChange={(event) => setSlug(event.target.value)}
+            onChange={(event) => changeLeague(event.target.value)}
           >
             {competitions.length === 0 && <option value={slug}>{slug}</option>}
             {competitions.map((item) => (

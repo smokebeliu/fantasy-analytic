@@ -1,5 +1,5 @@
 import { api, ApiError } from "@/lib/api";
-import { leagueSeasonId, loadLeagueContext } from "@/lib/league";
+import { leagueKey, leagueSeasonId, loadLeagueContext } from "@/lib/league";
 import { TourExplorer } from "@/components/TourExplorer";
 import type { TourModel } from "@/lib/types";
 
@@ -68,6 +68,7 @@ export default async function HomePage() {
 
       {!loadError && seasonId != null && defaultTour != null && (
         <TourExplorer
+          key={leagueKey(competition)}
           seasonId={seasonId}
           tours={tours}
           defaultTourId={defaultTour.tour_id}

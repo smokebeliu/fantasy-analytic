@@ -38,6 +38,7 @@ from .db.models import (
     ClubMatchStats,
     ClubSeasonStats,
     FantasyTour,
+    IngestionRun,
     Match,
     PlayerMatchStats,
     PlayerSeason,
@@ -669,7 +670,44 @@ def check_player_points_reconciliation(ctx: QualityContext) -> CheckResult:
     )
 
 
+def check_ingestion_skips(ctx: QualityContext) -> CheckResult:
+    """Players the import had to leave out are surfaced as warnings.
+
+    Sports.ru occasionally cannot serialise one player of a season (``got nil
+    for non-null "statPlayer"``); the import walks the broken page one player
+    at a time and records who was skipped in the run report (step 23). The
+    snapshot is still publishable — the missing player is one of hundreds and
+    invariably a near-zero one — but nobody should have to discover the gap
+    by counting rows.
+    """
+    run = ctx.session.get(IngestionRun, ctx.run_id)
+    skipped = list(((run.report if run else None) or {}).get("skipped_players") or [])
+    issues = [
+        QualityIssue(
+            check_name="ingestion_skipped_players",
+            severity=WARNING,
+            message=(
+                f"Player at position {item.get('position')} of the Sports.ru "
+                f"rating could not be fetched and was skipped: {item.get('error')}"
+            ),
+            entity_type="player",
+            entity_ref=str(item.get("position")),
+            expected="fetched",
+            actual="skipped",
+            details=dict(item),
+        )
+        for item in skipped
+    ]
+    return CheckResult(
+        name="ingestion_skipped_players",
+        expected=0,
+        actual=len(skipped),
+        issues=_cap(issues),
+    )
+
+
 CHECKS: tuple[CheckFn, ...] = (
+    check_ingestion_skips,
     check_catalog_completeness,
     check_reference_integrity,
     check_duplicate_fixtures,

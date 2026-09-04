@@ -29,6 +29,9 @@ from fantasy_analytics.db import (
 from fantasy_analytics.forecast import MODEL_EVENT
 from fantasy_analytics.ingestion import IngestionOptions, run_ingestion
 from fantasy_analytics.optimizer import (
+    attach_future_points,
+    expected_auto_sub_points,
+    order_bench,
     DEFAULT_FIXTURE_CONFLICT_WEIGHT,
     Candidate,
     FixtureExposure,
@@ -1561,3 +1564,141 @@ def _rules_from_report(report: dict) -> SquadRules:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StepTwentyThreeOptimizerTest(unittest.TestCase):
+    """Captain on the upper tail, uncertainty-aware transfers, bench order, horizon."""
+
+    @staticmethod
+    def _candidate(pid: int, role: str, points: float, *, p: float = 1.0, unc: float = 0.0, future: float = 0.0, price: float = 5.0, club: int | None = None) -> Candidate:
+        return Candidate(
+            player_season_id=pid,
+            fantasy_player_id=str(pid),
+            player_name=f"P{pid}",
+            role=role,
+            club_id=club if club is not None else pid % 7 + 1,
+            club_name="C",
+            price=price,
+            expected_points=points,
+            p_appearance=p,
+            uncertainty=unc,
+            future_points=future,
+        )
+
+    def test_bench_order_maximises_the_expected_auto_sub_points(self) -> None:
+        starters = [self._candidate(i, "MIDFIELDER", 3.0, p=0.7) for i in range(10)]
+        # Same expected points. The gamble goes *first*: if he does not play
+        # the reliable sub still takes the first vacancy, whereas the other
+        # way round the gamble only ever sees a second vacancy.
+        reliable = self._candidate(20, "DEFENDER", 1.5, p=1.0)
+        gamble = self._candidate(21, "FORWARD", 1.5, p=0.3)
+        keeper = self._candidate(22, "GOALKEEPER", 2.0, p=1.0)
+        order = order_bench([reliable, keeper, gamble], starters)
+        self.assertEqual([21, 20, 22], [c.player_season_id for c in order])
+        self.assertGreater(
+            expected_auto_sub_points([gamble, reliable], starters),
+            expected_auto_sub_points([reliable, gamble], starters),
+        )
+        # What decides the order is the points a sub scores *when he plays*
+        # (expected points over play probability): six a match beats five.
+        strong = self._candidate(23, "DEFENDER", 3.0, p=0.5)
+        order = order_bench([gamble, strong, keeper], starters)
+        self.assertEqual(23, order[0].player_season_id)
+
+    def test_no_absences_means_no_auto_sub_points(self) -> None:
+        starters = [self._candidate(i, "MIDFIELDER", 3.0, p=1.0) for i in range(10)]
+        bench = [self._candidate(20, "DEFENDER", 2.0, p=1.0)]
+        self.assertAlmostEqual(0.0, expected_auto_sub_points(bench, starters))
+
+    def test_attach_future_points_discounts_the_tours_ahead(self) -> None:
+        rows = [
+            {"model_name": "poisson_events", "player_season_id": 1, "expected_points": 3.0},
+            {"model_name": "season_mean", "player_season_id": 1, "expected_points": 2.0},
+        ]
+        future = [
+            [{"model_name": "poisson_events", "player_season_id": 1, "expected_points": 4.0}],
+            [{"model_name": "poisson_events", "player_season_id": 1, "expected_points": 2.0}],
+        ]
+        stamped = attach_future_points(rows, future, model="poisson_events", decay=0.5)
+        self.assertAlmostEqual(0.5 * 4.0 + 0.25 * 2.0, stamped[0]["future_points"])
+        self.assertNotIn("future_points", stamped[1])
+        self.assertEqual(3.0, stamped[0]["expected_points"])
+
+    def _rules(self) -> SquadRules:
+        return SquadRules(
+            total_budget=100.0,
+            total_players=15,
+            starting_players=11,
+            full_limits={"GOALKEEPER": (2, 2), "DEFENDER": (5, 5), "MIDFIELDER": (5, 5), "FORWARD": (3, 3)},
+            starting_limits={"GOALKEEPER": (1, 1), "DEFENDER": (3, 5), "MIDFIELDER": (2, 5), "FORWARD": (1, 3)},
+            max_same_team=15,
+            total_transfers=2,
+        )
+
+    def _pool(self) -> list[Candidate]:
+        pool = []
+        pid = 1
+        for role, count in (("GOALKEEPER", 3), ("DEFENDER", 7), ("MIDFIELDER", 7), ("FORWARD", 5)):
+            for i in range(count):
+                pool.append(self._candidate(pid, role, 2.0 + i * 0.5, price=4.0, club=pid))
+                pid += 1
+        return pool
+
+    def test_captain_risk_weight_moves_the_armband_to_the_upper_tail(self) -> None:
+        pool = self._pool()
+        # Two forwards: one with the higher mean, one with a fat tail.
+        pool = [c for c in pool if c.role != "FORWARD"]
+        pool.append(self._candidate(101, "FORWARD", 6.0, unc=1.0, price=4.0, club=101))
+        pool.append(self._candidate(102, "FORWARD", 5.5, unc=3.0, price=4.0, club=102))
+        pool.append(self._candidate(103, "FORWARD", 1.0, price=4.0, club=103))
+        mean = solve_squad(pool, self._rules(), captain_risk_weight=0.0)
+        tail = solve_squad(pool, self._rules(), captain_risk_weight=0.5)
+        self.assertEqual(101, mean["captain"]["player_season_id"])
+        self.assertEqual(102, tail["captain"]["player_season_id"])
+        self.assertAlmostEqual(5.5 + 1.5, tail["captain"]["captain_score"])
+        # The reported objective stays in expected points.
+        self.assertAlmostEqual(
+            tail["starting_expected_points"] + 5.5, tail["objective_expected_points"]
+        )
+
+    def test_transfer_gain_sigma_blocks_an_uncertain_swap(self) -> None:
+        pool = self._pool()
+        rules = self._rules()
+        base = solve_squad(pool, rules)
+        current = [p["player_season_id"] for p in base["squad"]]
+        # A newcomer worth 0.8 more than the best forward (so he would start),
+        # but very uncertain.
+        best_forward = max(
+            (p for p in base["squad"] if p["role"] == "FORWARD"), key=lambda p: p["expected_points"]
+        )
+        pool.append(
+            self._candidate(200, "FORWARD", best_forward["expected_points"] + 0.8, unc=4.0, price=4.0, club=200)
+        )
+        # The captain is chosen on the mean here so only the threshold speaks.
+        flat = solve_squad(pool, rules, current_ids=current, max_transfers=1, min_transfer_gain=0.5, transfer_gain_sigma=0.0, captain_risk_weight=0.0)
+        cautious = solve_squad(pool, rules, current_ids=current, max_transfers=1, min_transfer_gain=0.5, transfer_gain_sigma=0.25, captain_risk_weight=0.0)
+        self.assertEqual(1, flat["transfers"]["made"])
+        self.assertEqual(0, cautious["transfers"]["made"])
+        self.assertEqual(0.25, cautious["transfers"]["gain_sigma"])
+
+    def test_future_points_can_keep_a_player_in_the_roster(self) -> None:
+        pool = [c for c in self._pool() if c.role != "FORWARD"]
+        rules = self._rules()
+        # Only one forward starts in this pool (5 defenders and 5 midfielders
+        # are better), so the other two roster slots are decided by what the
+        # tours ahead are worth. Four forwards for three slots: the starter,
+        # then the two with the best runs ahead.
+        pool.append(self._candidate(311, "FORWARD", 3.5, future=0.0, price=4.0, club=311))
+        pool.append(self._candidate(312, "FORWARD", 3.0, future=1.0, price=4.0, club=312))
+        pool.append(self._candidate(300, "FORWARD", 0.5, future=0.0, price=4.0, club=300))
+        pool.append(self._candidate(301, "FORWARD", 0.5, future=5.0, price=4.0, club=301))
+        solution = solve_squad(pool, rules)
+        ids = {p["player_season_id"] for p in solution["squad"]}
+        self.assertIn(301, ids)
+        self.assertIn(312, ids)
+        self.assertNotIn(300, ids)
+        # Future points never enter the reported expected points of the eleven.
+        starters = [p for p in solution["squad"] if p["is_starter"]]
+        self.assertAlmostEqual(
+            sum(p["expected_points"] for p in starters), solution["starting_expected_points"]
+        )

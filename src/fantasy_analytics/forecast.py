@@ -72,7 +72,14 @@ from .odds import DEFAULT_ODDS_WEIGHT, attach_odds_to_features, blend_goal_means
 #   player's recoveries by a third. The concession penalty is also scaled to the
 #   minutes the player is on the pitch for, since Sports.ru only counts goals
 #   conceded while he is on it.
-MODEL_VERSION = "1.4.0"
+# 1.5.0 (step 23) scores what the model never saw. Scoring ``.3`` found that a
+#   midfielder or forward who plays the full 90 minutes earns a third
+#   appearance point — one point in 14% of all played rows, the single
+#   largest unmodelled reward — so the appearance component now carries
+#   ``p_ninety``. Red cards, own goals, missed penalties, saved penalties and
+#   conceded penalties are scored from their own (heavily shrunk) rates as
+#   three new components, ``red_cards``, ``own_goals`` and ``penalties``.
+MODEL_VERSION = "1.5.0"
 
 # Model names persisted alongside every forecast row.
 MODEL_EVENT = "poisson_events"
@@ -94,11 +101,34 @@ MODEL_RECENT = "recent_form"
 # exact on the RPL and from 2.4% to 94.7% on La Liga; the outfield rows were
 # re-fitted at the same time and came out unchanged (see
 # :mod:`fantasy_analytics.scoring_audit`).
-SCORING_VERSION = "rpl-2025-2026.2"
+#
+# ``.3`` (step 23) read the remaining residuals. A midfielder or forward who
+# plays the full 90 minutes earns one more point than one substituted on 89
+# (``full_ninety``; defenders and keepers do not), which alone explained a
+# +1 residual in 30% of midfielders' and 19% of forwards' played rows and
+# exactly none of the others. The rare events were read off the same table:
+# a red card is -3 (a second yellow -2 on top of the yellow already paid),
+# an own goal -2, a missed penalty (off target, post or saved) -2, a saved
+# penalty +5 for the keeper, a conceded penalty -2. Reconstruction of the
+# rows without rare events moves from 85% to 99.6% exact on both leagues.
+SCORING_VERSION = "rpl-2025-2026.3"
 
 # Minutes threshold for a "full" appearance (a start): clean sheets and the
 # 2-point appearance bonus require it.
 START_MINUTES = 60
+
+# Minutes for the whole match, where midfielders and forwards earn the third
+# appearance point. Sports.ru caps recorded minutes at 90.
+NINETY_MINUTES = 90
+
+# Share of red cards that are second yellows (one point of the -3 was already
+# paid as the yellow), from 2024/25 and 2025/26 in both leagues, so that a
+# red card is worth ``red_card + share`` in expectation.
+RED_CARD_SECOND_YELLOW_SHARE = 0.45
+
+# A conceded penalty costs its -2 only when it is converted; a third of them
+# are saved or missed in these leagues.
+PENALTY_CONVERSION_RATE = 0.65
 
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
 
@@ -113,6 +143,9 @@ _COMPONENT_KEYS = (
     "saves",
     "recoveries",
     "yellow_cards",
+    "red_cards",
+    "own_goals",
+    "penalties",
 )
 
 
@@ -129,6 +162,12 @@ class RoleScoring:
     save_per_three: int  # goalkeeper saves reward, per 3 saves
     recovery_per_three: int  # ball-recovery reward, per 3 recoveries
     yellow_card: int
+    full_ninety: int = 0  # extra point for playing the whole match
+    red_card: int = -3  # a second yellow is red_card + 1 (the yellow is paid)
+    own_goal: int = -2
+    penalty_missed: int = -2  # off target, against the post or saved
+    penalty_saved: int = 0  # goalkeepers only
+    penalty_conceded: int = -2
 
 
 # The versioned scoring table. Rewards/penalties that are role-independent
@@ -145,6 +184,7 @@ SCORING: dict[str, RoleScoring] = {
         save_per_three=1,
         recovery_per_three=0,
         yellow_card=-1,
+        penalty_saved=5,
     ),
     "DEFENDER": RoleScoring(
         appearance_sub=1,
@@ -167,6 +207,7 @@ SCORING: dict[str, RoleScoring] = {
         save_per_three=0,
         recovery_per_three=1,
         yellow_card=-1,
+        full_ninety=1,
     ),
     "FORWARD": RoleScoring(
         appearance_sub=1,
@@ -178,6 +219,7 @@ SCORING: dict[str, RoleScoring] = {
         save_per_three=0,
         recovery_per_three=1,
         yellow_card=-1,
+        full_ninety=1,
     ),
 }
 
@@ -192,6 +234,11 @@ def reconstruct_points(
     ball_recoveries: int,
     yellow_cards: int,
     goals_conceded: int,
+    red_cards: int = 0,
+    own_goals: int = 0,
+    penalties_missed: int = 0,
+    penalties_saved: int = 0,
+    penalty_conceded: int = 0,
 ) -> int:
     """Score one played match from its events using :data:`SCORING`.
 
@@ -201,15 +248,16 @@ def reconstruct_points(
     ``points`` column, which is how ``SCORING_VERSION`` is justified — and how a
     league whose point values differ from the RPL's would be caught.
 
-    Deliberately incomplete: red cards, own goals, conceded penalties, missed
-    penalties and the indirect "fantasy assist" are not modelled, because the
-    imported per-match columns do not carry the events behind them.
+    Still incomplete on purpose: the indirect "fantasy assist" and whatever
+    pays the odd +2 to a defender are not in the imported columns.
     """
     if minutes <= 0:
         return 0
     scoring = SCORING[role]
     full = minutes >= START_MINUTES
     total = scoring.appearance_full if full else scoring.appearance_sub
+    if minutes >= NINETY_MINUTES:
+        total += scoring.full_ninety
     total += goals * scoring.goal
     total += assists * scoring.assist
     if full and goals_conceded == 0:
@@ -218,6 +266,14 @@ def reconstruct_points(
     total += (saves // 3) * scoring.save_per_three
     total += (ball_recoveries // 3) * scoring.recovery_per_three
     total += yellow_cards * scoring.yellow_card
+    # A second yellow is a red on top of a yellow already charged, and the two
+    # together cost the same -3 as a straight red.
+    if red_cards:
+        total += red_cards * (scoring.red_card + (1 if yellow_cards else 0))
+    total += own_goals * scoring.own_goal
+    total += penalties_missed * scoring.penalty_missed
+    total += penalties_saved * scoring.penalty_saved
+    total += penalty_conceded * scoring.penalty_conceded
     return total
 
 
@@ -377,6 +433,14 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
         float(row.get("start_share") or 0.0),
         float(row.get("appearance_share") or 0.0),
     )
+    # The full-match bonus needs the chance of seeing the final whistle, which
+    # is a sub-share of the starts the same way the starts are of appearances.
+    p_ninety, _ = appearance_probabilities(
+        p_appearance,
+        float(row.get("ninety_share") or 0.0),
+        float(row.get("appearance_share") or 0.0),
+    )
+    p_ninety = min(p_ninety, p_full)
 
     # Per-match event counts, which do not depend on which match it is. They
     # are unconditional expectations: the rate over the minutes the player is
@@ -391,6 +455,19 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
     )
     exp_yellows = _expected_from_rate(
         float(row.get("yellows_per90") or 0.0), expected_minutes
+    )
+    exp_reds = _expected_from_rate(float(row.get("reds_per90") or 0.0), expected_minutes)
+    exp_own_goals = _expected_from_rate(
+        float(row.get("own_goals_per90") or 0.0), expected_minutes
+    )
+    exp_pen_missed = _expected_from_rate(
+        float(row.get("pen_missed_per90") or 0.0), expected_minutes
+    )
+    exp_pen_saved = _expected_from_rate(
+        float(row.get("pen_saved_per90") or 0.0), expected_minutes
+    )
+    exp_pen_conceded = _expected_from_rate(
+        float(row.get("pen_conceded_per90") or 0.0), expected_minutes
     )
     # The same counts for a match the player actually plays. The block rewards
     # need these: ``E[floor(N/3)]`` of a Poisson with half the mean is much less
@@ -409,7 +486,11 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
 
     # Points contributed by each component. The appearance bonus mixes full and
     # substitute probabilities; every other reward is a rate times its value.
-    appearance_pts = scoring.appearance_full * p_full + scoring.appearance_sub * p_sub
+    appearance_pts = (
+        scoring.appearance_full * p_full
+        + scoring.appearance_sub * p_sub
+        + scoring.full_ninety * p_ninety
+    )
     # The three block rewards are paid per completed threshold, so each one is
     # the expected number of *whole* blocks in a match he plays, weighted by
     # the probability that he does.
@@ -422,6 +503,16 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
         * p_appearance
     )
     yellow_pts = scoring.yellow_card * exp_yellows
+    # The rare events. A red card is worth its -3 less the yellow already paid
+    # when it was a second yellow; a conceded penalty only costs when scored.
+    red_value = scoring.red_card + RED_CARD_SECOND_YELLOW_SHARE
+    red_pts = red_value * exp_reds
+    own_goal_pts = scoring.own_goal * exp_own_goals
+    penalty_pts = (
+        scoring.penalty_missed * exp_pen_missed
+        + scoring.penalty_saved * exp_pen_saved
+        + scoring.penalty_conceded * PENALTY_CONVERSION_RATE * exp_pen_conceded
+    )
 
     playing = is_available and p_appearance > 0.0
 
@@ -481,6 +572,9 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
             "saves": round(save_pts, 4),
             "recoveries": round(recovery_pts, 4),
             "yellow_cards": round(yellow_pts, 4),
+            "red_cards": round(red_pts, 4),
+            "own_goals": round(own_goal_pts, 4),
+            "penalties": round(penalty_pts, 4),
         }
         if not playing:
             match = {key: 0.0 for key in match}
@@ -538,12 +632,19 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
                 + (scoring.save_per_three / 3.0) ** 2 * exp_saves
                 + (scoring.recovery_per_three / 3.0) ** 2 * exp_recoveries
                 + scoring.yellow_card**2 * exp_yellows
+                + red_value**2 * exp_reds
+                + scoring.own_goal**2 * exp_own_goals
+                + scoring.penalty_missed**2 * exp_pen_missed
+                + scoring.penalty_saved**2 * exp_pen_saved
+                + (scoring.penalty_conceded * PENALTY_CONVERSION_RATE) ** 2
+                * exp_pen_conceded
                 + (scoring.clean_sheet * p_full) ** 2
                 * p_clean_sheet
                 * (1.0 - p_clean_sheet)
                 + (scoring.appearance_full - scoring.appearance_sub) ** 2
                 * p_full
                 * (1.0 - p_full)
+                + scoring.full_ninety**2 * p_ninety * (1.0 - p_ninety)
             )
 
     expected_points = round(sum(components.values()), 4)
@@ -577,6 +678,12 @@ def forecast_event_model(row: dict[str, Any]) -> dict[str, Any]:
             ),
             "p_full_appearance": p_full,
             "p_sub_appearance": p_sub,
+            "p_ninety": p_ninety,
+            "red_cards": round(exp_reds * matches, 4),
+            "own_goals": round(exp_own_goals * matches, 4),
+            "penalties_missed": round(exp_pen_missed * matches, 4),
+            "penalties_saved": round(exp_pen_saved * matches, 4),
+            "penalties_conceded": round(exp_pen_conceded * matches, 4),
             "per_fixture": per_fixture,
         },
     }
@@ -723,19 +830,46 @@ def _forecast_rows_for_player(
 
 
 def forecast_from_features(
-    features: dict[str, Any], *, now: datetime | None = None
+    features: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    training_pool: "TrainingPool | None" = None,
+    include_learned: bool = False,
 ) -> dict[str, Any]:
     """Turn an already-built feature dataset into the forecast report.
 
     Separated from :func:`build_forecast_dataset` so a caller that already has
     the features (backtesting, step 19, which also audits them) does not have to
     rebuild them from the database a second time.
+
+    With ``include_learned`` the learned model's rows (:mod:`.learned`) are
+    added, fitted on ``training_pool`` — the rows of tours already played —
+    or repeating the event forecast while the pool is too small.
     """
     generated_at = now or datetime.now(UTC)
     cutoff = features["cutoff"]
     rows: list[dict[str, Any]] = []
     for feature_row in features["rows"]:
         rows.extend(_forecast_rows_for_player(feature_row, cutoff))
+
+    if include_learned:
+        from .learned import LEARNED_VERSION, MODEL_LEARNED, learned_rows
+
+        event_rows = [row for row in rows if row["model_name"] == MODEL_EVENT]
+        rows.extend(
+            learned_rows(
+                features["rows"],
+                event_rows,
+                training_pool,
+                cutoff=cutoff,
+                feature_version=features.get("feature_version", FEATURE_VERSION),
+            )
+        )
+        learned_entry = [
+            {"name": MODEL_LEARNED, "version": LEARNED_VERSION, "kind": "learned"}
+        ]
+    else:
+        learned_entry = []
 
     # Deterministic ordering: model, then descending expected points, then name.
     rows.sort(
@@ -770,6 +904,7 @@ def forecast_from_features(
             {"name": MODEL_EVENT, "version": MODEL_VERSION, "kind": "event"},
             {"name": MODEL_MEAN, "version": MODEL_VERSION, "kind": "baseline"},
             {"name": MODEL_RECENT, "version": MODEL_VERSION, "kind": "baseline"},
+            *learned_entry,
         ],
         "scoring": {
             "version": SCORING_VERSION,
@@ -796,12 +931,125 @@ def build_forecast_dataset(
     tour_ref: str | None = None,
     competition_ref: str | None = None,
     now: datetime | None = None,
+    cutoff_override: datetime | None = None,
 ) -> dict[str, Any]:
     """Build forecasts for every player whose club plays the target tour.
 
     Returns a JSON-serialisable report with metadata, the model list and one
     ``rows`` entry per (player, model). The dataset is reproducible from
-    ``(run_id, tour, model_version, feature_version)``.
+    ``(run_id, tour, model_version, feature_version)``. ``cutoff_override``
+    forecasts a later tour from an earlier cutoff (see the feature builder).
+    """
+    generated_at = now or datetime.now(UTC)
+    try:
+        features = build_feature_dataset(
+            session_factory,
+            run_id=run_id,
+            season_ref=season_ref,
+            tour_ref=tour_ref,
+            competition_ref=competition_ref,
+            now=generated_at,
+            cutoff_override=cutoff_override,
+        )
+    except Exception as error:  # noqa: BLE001 - normalise to a forecast error
+        raise ForecastError(str(error)) from error
+    with session_scope(session_factory) as session:
+        attach_odds_to_features(session, features)
+    return forecast_from_features(features, now=generated_at)
+
+
+def build_training_pool(
+    session_factory: sessionmaker,
+    *,
+    run_id: int,
+    before_cutoff: datetime,
+    now: datetime | None = None,
+    max_tours: int | None = None,
+) -> "TrainingPool":
+    """Feature rows and real points of the season's tours played before a cutoff.
+
+    Each tour is rebuilt at its *own* cutoff and paired with the points its
+    players then scored, which is exactly the walk-forward training set the
+    learned model is defined on. Only tours whose every match kicked off
+    before ``before_cutoff`` qualify; at most ``max_tours`` (the most recent
+    ones, default :data:`fantasy_analytics.learned.MAX_TRAINING_TOURS`) are
+    rebuilt so a late-season forecast stays a matter of seconds.
+    """
+    from sqlalchemy import select
+
+    from .db.models import FantasyTour, IngestionRun, Match, PlayerMatchStats
+    from .learned import MAX_TRAINING_TOURS, TrainingPool
+
+    limit = MAX_TRAINING_TOURS if max_tours is None else max_tours
+    pool = TrainingPool()
+    with session_scope(session_factory) as session:
+        run = session.get(IngestionRun, run_id)
+        if run is None or run.season_id is None:
+            return pool
+        season_id = run.season_id
+        tours = list(
+            session.execute(
+                select(FantasyTour)
+                .where(FantasyTour.season_id == season_id)
+                .order_by(FantasyTour.starts_at.is_(None), FantasyTour.starts_at)
+            ).scalars()
+        )
+        last_kickoff: dict[int, datetime] = {}
+        for tour_id, kickoff in session.execute(
+            select(Match.tour_id, Match.scheduled_at).where(Match.season_id == season_id)
+        ):
+            if tour_id is not None and kickoff is not None:
+                last_kickoff[tour_id] = max(kickoff, last_kickoff.get(tour_id, kickoff))
+        played: dict[int, dict[int, float]] = {}
+        for tour_id, psid, points in session.execute(
+            select(
+                PlayerMatchStats.tour_id,
+                PlayerMatchStats.player_season_id,
+                PlayerMatchStats.points,
+            ).where(PlayerMatchStats.ingestion_run_id == run_id)
+        ):
+            bucket = played.setdefault(tour_id, {})
+            bucket[psid] = bucket.get(psid, 0.0) + float(points)
+    eligible = [
+        tour
+        for tour in tours
+        if tour.id in played
+        and tour.id in last_kickoff
+        and last_kickoff[tour.id] < before_cutoff
+    ]
+    for tour in eligible[-limit:] if limit else eligible:
+        features = build_feature_dataset(
+            session_factory, run_id=run_id, tour_ref=tour.fantasy_tour_id, now=now
+        )
+        with session_scope(session_factory) as session:
+            attach_odds_to_features(session, features)
+        event_by_player = {
+            int(row["player_season_id"]): forecast_event_model(row)
+            for row in features["rows"]
+        }
+        pool.add_tour(features["rows"], event_by_player, played.get(tour.id, {}))
+    return pool
+
+
+def run_forecast(
+    session_factory: sessionmaker,
+    *,
+    run_id: int | None = None,
+    season_ref: str | None = None,
+    tour_ref: str | None = None,
+    competition_ref: str | None = None,
+    now: datetime | None = None,
+    persist: bool = True,
+    include_learned: bool = True,
+) -> dict[str, Any]:
+    """Build forecasts and (optionally) persist them to ``player_forecasts``.
+
+    Persistence is idempotent per run/tour/model, so re-running on the same
+    snapshot replaces rather than accumulates rows. The returned report gains a
+    ``persisted`` count when ``persist`` is true. ``include_learned`` adds
+    the learned model's rows, trained on the season's tours already played
+    (a failure to train them is reported in ``learned_error`` and leaves the
+    other models untouched).
     """
     generated_at = now or datetime.now(UTC)
     try:
@@ -817,33 +1065,25 @@ def build_forecast_dataset(
         raise ForecastError(str(error)) from error
     with session_scope(session_factory) as session:
         attach_odds_to_features(session, features)
-    return forecast_from_features(features, now=generated_at)
-
-
-def run_forecast(
-    session_factory: sessionmaker,
-    *,
-    run_id: int | None = None,
-    season_ref: str | None = None,
-    tour_ref: str | None = None,
-    competition_ref: str | None = None,
-    now: datetime | None = None,
-    persist: bool = True,
-) -> dict[str, Any]:
-    """Build forecasts and (optionally) persist them to ``player_forecasts``.
-
-    Persistence is idempotent per run/tour/model, so re-running on the same
-    snapshot replaces rather than accumulates rows. The returned report gains a
-    ``persisted`` count when ``persist`` is true.
-    """
-    report = build_forecast_dataset(
-        session_factory,
-        run_id=run_id,
-        season_ref=season_ref,
-        tour_ref=tour_ref,
-        competition_ref=competition_ref,
-        now=now,
+    pool = None
+    learned_error: str | None = None
+    if include_learned:
+        try:
+            pool = build_training_pool(
+                session_factory,
+                run_id=features["run_id"],
+                before_cutoff=datetime.fromisoformat(features["cutoff"]),
+                now=generated_at,
+            )
+        except Exception as error:  # noqa: BLE001 - the learned model is optional
+            learned_error = str(error)
+    report = forecast_from_features(
+        features,
+        now=generated_at,
+        training_pool=pool,
+        include_learned=include_learned and learned_error is None,
     )
+    report["learned_error"] = learned_error
     if persist and report["rows"]:
         cutoff = datetime.fromisoformat(report["cutoff"])
         with session_scope(session_factory) as session:
@@ -882,5 +1122,6 @@ __all__ = [
     "forecast_recent_baseline",
     "forecast_from_features",
     "build_forecast_dataset",
+    "build_training_pool",
     "run_forecast",
 ]

@@ -4,7 +4,7 @@
 
 export type Role = "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD";
 
-export type ForecastModel = "poisson_events" | "season_mean" | "recent_form";
+export type ForecastModel = "poisson_events" | "season_mean" | "recent_form" | "ridge_stack";
 
 export type PlayerOrder =
   | "projection"

@@ -23,7 +23,7 @@ const MAX_COMPARE = 4;
 // The read API caps a page at 200 rows, so the full season working set is loaded
 // in a few requests and then sorted/paginated on the client.
 const FETCH_PAGE = 200;
-const MODELS: ForecastModel[] = ["poisson_events", "season_mean", "recent_form"];
+const MODELS: ForecastModel[] = ["poisson_events", "season_mean", "recent_form", "ridge_stack"];
 
 interface Filters {
   role: Role | "";

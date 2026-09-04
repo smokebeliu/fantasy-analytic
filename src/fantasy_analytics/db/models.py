@@ -464,6 +464,51 @@ class MatchOdds(Base):
     )
 
 
+class MatchOddsHistory(Base):
+    """Every capture of a fixture's 1x2 line, never overwritten (step 23).
+
+    ``match_odds`` holds the latest line per fixture; this table keeps each
+    nightly capture so a backtest can replay a tour with the line that was
+    known at its own cutoff and measure the odds weight honestly.
+    """
+
+    __tablename__ = "match_odds_history"
+    __table_args__ = (
+        UniqueConstraint(
+            "stat_match_id", "captured_at", name="match_odds_history_capture_key"
+        ),
+        Index("match_odds_history_season_captured_idx", "season_id", "captured_at"),
+        Index("match_odds_history_match_idx", "match_id"),
+    )
+
+    id: Mapped[int] = _identity_pk()
+    season_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("seasons.id", ondelete="CASCADE"), nullable=False
+    )
+    match_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("matches.id", ondelete="SET NULL")
+    )
+    tour_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("fantasy_tours.id", ondelete="SET NULL")
+    )
+    stat_match_id: Mapped[str] = mapped_column(Text, nullable=False)
+    bookmaker: Mapped[str | None] = mapped_column(Text)
+    home_odds: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    draw_odds: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    away_odds: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    implied_home: Mapped[Decimal] = mapped_column(Numeric(8, 6), nullable=False)
+    implied_draw: Mapped[Decimal] = mapped_column(Numeric(8, 6), nullable=False)
+    implied_away: Mapped[Decimal] = mapped_column(Numeric(8, 6), nullable=False)
+    expected_home_goals: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    expected_away_goals: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    raw: Mapped[Any] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+
 class FantasyPlayerSnapshot(Base):
     __tablename__ = "fantasy_player_snapshots"
     __table_args__ = (
