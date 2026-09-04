@@ -344,7 +344,17 @@ requires an explicit tour. By default a fresh squad is built. Pass
 `--current-squad` (comma-separated fantasy player ids) to switch to
 limited-transfers mode, which keeps the existing roster and changes at most the
 tour's transfer limit (override it with `--max-transfers`). `--model` selects the
-forecast model to optimize on (`poisson_events` by default). Every result is
+forecast model to optimize on (`poisson_events` by default; `ridge_stack` is the
+learned model of step 23). Three knobs added in step 23 price uncertainty and
+time: `--captain-risk-weight` adds that many standard deviations of a player's
+forecast to his captain score (the armband goes to the upper tail, not the
+mean); `--transfer-gain-sigma` widens the transfer threshold by that many
+standard deviations of both forecasts; `--horizon-tours N` (with
+`--horizon-decay`) forecasts the next tours from the target tour's cutoff and
+chooses the roster on their discounted sum, so a transfer is judged on the run
+of fixtures it buys. The bench is ordered to maximise what the automatic
+substitutions are expected to bring, given how likely each starter is to miss
+the match. Every result is
 re-checked by an independent validator, an infeasible problem raises a clear
 error, and the computation is deterministic. The full result is written to
 `optimizer.json`. The optimizer design lives in
@@ -447,6 +457,26 @@ PYTHONPATH=src python3 -m fantasy_analytics.backtest_cli \
 PYTHONPATH=src python3 -m fantasy_analytics.backtest_cli --no-optimize
 ```
 
+Several leagues at once (step 23): repeat `--run-id`, or pass `--all-active`
+for every published snapshot with played tours. Each run gets its own
+`run-<id>/` sub-directory and `summary.md` / `summary.json` put the leagues
+side by side, so a model change is judged on every season it can be:
+
+```bash
+PYTHONPATH=src python3 -m fantasy_analytics.backtest_cli \
+  --run-id 1 --run-id 2 --output data/backtest/step23
+```
+
+By default every tour gets a fresh squad, which measures the forecast's pick of
+the tour. `--carry-squad` plays the season the way the game is played: one
+squad kept from tour to tour, only the tour's transfer allowance spent
+(`--max-transfers` overrides it), each swap having to clear
+`--min-transfer-gain` plus `--transfer-gain-sigma` standard deviations of both
+forecasts; `--horizon-tours N` chooses the roster on the discounted
+(`--horizon-decay`) forecast of the next tours, built from the current tour's
+cutoff so nothing played in between leaks in. `--captain-risk-weight` hands
+the armband to the upper tail of the forecast rather than the mean.
+
 What the run reports:
 
 - **Accuracy** (MAE/RMSE/bias) per tour and per position, twice: over every
@@ -456,10 +486,19 @@ What the run reports:
 - **Squad quality**: the projected and the realised points of the squad each model
   produced, the points left on the bench, the best eleven those same 15 players
   could have fielded (`lineup_efficiency`), how often the captain turned out to be
-  the eleven's top scorer, and the hindsight optimum the tour allowed.
+  the eleven's top scorer, the hindsight optimum the tour allowed, and (step 23)
+  what the game itself would have credited once its automatic substitutions and
+  the vice-captain rule ran (`actual_points_autosub`).
+- **Ranking** (step 23): the Spearman correlation between forecast and fact among
+  the players who played, and the tour's top-25 by forecast against what they
+  scored and against the real top-25 (`ranking` per model and per tour). The
+  whole-pool MAE is dominated by correct zeros; the order is what a manager
+  acts on.
 - **Two baselines** (`season_mean`, `recent_form`) next to the event model, and an
   explicit verdict: `accept_model`, `revise_model` or `keep_baseline`, with the
-  numbers behind it.
+  numbers behind it. The learned model (`ridge_stack`, step 23) is evaluated
+  alongside as a *challenger*: it never counts as a baseline, and the verdict
+  says separately whether it beat the event model on every criterion.
 - **A leakage audit** that does not trust the feature builder: every row's history
   totals are recomputed from the raw appearance table restricted to matches before
   the cutoff and outside the tour. A mismatch is a violation and the command exits

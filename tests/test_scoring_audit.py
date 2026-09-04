@@ -83,7 +83,7 @@ class ReconstructPointsTest(unittest.TestCase):
 
     def test_goals_are_worth_more_from_the_back(self) -> None:
         by_role = {
-            role: _score(role, goals=1, goals_conceded=1)
+            role: _score(role, goals=1, goals_conceded=1, minutes=89)
             for role in ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
         }
         # Appearance 2, one goal, and no conceded penalty until the second goal.
@@ -91,6 +91,34 @@ class ReconstructPointsTest(unittest.TestCase):
         self.assertEqual(8, by_role["DEFENDER"])
         self.assertEqual(7, by_role["MIDFIELDER"])
         self.assertEqual(6, by_role["FORWARD"])
+
+    def test_the_full_match_pays_attackers_one_more(self) -> None:
+        # Scoring .3: a midfielder or forward who sees the final whistle earns a
+        # third appearance point; a defender or keeper does not.
+        self.assertEqual(3, _score("MIDFIELDER", minutes=90, goals_conceded=1))
+        self.assertEqual(2, _score("MIDFIELDER", minutes=89, goals_conceded=1))
+        self.assertEqual(3, _score("FORWARD", minutes=90))
+        self.assertEqual(2, _score("DEFENDER", minutes=90, goals_conceded=1))
+        self.assertEqual(2, _score("GOALKEEPER", minutes=90, goals_conceded=1))
+
+    def test_rare_events_are_charged_at_their_table_values(self) -> None:
+        base = _score("DEFENDER", goals_conceded=1)
+        self.assertEqual(base - 3, _score("DEFENDER", goals_conceded=1, red_cards=1))
+        # A second yellow: the yellow's -1 plus -2 for the red make the same -3.
+        self.assertEqual(
+            base - 3,
+            _score("DEFENDER", goals_conceded=1, yellow_cards=1, red_cards=1),
+        )
+        self.assertEqual(base - 2, _score("DEFENDER", goals_conceded=1, own_goals=1))
+        self.assertEqual(
+            base - 2, _score("DEFENDER", goals_conceded=1, penalty_conceded=1)
+        )
+        forward = _score("FORWARD", minutes=89)
+        self.assertEqual(forward - 2, _score("FORWARD", minutes=89, penalties_missed=1))
+        keeper = _score("GOALKEEPER", goals_conceded=1)
+        self.assertEqual(keeper + 5, _score("GOALKEEPER", goals_conceded=1, penalties_saved=1))
+        # Only a keeper is paid for a penalty save.
+        self.assertEqual(base, _score("DEFENDER", goals_conceded=1, penalties_saved=1))
 
     def test_clean_sheet_needs_a_full_appearance(self) -> None:
         self.assertEqual(2 + 4, _score("DEFENDER", minutes=90))
@@ -101,7 +129,7 @@ class ReconstructPointsTest(unittest.TestCase):
         self.assertEqual(2 - 1, _score("DEFENDER", goals_conceded=3))
         self.assertEqual(2 - 2, _score("DEFENDER", goals_conceded=4))
         # Outfield attackers are not charged for conceding.
-        self.assertEqual(2, _score("FORWARD", goals_conceded=4))
+        self.assertEqual(2, _score("FORWARD", goals_conceded=4, minutes=89))
 
     def test_saves_only_reward_the_goalkeeper(self) -> None:
         self.assertEqual(2 + 2, _score("GOALKEEPER", saves=6, goals_conceded=1))
@@ -114,7 +142,7 @@ class ReconstructPointsTest(unittest.TestCase):
         )
         self.assertEqual(
             2 + 2 - 1,
-            _score("FORWARD", ball_recoveries=6, yellow_cards=1),
+            _score("FORWARD", ball_recoveries=6, yellow_cards=1, minutes=89),
         )
 
 

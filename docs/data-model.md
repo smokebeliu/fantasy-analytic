@@ -446,6 +446,44 @@ adds no new tables beyond two provenance columns on `player_forecasts`
   opponent *strength* coefficients and fixture-aware co-selection remain out of
   scope (steps 16 and 18).
 
+## Forecast improvements (step 23)
+
+Step 23 works through [`forecast-improvement-plan.md`](forecast-improvement-plan.md);
+the pieces that touch the data model are:
+
+- **`match_odds_history`** (migration `0009`): an append-only record of every
+  capture of a fixture's 1x2 line, keyed by `(stat_match_id, captured_at)`.
+  `match_odds` still holds the latest line per fixture for the live forecast;
+  the history is what lets a backtest replay a tour with the line that was
+  known at its cutoff (`OddsRepository.history_before`), which is the only way
+  to measure the odds weight honestly. `attach_odds_to_features` prefers the
+  latest capture before the dataset cutoff and falls back to `match_odds`.
+- **Scoring `rpl-2025-2026.3`.** Reading the residuals of the reconstruction
+  showed that a midfielder or forward who plays the full 90 minutes earns a
+  *third* appearance point (defenders and keepers do not); the rare events are
+  now in the table too: red card −3 (a second yellow −2 on top of the yellow),
+  own goal −2, missed penalty −2, saved penalty +5 (keepers), conceded penalty
+  −2. Reconstruction of the imported rows moves from ~85 % to 99.6–100 % exact
+  on every league.
+- **`player_forecasts` gains a fourth model, `ridge_stack`** — a ridge
+  regression on the feature rows with the event forecast among its inputs,
+  fitted walk-forward on the season's finished tours (never on the tour it
+  predicts). Its `components` carry the event forecast and the learned
+  adjustment; `params.trained` says whether there were enough tours to fit
+  (before that the rows repeat the event forecast). The optimizer still
+  defaults to `poisson_events`.
+- **Feature version `1.7.0`**: `ninety_share`, the rare-event rates
+  (`reds_per90`, `own_goals_per90`, `pen_missed_per90`, `pen_saved_per90`,
+  `pen_conceded_per90`), `availability_factor` and `club_matches_available`;
+  every appearance now carries the `season_club_id`-derived club, which is
+  how a within-season transfer is recognised. See
+  [`feature-dictionary.md`](feature-dictionary.md).
+- **Ingestion skips.** A player Sports.ru cannot serialise no longer fails the
+  import: the page is re-fetched one player at a time, the broken position is
+  recorded in the run report (`skipped_players`) and the quality gate turns it
+  into a warning (`ingestion_skipped_players`). RPL 2023/24 and 2024/25 each
+  have exactly one such player.
+
 ## Questions left for the next discovery iteration
 
 - Which `statMatch` fields reliably expose shots, possession, xG and lineups for

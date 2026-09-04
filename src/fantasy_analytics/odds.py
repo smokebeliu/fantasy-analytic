@@ -19,6 +19,7 @@ Nothing here is added to the CP-SAT objective: the optimizer keeps maximising
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Iterable, Mapping
 
@@ -210,7 +211,7 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
-def _apply_odds_row(fixture: dict[str, Any], odds: MatchOdds) -> None:
+def _apply_odds_row(fixture: dict[str, Any], odds: Any) -> None:
     """Stamp one fixture (or a flattened feature row) with club-perspective odds."""
     is_home = bool(fixture.get("is_home"))
     home_goals = _as_float(odds.expected_home_goals)
@@ -235,16 +236,30 @@ def _apply_odds_row(fixture: dict[str, Any], odds: MatchOdds) -> None:
     }
 
 
-def attach_odds_to_features(session: Session, features: dict[str, Any]) -> int:
-    """Fill ``tour_fixtures`` with odds-implied goals from ``match_odds``.
+def attach_odds_to_features(
+    session: Session, features: dict[str, Any], *, weight: float | None = None
+) -> int:
+    """Fill ``tour_fixtures`` with odds-implied goals from the stored lines.
 
     Mutates ``features`` in place and returns how many fixtures received a
     line. A tour with no stored odds is left untouched, so recomputing a
     snapshot before the day-before refresh stays bit-identical to 1.2.0.
+
+    The line used is the latest capture in ``match_odds_history`` taken
+    before the dataset's cutoff (step 23), so a replayed tour sees only what
+    was known at its deadline; ``match_odds`` (the latest line, captured for a
+    fixture still to be played) fills in for fixtures without history.
     """
     season_id = features.get("season_id")
     if season_id is None:
         return 0
+    cutoff_text = features.get("cutoff")
+    cutoff = datetime.fromisoformat(cutoff_text) if cutoff_text else None
+    by_match: dict[int, Any] = {}
+    if cutoff is not None:
+        from .db.odds_repository import OddsRepository
+
+        by_match.update(OddsRepository(session).history_before(int(season_id), cutoff))
     rows = list(
         session.execute(
             select(MatchOdds).where(
@@ -253,9 +268,16 @@ def attach_odds_to_features(session: Session, features: dict[str, Any]) -> int:
             )
         ).scalars()
     )
-    if not rows:
+    for row in rows:
+        if row.match_id is None or int(row.match_id) in by_match:
+            continue
+        # The latest line stands in where no history predates the cutoff. It
+        # is captured for a fixture still to be played, so for the live
+        # forecast it is exactly what the refresh just fetched; only the
+        # history can make a *replayed* tour honest.
+        by_match[int(row.match_id)] = row
+    if not by_match:
         return 0
-    by_match = {int(row.match_id): row for row in rows if row.match_id is not None}
     attached = 0
     for feature_row in features.get("rows") or []:
         fixtures = feature_row.get("tour_fixtures")
@@ -272,6 +294,8 @@ def attach_odds_to_features(session: Session, features: dict[str, Any]) -> int:
             if odds is None:
                 continue
             _apply_odds_row(fixture, odds)
+            if weight is not None:
+                fixture["odds_weight"] = float(weight)
             attached += 1
     features["odds_fixtures"] = attached
     return attached

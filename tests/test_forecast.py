@@ -27,6 +27,8 @@ from fantasy_analytics.db import (
     migration,
 )
 from fantasy_analytics.forecast import (
+    PENALTY_CONVERSION_RATE,
+    RED_CARD_SECOND_YELLOW_SHARE,
     MODEL_EVENT,
     MODEL_MEAN,
     MODEL_RECENT,
@@ -607,23 +609,25 @@ class ForecastIntegrationTest(unittest.TestCase):
         )
 
     def test_run_forecast_persists_idempotently(self) -> None:
+        # Two players x four models (event, two baselines, the learned one).
         first = run_forecast(self.session_factory, tour_ref="1773")
-        self.assertEqual(first["persisted"], 6)
+        self.assertEqual(first["persisted"], 8)
+        self.assertIsNone(first["learned_error"])
 
         tour_id = first["tour"]["tour_id"]
         with self.session_factory() as session:
             repo = ForecastRepository(session)
             self.assertEqual(
-                repo.count_forecasts(run_id=self.run_id, tour_id=tour_id), 6
+                repo.count_forecasts(run_id=self.run_id, tour_id=tour_id), 8
             )
 
         # Re-running replaces rather than accumulates.
         second = run_forecast(self.session_factory, tour_ref="1773")
-        self.assertEqual(second["persisted"], 6)
+        self.assertEqual(second["persisted"], 8)
         with self.session_factory() as session:
             repo = ForecastRepository(session)
             self.assertEqual(
-                repo.count_forecasts(run_id=self.run_id, tour_id=tour_id), 6
+                repo.count_forecasts(run_id=self.run_id, tour_id=tour_id), 8
             )
             stored = repo.list_forecasts(
                 run_id=self.run_id, tour_id=tour_id, model_name=MODEL_EVENT
@@ -660,3 +664,74 @@ class ForecastIntegrationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StepTwentyThreeScoringTest(unittest.TestCase):
+    """The full-match bonus and the rare-event components (model 1.5.0)."""
+
+    @staticmethod
+    def _row(role: str, **overrides) -> dict:
+        row = {
+            "role": role,
+            "p_appearance": 1.0,
+            "expected_minutes": 90.0,
+            "appearance_share": 1.0,
+            "start_share": 1.0,
+            "ninety_share": 1.0,
+            "is_available": True,
+            "goals_per90": 0.0,
+            "assists_per90": 0.0,
+            "saves_per90": 0.0,
+            "recoveries_per90": 0.0,
+            "yellows_per90": 0.0,
+            "club_attack": 1.0,
+            "club_defense": 1.0,
+            "opponent_attack": 1.0,
+            "opponent_defense": 1.0,
+        }
+        row.update(overrides)
+        return row
+
+    def test_midfielder_full_match_is_worth_three_appearance_points(self) -> None:
+        full = forecast_event_model(self._row("MIDFIELDER"))
+        self.assertAlmostEqual(3.0, full["components"]["appearance"], places=4)
+        self.assertEqual(1.0, full["expected"]["p_ninety"])
+        substituted = forecast_event_model(self._row("MIDFIELDER", ninety_share=0.0))
+        self.assertAlmostEqual(2.0, substituted["components"]["appearance"], places=4)
+        # Defenders earn no full-match bonus.
+        defender = forecast_event_model(self._row("DEFENDER"))
+        self.assertAlmostEqual(2.0, defender["components"]["appearance"], places=4)
+
+    def test_ninety_probability_never_exceeds_the_start_probability(self) -> None:
+        row = self._row("FORWARD", start_share=0.5, ninety_share=0.9)
+        result = forecast_event_model(row)
+        self.assertLessEqual(result["expected"]["p_ninety"], result["expected"]["p_full_appearance"])
+
+    def test_rare_events_are_charged_from_their_rates(self) -> None:
+        row = self._row(
+            "DEFENDER",
+            reds_per90=0.1,
+            own_goals_per90=0.05,
+            pen_conceded_per90=0.2,
+            pen_missed_per90=0.0,
+        )
+        result = forecast_event_model(row)
+        components = result["components"]
+        self.assertAlmostEqual(0.1 * (-3 + RED_CARD_SECOND_YELLOW_SHARE), components["red_cards"], places=4)
+        self.assertAlmostEqual(-0.1, components["own_goals"], places=4)
+        self.assertAlmostEqual(-2 * PENALTY_CONVERSION_RATE * 0.2, components["penalties"], places=4)
+        self.assertAlmostEqual(sum(components.values()), result["expected_points"], places=3)
+
+    def test_keeper_penalty_save_is_a_reward(self) -> None:
+        row = self._row("GOALKEEPER", pen_saved_per90=0.1)
+        result = forecast_event_model(row)
+        self.assertAlmostEqual(0.5, result["components"]["penalties"], places=4)
+        # A defender is never paid for a save.
+        row = self._row("DEFENDER", pen_saved_per90=0.1)
+        self.assertEqual(0.0, forecast_event_model(row)["components"]["penalties"])
+
+    def test_unavailable_player_has_zero_rare_components(self) -> None:
+        row = self._row("MIDFIELDER", is_available=False, reds_per90=0.5)
+        result = forecast_event_model(row)
+        self.assertEqual(0.0, result["components"]["red_cards"])
+        self.assertEqual(0.0, result["expected_points"])

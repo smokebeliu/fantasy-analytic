@@ -42,7 +42,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from .db import session_scope
-from .db.models import FantasyTour, Match, PlayerMatchStats, PlayerSeason, Season
+from .db.models import (
+    Competition,
+    FantasyTour,
+    Match,
+    PlayerMatchStats,
+    PlayerSeason,
+    Season,
+)
 from .features import (
     FEATURE_VERSION,
     STAT_SOURCE_CURRENT,
@@ -60,12 +67,14 @@ from .forecast import (
     SCORING_VERSION,
     forecast_from_features,
 )
+from .learned import MODEL_LEARNED, TrainingPool
 from .optimizer import (
     OPTIMIZER_VERSION,
     ROLES,
     Candidate,
     OptimizerError,
     SquadRules,
+    attach_future_points,
     candidates_from_forecast,
     load_squad_rules,
     solve_squad,
@@ -74,11 +83,26 @@ from .optimizer import (
 
 # Bumped whenever the backtest procedure or its metrics change, so results from
 # different code revisions are never compared as if they were the same run.
-BACKTEST_VERSION = "1.0.0"
+# 1.1.0 adds the ranking metrics (step 23): the rank correlation between the
+#   forecast and the fact among players who played, the predicted-versus-actual
+#   points of the tour's top-N by forecast, and the realised points of a squad
+#   once the game's automatic substitutions are applied. It also adds the
+#   carry-over simulation, where one squad is kept from tour to tour and only
+#   the allowed transfers are made, which is how the game is actually played.
+BACKTEST_VERSION = "1.1.0"
 
-# The model under test and the baselines it must beat to be adopted.
-DEFAULT_MODELS: tuple[str, ...] = (MODEL_EVENT, MODEL_MEAN, MODEL_RECENT)
+# How many of the highest-forecast players of a tour are compared against
+# their real points. Twenty-five is roughly the pool a manager actually picks
+# from, and it is the slice the plan's review was judged on.
+TOP_N = 25
+
+# The model under test and the baselines it must beat to be adopted. The
+# learned model is a *challenger*: it is evaluated alongside but never counts
+# as a baseline in the verdict, and the verdict says separately whether it
+# beat the primary model on every criterion.
+DEFAULT_MODELS: tuple[str, ...] = (MODEL_EVENT, MODEL_MEAN, MODEL_RECENT, MODEL_LEARNED)
 PRIMARY_MODEL = MODEL_EVENT
+CHALLENGER_MODELS: tuple[str, ...] = (MODEL_LEARNED,)
 
 # Decisions the run can conclude with.
 ACCEPT_MODEL = "accept_model"
@@ -148,6 +172,110 @@ def error_metrics(pairs: Sequence[tuple[float, float]]) -> dict[str, Any]:
         "bias": round(sum(errors) / n, 4),
         "mean_predicted": round(sum(p for p, _ in pairs) / n, 4),
         "mean_actual": round(sum(a for _, a in pairs) / n, 4),
+    }
+
+
+def _average_ranks(values: Sequence[float]) -> list[float]:
+    """Ranks starting at 1, ties given the mean of the ranks they span."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        rank = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            ranks[order[k]] = rank
+        i = j + 1
+    return ranks
+
+
+def rank_correlation(pairs: Sequence[tuple[float, float]]) -> float | None:
+    """Spearman correlation of ``(predicted, actual)`` pairs; ``None`` if undefined.
+
+    The whole-pool MAE is dominated by the many correct zeros, and the
+    played-only MAE says how far off a projection is but not whether the
+    *order* was right. A manager only ever acts on the order — who to buy, who
+    to start, who to captain — so this is the metric that tracks what he sees.
+    Ties (many identical actual scores) get average ranks.
+    """
+    if len(pairs) < 3:
+        return None
+    predicted = _average_ranks([p for p, _ in pairs])
+    actual = _average_ranks([a for _, a in pairs])
+    n = len(pairs)
+    mean_p = sum(predicted) / n
+    mean_a = sum(actual) / n
+    cov = sum((p - mean_p) * (a - mean_a) for p, a in zip(predicted, actual))
+    var_p = sum((p - mean_p) ** 2 for p in predicted)
+    var_a = sum((a - mean_a) ** 2 for a in actual)
+    if var_p <= 0 or var_a <= 0:
+        return None
+    return round(cov / math.sqrt(var_p * var_a), 4)
+
+
+def top_n_summary(
+    pairs: Sequence[tuple[int, float, float]], *, top: int = TOP_N
+) -> dict[str, Any]:
+    """Compare the ``top`` highest forecasts of a tour against what they scored.
+
+    ``pairs`` are ``(player_season_id, predicted, actual)``. Reports the
+    forecast total and the real total of the predicted top-N, the real total
+    of the *actual* top-N (the ceiling), and how many of the predicted top-N
+    were in the actual top-N. A forecast that ranks well has a small gap
+    between its own two totals and a large overlap with the ceiling.
+    """
+    if not pairs:
+        return {
+            "n": 0,
+            "predicted_points": 0.0,
+            "actual_points": 0.0,
+            "ceiling_points": 0.0,
+            "hits": 0,
+        }
+    by_forecast = sorted(pairs, key=lambda item: (-item[1], item[0]))[:top]
+    by_actual = sorted(pairs, key=lambda item: (-item[2], item[0]))[:top]
+    actual_ids = {item[0] for item in by_actual}
+    return {
+        "n": len(by_forecast),
+        "predicted_points": round(sum(item[1] for item in by_forecast), 4),
+        "actual_points": round(sum(item[2] for item in by_forecast), 4),
+        "ceiling_points": round(sum(item[2] for item in by_actual), 4),
+        "hits": sum(1 for item in by_forecast if item[0] in actual_ids),
+    }
+
+
+def _pooled_ranking(entries: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Combine per-tour ranking summaries: correlations averaged, totals summed."""
+    corr_sum = 0.0
+    corr_weight = 0
+    top = {"n": 0, "predicted_points": 0.0, "actual_points": 0.0, "ceiling_points": 0.0, "hits": 0}
+    tours = 0
+    for entry in entries:
+        tours += 1
+        corr = entry.get("rank_corr_played")
+        n = int(entry.get("played_n") or 0)
+        if corr is not None and n > 0:
+            corr_sum += float(corr) * n
+            corr_weight += n
+        for key in top:
+            top[key] += entry.get("top", {}).get(key, 0) or 0
+    predicted = top["predicted_points"]
+    actual = top["actual_points"]
+    return {
+        "tours": tours,
+        "rank_corr_played": round(corr_sum / corr_weight, 4) if corr_weight else None,
+        "top": {
+            "n": TOP_N,
+            "predicted_points": round(predicted, 4),
+            "actual_points": round(actual, 4),
+            "ceiling_points": round(top["ceiling_points"], 4),
+            "gap": round(predicted - actual, 4),
+            "gap_share": round((predicted - actual) / actual, 4) if actual else None,
+            "hits": top["hits"],
+            "hit_rate": round(top["hits"] / top["n"], 4) if top["n"] else None,
+        },
     }
 
 
@@ -328,12 +456,61 @@ def _actual_of(actuals: Mapping[int, float], player_season_id: int) -> float:
     return float(actuals.get(player_season_id, 0.0))
 
 
+def apply_auto_subs(
+    starters: Sequence[dict[str, Any]],
+    bench: Sequence[dict[str, Any]],
+    played: set[int],
+    rules: SquadRules,
+) -> list[dict[str, Any]]:
+    """The eleven that actually scores once the game's automatic substitutions run.
+
+    A starter who did not take the field is replaced by the first bench player,
+    in bench order, who did and whose position keeps the eleven legal: a keeper
+    is only ever swapped for the reserve keeper, and an outfield sub is refused
+    when it would push a position past its starting limit or leave a position
+    below its minimum. Bench players who did not play are skipped, so the order
+    of the bench decides who gets in when several starters are missing.
+    """
+    active: list[dict[str, Any]] = [p for p in starters if p["player_season_id"] in played]
+    absent = [p for p in starters if p["player_season_id"] not in played]
+    if not absent:
+        return list(starters)
+    available = [p for p in bench if p["player_season_id"] in played]
+
+    def _counts(players: Sequence[dict[str, Any]]) -> dict[str, int]:
+        counts = {role: 0 for role in ROLES}
+        for player in players:
+            counts[player["role"]] = counts.get(player["role"], 0) + 1
+        return counts
+
+    for missing in absent:
+        for sub in list(available):
+            if (missing["role"] == "GOALKEEPER") != (sub["role"] == "GOALKEEPER"):
+                continue
+            counts = _counts([*active, sub])
+            low, high = rules.starting_limits.get(sub["role"], (0, rules.starting_players))
+            if counts[sub["role"]] > high:
+                continue
+            active.append(sub)
+            available.remove(sub)
+            break
+    # Every position still has to meet its minimum with the players who played;
+    # if it cannot, the game simply fields fewer, which is what happens here.
+    return active
+
+
 def simulate_squad(
     candidates: Sequence[Candidate],
     rules: SquadRules,
     actuals: Mapping[int, float],
     *,
     fixture_conflict_weight: float | None = None,
+    played: set[int] | None = None,
+    current_ids: Sequence[int] | None = None,
+    max_transfers: int | None = None,
+    min_transfer_gain: float | None = None,
+    transfer_gain_sigma: float | None = None,
+    captain_risk_weight: float | None = None,
 ) -> dict[str, Any]:
     """Solve a tour's squad on projections and score it with the real points.
 
@@ -344,10 +521,24 @@ def simulate_squad(
     * ``best_eleven_actual`` is the most the chosen 15 could have scored, so
       ``lineup_efficiency`` isolates the starting-eleven choice;
     * ``captain.was_best_starter`` says whether the doubled player was in fact
-      the eleven's top scorer.
+      the eleven's top scorer;
+    * ``actual_points_autosub`` is what the game would have credited once its
+      automatic substitutions ran (``played`` says who took the field): a
+      starter who never appeared is replaced from the bench in bench order and
+      a captain who never appeared hands the armband to the vice-captain.
+
+    With ``current_ids`` the squad is carried over from the previous tour and
+    only ``max_transfers`` swaps are allowed (the carry-over simulation).
     """
     solution = solve_squad(
-        candidates, rules, fixture_conflict_weight=fixture_conflict_weight
+        candidates,
+        rules,
+        fixture_conflict_weight=fixture_conflict_weight,
+        current_ids=current_ids,
+        max_transfers=max_transfers,
+        min_transfer_gain=min_transfer_gain,
+        transfer_gain_sigma=transfer_gain_sigma,
+        captain_risk_weight=captain_risk_weight,
     )
     violations = validate_squad(solution, rules)
     if violations:
@@ -359,6 +550,7 @@ def simulate_squad(
     starters = [player for player in squad if player.get("is_starter")]
     bench = [player for player in squad if not player.get("is_starter")]
     captain = solution["captain"]
+    vice = solution["vice_captain"]
 
     starting_actual = round(
         sum(_actual_of(actuals, player["player_season_id"]) for player in starters), 4
@@ -367,6 +559,21 @@ def simulate_squad(
     bench_actual = round(
         sum(_actual_of(actuals, player["player_season_id"]) for player in bench), 4
     )
+
+    # The game's own accounting: automatic substitutions and the vice-captain.
+    if played is None:
+        played = {pid for pid, points in actuals.items()}
+    effective = apply_auto_subs(starters, solution["bench"], played, rules)
+    if captain["player_season_id"] in played:
+        armband = captain
+    elif vice["player_season_id"] in played:
+        armband = vice
+    else:
+        armband = None
+    effective_actual = sum(_actual_of(actuals, p["player_season_id"]) for p in effective)
+    armband_actual = _actual_of(actuals, armband["player_season_id"]) if armband else 0.0
+    transfers = solution.get("transfers") or {}
+    transfers_made = len(transfers.get("pairs") or []) if transfers else 0
     best_starter_actual = max(
         (_actual_of(actuals, player["player_season_id"]) for player in starters),
         default=0.0,
@@ -391,6 +598,17 @@ def simulate_squad(
         "lineup_efficiency": (
             round(starting_actual / best_eleven, 4) if best_eleven > 0 else None
         ),
+        "actual_points_autosub": round(effective_actual + armband_actual, 4),
+        "auto_subs_used": len([p for p in effective if not p.get("is_starter")]),
+        "transfers_made": transfers_made,
+        "transfer_pairs": [
+            {
+                "out": pair["out"]["player_name"],
+                "in": pair["in"]["player_name"],
+                "gain": pair.get("delta_expected_points"),
+            }
+            for pair in (transfers.get("pairs") or [])
+        ] if transfers else [],
         "captain": {
             "player_season_id": captain["player_season_id"],
             "player_name": captain["player_name"],
@@ -401,6 +619,8 @@ def simulate_squad(
             "was_best_starter": bool(
                 starters and captain_actual >= best_starter_actual - 1e-9
             ),
+            "effective_player_name": armband["player_name"] if armband else None,
+            "effective_actual_points": round(armband_actual, 4),
         },
         "squad": [
             {
@@ -415,10 +635,59 @@ def simulate_squad(
                 ),
                 "is_starter": bool(player.get("is_starter")),
                 "is_captain": bool(player.get("is_captain")),
+                "bench_order": player.get("bench_order"),
+            }
+            for player in squad
+        ],
+        # What the next tour of a carry-over simulation starts from.
+        "roster": [
+            {
+                key: player.get(key)
+                for key in (
+                    "player_season_id",
+                    "fantasy_player_id",
+                    "player_name",
+                    "role",
+                    "club_id",
+                    "club_name",
+                    "price",
+                )
             }
             for player in squad
         ],
     }
+
+
+def _with_held_blanks(
+    candidates: Sequence[Candidate], roster: Sequence[dict[str, Any]]
+) -> list[Candidate]:
+    """Add zero-point stand-ins for held players whose club has no fixture.
+
+    A club without a match in the tour has no rows in the forecast, so its
+    players are absent from the pool; in the game they simply stay in the
+    squad and score nothing. Without a stand-in the transfer constraint would
+    count them as forced sales.
+    """
+    known = {c.player_season_id for c in candidates}
+    extra = [
+        Candidate(
+            player_season_id=int(entry["player_season_id"]),
+            fantasy_player_id=entry.get("fantasy_player_id"),
+            player_name=entry.get("player_name"),
+            role=entry["role"],
+            club_id=int(entry["club_id"]),
+            club_name=entry.get("club_name"),
+            price=float(entry.get("price") or 0.0),
+            expected_points=0.0,
+        )
+        for entry in roster
+        if int(entry["player_season_id"]) not in known and entry.get("club_id") is not None
+    ]
+    if not extra:
+        return list(candidates)
+    merged = [*candidates, *extra]
+    merged.sort(key=lambda c: c.player_season_id)
+    return merged
 
 
 def hindsight_squad(
@@ -565,7 +834,12 @@ def decide(models: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
     """
     primary = models.get(PRIMARY_MODEL)
     baselines = {
-        name: summary for name, summary in models.items() if name != PRIMARY_MODEL
+        name: summary
+        for name, summary in models.items()
+        if name != PRIMARY_MODEL and name not in CHALLENGER_MODELS
+    }
+    challengers = {
+        name: summary for name, summary in models.items() if name in CHALLENGER_MODELS
     }
     if primary is None or not baselines:
         return {
@@ -634,11 +908,43 @@ def decide(models: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
             f"{PRIMARY_MODEL} wins on {_phrase(won)} but loses on {_phrase(lost)}"
         )
 
+    # The challengers: does any of them beat the primary model outright?
+    challenger_report: list[dict[str, Any]] = []
+    for name, summary in challengers.items():
+        rows: list[dict[str, Any]] = []
+        for key, label, direction, path in _CRITERIA:
+            challenger_value = _criterion_value(summary, path)
+            primary_value = _criterion_value(primary, path)
+            if challenger_value is None or primary_value is None:
+                continue
+            better = (
+                challenger_value < primary_value
+                if direction == "lower"
+                else challenger_value > primary_value
+            )
+            rows.append(
+                {
+                    "criterion": key,
+                    "label": label,
+                    "challenger": round(challenger_value, 4),
+                    "primary": round(primary_value, 4),
+                    "won": better,
+                }
+            )
+        challenger_report.append(
+            {
+                "model": name,
+                "beats_primary": bool(rows) and all(row["won"] for row in rows),
+                "criteria": rows,
+            }
+        )
+
     return {
         "decision": decision,
         "reason": reason,
         "primary_model": PRIMARY_MODEL,
         "criteria": criteria,
+        "challengers": challenger_report,
     }
 
 
@@ -781,6 +1087,13 @@ def run_backtest(
     top_errors: int = 20,
     top_unstable: int = 10,
     now: datetime | None = None,
+    carry_squad: bool = False,
+    max_transfers: int | None = None,
+    min_transfer_gain: float | None = None,
+    transfer_gain_sigma: float | None = None,
+    captain_risk_weight: float | None = None,
+    horizon_tours: int = 1,
+    horizon_decay: float | None = None,
 ) -> dict[str, Any]:
     """Replay a season tour by tour and compare the models.
 
@@ -788,10 +1101,19 @@ def run_backtest(
     tour and pooled accuracy (overall and per position), the simulated squads
     with their realised points, the largest individual errors, the least stable
     features and the resulting decision.
+
+    By default every tour gets a fresh squad, which measures the forecast's
+    pick of the tour. With ``carry_squad`` the squad is kept from tour to tour
+    and only the tour's transfer allowance (or ``max_transfers``) may be spent,
+    which is how the game is played; ``horizon_tours`` above one lets the
+    roster be chosen on the discounted forecast of the following tours too,
+    built at the current tour's cutoff so nothing of the future leaks in.
     """
     generated_at = now or datetime.now(UTC)
     if not models:
         raise BacktestError("At least one model must be backtested")
+    if horizon_tours < 1:
+        raise BacktestError("horizon_tours must be at least 1")
 
     with session_scope(session_factory) as session:
         run = resolve_run(session, run_id, season_ref)
@@ -801,6 +1123,15 @@ def run_backtest(
         season_payload = {
             "fantasy_id": season.fantasy_season_id if season else None,
             "name": season.name if season else None,
+        }
+        competition = (
+            session.get(Competition, season.competition_id)
+            if season is not None and season.competition_id is not None
+            else None
+        )
+        competition_payload = {
+            "slug": competition.slug if competition else None,
+            "name": competition.name if competition else None,
         }
         tours = _load_tours(session, season_id)
         tour_matches = _load_tour_matches(session, season_id)
@@ -832,18 +1163,47 @@ def run_backtest(
         model: [] for model in models
     }
     per_model_squads: dict[str, list[dict[str, Any]]] = {model: [] for model in models}
+    per_model_ranking: dict[str, list[dict[str, Any]]] = {model: [] for model in models}
     all_errors: list[dict[str, Any]] = []
+    # Carry-over simulation: the roster each model holds going into a tour.
+    held: dict[str, list[dict[str, Any]] | None] = {model: None for model in models}
+    # Walk-forward training rows for the learned model: tours already played.
+    pool = TrainingPool()
+    learned = MODEL_LEARNED in models
 
     rules_cache: dict[int, SquadRules] = {}
 
-    for tour in selected:
+    for index, tour in enumerate(selected):
         features = build_feature_dataset(
             session_factory,
             run_id=resolved_run_id,
             tour_ref=tour.fantasy_tour_id,
             now=generated_at,
         )
-        forecast = forecast_from_features(features, now=generated_at)
+        forecast = forecast_from_features(
+            features, now=generated_at, training_pool=pool, include_learned=learned
+        )
+
+        # A horizon: the following tours, forecast from *this* tour's cutoff.
+        future_forecasts: list[dict[str, Any]] = []
+        if optimize and horizon_tours > 1:
+            this_cutoff = datetime.fromisoformat(features["cutoff"])
+            for ahead in selected[index + 1 : index + horizon_tours]:
+                ahead_features = build_feature_dataset(
+                    session_factory,
+                    run_id=resolved_run_id,
+                    tour_ref=ahead.fantasy_tour_id,
+                    now=generated_at,
+                    cutoff_override=this_cutoff,
+                )
+                future_forecasts.append(
+                    forecast_from_features(
+                        ahead_features,
+                        now=generated_at,
+                        training_pool=pool,
+                        include_learned=learned,
+                    )
+                )
         matches = tour_matches.get(tour.tour_id, [])
         audit = audit_tour(
             features,
@@ -860,6 +1220,13 @@ def run_backtest(
         for row in forecast["rows"]:
             if row["model_name"] in rows_by_model:
                 rows_by_model[row["model_name"]].append(row)
+        if learned:
+            # This tour is now played: its rows join the training pool for
+            # every tour that follows (never for itself).
+            event_by_player = {
+                int(row["player_season_id"]): row for row in rows_by_model[MODEL_EVENT]
+            }
+            pool.add_tour(features["rows"], event_by_player, actuals)
 
         if optimize:
             if tour.tour_id not in rules_cache:
@@ -876,11 +1243,13 @@ def run_backtest(
             pairs: list[tuple[float, float]] = []
             played_pairs: list[tuple[float, float]] = []
             triples: list[tuple[str, float, float]] = []
+            id_pairs: list[tuple[int, float, float]] = []
             for row in rows_by_model[model]:
                 predicted = float(row["expected_points"] or 0.0)
                 actual = _actual_of(actuals, row["player_season_id"])
                 pairs.append((predicted, actual))
                 triples.append((row["role"], predicted, actual))
+                id_pairs.append((int(row["player_season_id"]), predicted, actual))
                 if row["player_season_id"] in played:
                     played_pairs.append((predicted, actual))
                 if model == PRIMARY_MODEL:
@@ -900,17 +1269,44 @@ def run_backtest(
 
             metrics = error_metrics(pairs)
             metrics_played = error_metrics(played_pairs)
+            ranking = {
+                "rank_corr_played": rank_correlation(played_pairs),
+                "played_n": len(played_pairs),
+                "top": top_n_summary(id_pairs),
+            }
             per_model_tour_metrics[model].append(metrics)
             per_model_tour_played[model].append(metrics_played)
             per_model_role_rows[model].extend(triples)
+            per_model_ranking[model].append(ranking)
             entry: dict[str, Any] = {
                 "metrics": metrics,
                 "metrics_played": metrics_played,
+                "ranking": ranking,
                 "by_role": role_metrics(triples),
             }
 
             if optimize and rules is not None:
-                candidates = candidates_from_forecast(forecast["rows"], model)
+                model_rows = rows_by_model[model]
+                if future_forecasts:
+                    model_rows = attach_future_points(
+                        model_rows,
+                        [f["rows"] for f in future_forecasts],
+                        model=model,
+                        decay=horizon_decay,
+                    )
+                candidates = candidates_from_forecast(model_rows, model)
+                current_ids: list[int] | None = None
+                allowed: int | None = None
+                if carry_squad and held[model]:
+                    candidates = _with_held_blanks(candidates, held[model])
+                    current_ids = [p["player_season_id"] for p in held[model]]
+                    allowed = (
+                        max_transfers if max_transfers is not None else rules.total_transfers
+                    )
+                    if allowed is None:
+                        # No transfer limit is known for the tour: a fresh squad
+                        # is the only honest reading of "unlimited".
+                        current_ids = None
                 if candidates:
                     try:
                         squad = simulate_squad(
@@ -918,11 +1314,19 @@ def run_backtest(
                             rules,
                             actuals,
                             fixture_conflict_weight=fixture_conflict_weight,
+                            played=played,
+                            current_ids=current_ids,
+                            max_transfers=allowed,
+                            min_transfer_gain=min_transfer_gain,
+                            transfer_gain_sigma=transfer_gain_sigma,
+                            captain_risk_weight=captain_risk_weight,
                         )
                     except OptimizerError as error:
                         squad = {"error": str(error)}
                     else:
                         per_model_squads[model].append(squad)
+                        if carry_squad:
+                            held[model] = squad["roster"]
                     entry["squad"] = squad
                 else:
                     entry["squad"] = {"error": "no priced candidates for the tour"}
@@ -959,6 +1363,7 @@ def run_backtest(
             # population is dominated by trivially correct zeros for players who
             # never appeared, which flattens the difference between models.
             "metrics_played": _pooled(per_model_tour_played[model]),
+            "ranking": _pooled_ranking(per_model_ranking[model]),
             "by_role": role_metrics(per_model_role_rows[model]),
             "by_tour": [
                 {
@@ -1005,6 +1410,16 @@ def run_backtest(
                     sum(entry["captain"]["actual_points"] for entry in squads), 4
                 ),
                 "captain_hit_rate": round(captain_hits / len(squads), 4),
+                "actual_points_autosub_total": round(
+                    sum(entry["actual_points_autosub"] for entry in squads), 4
+                ),
+                "auto_subs_used_total": sum(entry["auto_subs_used"] for entry in squads),
+                "transfers_made_total": sum(entry["transfers_made"] for entry in squads),
+                "projection_gap_share": (
+                    round((projected_total - actual_total) / actual_total, 4)
+                    if actual_total
+                    else None
+                ),
             }
         model_summaries[model] = summary
 
@@ -1047,6 +1462,13 @@ def run_backtest(
             "fixture_conflict_weight": fixture_conflict_weight,
             "top_errors": top_errors,
             "top_unstable": top_unstable,
+            "carry_squad": carry_squad,
+            "max_transfers": max_transfers,
+            "min_transfer_gain": min_transfer_gain,
+            "transfer_gain_sigma": transfer_gain_sigma,
+            "captain_risk_weight": captain_risk_weight,
+            "horizon_tours": horizon_tours,
+            "horizon_decay": horizon_decay,
         },
         "versions": {
             "backtest": BACKTEST_VERSION,
@@ -1058,6 +1480,8 @@ def run_backtest(
         "run_id": resolved_run_id,
         "season_id": season_id,
         "season": season_payload,
+        "competition": competition_payload,
+        "top_n": TOP_N,
         "counts": {
             "tours_total": len(tours),
             "tours_evaluated": len(selected),
@@ -1097,11 +1521,16 @@ __all__ = [
     "BACKTEST_VERSION",
     "DEFAULT_MODELS",
     "KEEP_BASELINE",
+    "CHALLENGER_MODELS",
     "PRIMARY_MODEL",
     "REVISE_MODEL",
+    "TOP_N",
     "BacktestError",
     "TourRef",
+    "apply_auto_subs",
     "audit_tour",
+    "rank_correlation",
+    "top_n_summary",
     "best_eleven_points",
     "decide",
     "error_metrics",

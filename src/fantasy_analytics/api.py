@@ -739,6 +739,10 @@ def create_app(
         formation: str | None = None,
         fixture_conflict_weight: float | None = None,
         min_transfer_gain: float | None = None,
+        transfer_gain_sigma: float | None = None,
+        captain_risk_weight: float | None = None,
+        horizon_tours: int | None = None,
+        horizon_decay: float | None = None,
     ) -> dict[str, Any]:
         try:
             return build_squad_optimization(
@@ -755,6 +759,10 @@ def create_app(
                 formation=formation,
                 fixture_conflict_weight=fixture_conflict_weight,
                 min_transfer_gain=min_transfer_gain,
+                transfer_gain_sigma=transfer_gain_sigma,
+                captain_risk_weight=captain_risk_weight,
+                horizon_tours=horizon_tours,
+                horizon_decay=horizon_decay,
             )
         except OptimizerError as error:
             raise api_error(422, str(error), type_="optimizer_error") from error
@@ -776,6 +784,7 @@ def create_app(
             locked_starters=body.locked_starters,
             formation=body.formation,
             fixture_conflict_weight=body.fixture_conflict_weight,
+            captain_risk_weight=body.captain_risk_weight,
         )
 
     @app.post(
@@ -797,6 +806,10 @@ def create_app(
             formation=request.formation,
             fixture_conflict_weight=request.fixture_conflict_weight,
             min_transfer_gain=request.min_transfer_gain,
+            transfer_gain_sigma=request.transfer_gain_sigma,
+            captain_risk_weight=request.captain_risk_weight,
+            horizon_tours=request.horizon_tours,
+            horizon_decay=request.horizon_decay,
         )
 
     @app.post(

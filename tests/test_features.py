@@ -25,8 +25,18 @@ from fantasy_analytics.db import (
 )
 from fantasy_analytics.features import (
     FEATURE_VERSION,
+    OWNERSHIP_FULL_PERCENT,
     PRIOR_SEASON_HALF_LIFE,
+    QUESTIONABLE_APPEARANCE_FACTOR,
+    STRAIGHT_RED_SECOND_MATCH_SHARE,
     UNAVAILABLE_STATUSES,
+    ownership_appearance,
+    parse_status_date,
+    participation_matches,
+    price_bucket,
+    price_bucket_edges,
+    red_card_availability_factor,
+    status_availability,
     Appearance,
     ClubMatch,
     FeaturesError,
@@ -134,7 +144,7 @@ class PureHelperTest(unittest.TestCase):
                 (ClubMatch(3, datetime(2025, 7, 1, tzinfo=timezone.utc), False, 0, 3), 1.0),
             ],
         }
-        strengths, league = _club_strengths(club_matches, shrink_matches=0)
+        strengths, league = _club_strengths(club_matches, shrink_matches=0, venue_mode="split")
 
         self.assertEqual(3.0, strengths[1]["home_attack"])
         self.assertEqual(0.0, strengths[1]["home_defense"])
@@ -177,7 +187,7 @@ class PureHelperTest(unittest.TestCase):
             2: [(ClubMatch(2, when, True, 1, 1), 1.0)],
             3: [(ClubMatch(3, when, True, 1, 1), 1.0)],
         }
-        strengths, league = _club_strengths(club_matches, shrink_matches=2)
+        strengths, league = _club_strengths(club_matches, shrink_matches=2, venue_mode="split")
         self.assertAlmostEqual(5.0 / 3.0, league["home_attack"], places=4)
         # (3 x 1 + 5/3 x 2) / 3
         self.assertAlmostEqual((3 + 10 / 3) / 3, strengths[1]["home_attack"], places=3)
@@ -185,7 +195,7 @@ class PureHelperTest(unittest.TestCase):
         self.assertGreater(strengths[1]["home_attack"], league["home_attack"])
         self.assertEqual(league["away_attack"], strengths[1]["away_attack"])
         # Without pseudo-matches the raw mean comes back.
-        raw, _ = _club_strengths(club_matches, shrink_matches=0)
+        raw, _ = _club_strengths(club_matches, shrink_matches=0, venue_mode="split")
         self.assertEqual(3.0, raw[1]["home_attack"])
 
     def test_injury_is_an_unavailable_status(self) -> None:
@@ -535,3 +545,128 @@ class FeatureDatasetIntegrationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StepTwentyThreeHelpersTest(unittest.TestCase):
+    """Availability, transfers and price buckets added in feature version 1.7.0."""
+
+    @staticmethod
+    def _club(day: int, club_id: int = 1) -> ClubMatch:
+        return ClubMatch(
+            match_id=day,
+            scheduled_at=datetime(2025, 7, day, 12, 0, tzinfo=timezone.utc),
+            is_home=True,
+            goals_scored=1,
+            goals_conceded=1,
+        )
+
+    def test_second_yellow_costs_exactly_one_match(self) -> None:
+        red = Appearance(
+            match_id=10,
+            scheduled_at=datetime(2025, 7, 10, 12, 0, tzinfo=timezone.utc),
+            minutes=70,
+            points=-2,
+            goals=0,
+            assists=0,
+            yellow_cards=1,
+            red_cards=1,
+        )
+        self.assertEqual(0.0, red_card_availability_factor([red], [self._club(10)]))
+        self.assertEqual(
+            1.0, red_card_availability_factor([red], [self._club(10), self._club(12)])
+        )
+
+    def test_straight_red_discounts_the_second_match(self) -> None:
+        red = _appearance(10, -3, red_cards=1)
+        self.assertEqual(0.0, red_card_availability_factor([red], [self._club(10)]))
+        self.assertAlmostEqual(
+            1.0 - STRAIGHT_RED_SECOND_MATCH_SHARE,
+            red_card_availability_factor([red], [self._club(10), self._club(12)]),
+        )
+        self.assertEqual(
+            1.0,
+            red_card_availability_factor(
+                [red], [self._club(10), self._club(12), self._club(14)]
+            ),
+        )
+
+    def test_status_dates_end_a_ban_but_only_question_an_injury(self) -> None:
+        fixture = datetime(2026, 9, 12, tzinfo=timezone.utc)
+        self.assertEqual((True, 1.0), status_availability("FIERY", "FIERY", fixture))
+        self.assertEqual((False, 0.0), status_availability("INJURY", "", fixture))
+        self.assertEqual(
+            (True, 1.0), status_availability("DISQUALIFICATION", "2026-09-01", fixture)
+        )
+        self.assertEqual(
+            (False, 0.0), status_availability("DISQUALIFICATION", "2026-09-20", fixture)
+        )
+        self.assertEqual(
+            (True, QUESTIONABLE_APPEARANCE_FACTOR),
+            status_availability("INJURY", "2026-09-01", fixture),
+        )
+        self.assertEqual(
+            (True, QUESTIONABLE_APPEARANCE_FACTOR),
+            status_availability("DOUBTFUL", None, fixture),
+        )
+        self.assertIsNone(parse_status_date("FIERY"))
+        self.assertEqual(
+            datetime(2026, 9, 1, tzinfo=timezone.utc), parse_status_date("2026-09-01")
+        )
+
+    def test_transfer_moves_the_participation_window(self) -> None:
+        old = {1: [self._club(d, 1) for d in (2, 4, 6, 8)]}
+        new = {2: [self._club(d, 2) for d in (3, 5, 7, 9)]}
+        by_club = {**old, **new}
+        # Played for club 1 up to day 6, now registered with club 2.
+        apps = [
+            Appearance(match_id=d, scheduled_at=datetime(2025, 7, d, 12, 0, tzinfo=timezone.utc), minutes=90, points=2, goals=0, assists=0, club_id=1)
+            for d in (2, 4, 6)
+        ]
+        matches = participation_matches(2, apps, by_club)
+        self.assertEqual([9, 7, 6, 4, 2], [m.match_id for m in matches])
+        # Without a transfer the current club's matches are the window.
+        self.assertEqual(
+            [9, 7, 5, 3], [m.match_id for m in participation_matches(2, [], by_club)]
+        )
+
+    def test_price_buckets_are_terciles(self) -> None:
+        edges = price_bucket_edges([4.0, 4.5, 5.0, 6.0, 7.0, 9.0])
+        self.assertEqual(2, len(edges))
+        self.assertEqual(0, price_bucket(4.0, edges))
+        self.assertEqual(2, price_bucket(9.0, edges))
+        self.assertIsNone(price_bucket(None, edges))
+        self.assertEqual([], price_bucket_edges([5.0]))
+
+    def test_ownership_lifts_to_a_full_starter_at_the_threshold(self) -> None:
+        self.assertIsNone(ownership_appearance(None))
+        self.assertEqual(1.0, ownership_appearance(OWNERSHIP_FULL_PERCENT * 2))
+        self.assertAlmostEqual(0.5, ownership_appearance(OWNERSHIP_FULL_PERCENT / 2))
+
+
+class PooledVenueStrengthTest(unittest.TestCase):
+    def test_pooled_mode_uses_every_match_and_a_league_home_factor(self) -> None:
+        def match(day: int, home: bool, gf: int, ga: int) -> ClubMatch:
+            return ClubMatch(
+                match_id=day,
+                scheduled_at=datetime(2025, 7, day, tzinfo=timezone.utc),
+                is_home=home,
+                goals_scored=gf,
+                goals_conceded=ga,
+            )
+
+        # Two clubs, home sides score twice as much as away sides overall.
+        club_matches = {
+            1: [(match(1, True, 2, 1), 1.0), (match(2, False, 1, 2), 1.0)],
+            2: [(match(1, False, 1, 2), 1.0), (match(2, True, 2, 1), 1.0)],
+        }
+        split, league = _club_strengths(club_matches, shrink_matches=0, venue_mode="split")
+        pooled, league_pooled = _club_strengths(
+            club_matches, shrink_matches=0, venue_mode="pooled"
+        )
+        self.assertEqual(league, league_pooled)
+        # Identical clubs: pooled strengths equal the league venue averages.
+        self.assertAlmostEqual(league["home_attack"], pooled[1]["home_attack"], places=3)
+        self.assertAlmostEqual(league["away_attack"], pooled[1]["away_attack"], places=3)
+        self.assertEqual(1, pooled[1]["matches_home"])
+        self.assertEqual(1, pooled[1]["matches_away"])
+        self.assertEqual(split[1]["home_attack"], pooled[1]["home_attack"])

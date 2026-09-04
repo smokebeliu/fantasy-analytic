@@ -65,6 +65,13 @@ def audit_run(session: Session, run_id: int) -> dict[str, Any]:
             PlayerMatchStats.ball_recoveries,
             PlayerMatchStats.yellow_cards,
             PlayerMatchStats.goals_conceded,
+            PlayerMatchStats.red_cards,
+            PlayerMatchStats.own_goals,
+            PlayerMatchStats.penalties_missed,
+            PlayerMatchStats.penalties_post,
+            PlayerMatchStats.penalties_target,
+            PlayerMatchStats.penalties_saved,
+            PlayerMatchStats.penalty_conceded,
         )
         .join(PlayerSeason, PlayerMatchStats.player_season_id == PlayerSeason.id)
         .where(
@@ -85,6 +92,13 @@ def audit_run(session: Session, run_id: int) -> dict[str, Any]:
             ball_recoveries=row.ball_recoveries,
             yellow_cards=row.yellow_cards,
             goals_conceded=row.goals_conceded,
+            red_cards=row.red_cards,
+            own_goals=row.own_goals,
+            penalties_missed=(
+                row.penalties_missed + row.penalties_post + row.penalties_target
+            ),
+            penalties_saved=row.penalties_saved,
+            penalty_conceded=row.penalty_conceded,
         )
         residual = predicted - row.points
         residuals[residual] += 1

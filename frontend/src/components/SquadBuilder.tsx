@@ -27,7 +27,7 @@ import { usePlayerHoverCard } from "./PlayerHoverCard";
 import { SquadPitch } from "./SquadPitch";
 import { EmptyState, ErrorState, TableSkeleton } from "./StateBlocks";
 
-const MODELS: ForecastModel[] = ["poisson_events", "season_mean", "recent_form"];
+const MODELS: ForecastModel[] = ["poisson_events", "season_mean", "recent_form", "ridge_stack"];
 
 // The players endpoint caps a page at 200, and a season has a few hundred
 // players; the pool is loaded whole so searching and the hover cards can reach

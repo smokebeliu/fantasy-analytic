@@ -65,7 +65,16 @@ from .forecast import MODEL_EVENT, ForecastError, build_forecast_dataset
 # by different code revisions never get silently compared.
 # 1.4.0 makes a transfer pay for itself: in limited-transfers mode a swap is
 #   only proposed when it gains at least ``min_transfer_gain`` expected points.
-OPTIMIZER_VERSION = "1.4.0"
+# 1.5.0 (step 23) prices uncertainty and time. The captain is chosen on the
+#   upper tail (``expected + captain_risk_weight x uncertainty``) rather than
+#   the mean; a transfer has to clear a margin that grows with the uncertainty
+#   of both players (``transfer_gain_sigma``); the bench is ordered to
+#   maximise what the automatic substitutions are expected to bring, given
+#   how likely each starter is to miss the match; and a candidate may carry
+#   ``future_points`` — the discounted forecast of the following tours — which
+#   the roster (not the eleven) is chosen on, so a transfer is judged on the
+#   run of fixtures it buys rather than on one tour.
+OPTIMIZER_VERSION = "1.5.0"
 
 # Search configuration, in *deterministic* time: a machine-independent measure of
 # work rather than wall clock, so the same request returns the same squad on any
@@ -106,6 +115,35 @@ DEFAULT_FIXTURE_CONFLICT_WEIGHT = 0.25
 # has to beat the player he replaces by at least this margin. Zero restores the
 # pure "any gain is a gain" objective (ties still favour keeping players).
 DEFAULT_MIN_TRANSFER_GAIN = 0.5
+
+# How much of a player's forecast *uncertainty* (the standard deviation the
+# event model reports) is added to his expected points when the captain is
+# chosen. The captain's points count double, so the best captain is not the
+# player with the highest mean but the one most likely to post a big score;
+# with a weight of 0 the choice falls back to the mean. Set by the step-23
+# backtests over four full seasons (RPL and La Liga 2024/25 and 2025/26):
+# 0.5 raised the realised squad points in every season (+12, +14, +4, +6 over
+# a season) and the captain-hit rate in every season against 0; 1.0 was no
+# better.
+DEFAULT_CAPTAIN_RISK_WEIGHT = 0.5
+
+# How many standard deviations of the two forecasts a transfer has to clear on
+# top of ``min_transfer_gain``: a swap of two players whose projections are
+# both uncertain by two points is asked for more than a swap between two
+# reliable starters. Zero keeps the flat threshold. Left at zero: in the
+# carry-over backtests 0.25 cut the transfers made by two thirds but did not
+# add points, and the game's allowance does not carry over, so an unused
+# transfer is worth nothing.
+DEFAULT_TRANSFER_GAIN_SIGMA = 0.0
+
+# How much the following tours count when a candidate carries
+# ``future_points`` (step 23). Each tour further out is discounted by this
+# factor per tour. Two tours is the default: in the carry-over backtests over
+# four full seasons a two-tour horizon scored 222 more points than judging
+# the roster on one tour (better in three seasons of four), and three tours
+# gave part of that back.
+DEFAULT_HORIZON_DECAY = 0.7
+DEFAULT_HORIZON_TOURS = 2
 
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
 
@@ -163,6 +201,11 @@ class Candidate:
     expected_minutes: float | None = None
     stat_source: str | None = None
     is_newcomer: bool | None = None
+    # Standard deviation of the forecast (0 for models that report none) and
+    # the discounted forecast of the tours that follow this one (0 unless the
+    # caller built a horizon); see ``OPTIMIZER_VERSION`` 1.5.0.
+    uncertainty: float = 0.0
+    future_points: float = 0.0
 
     @property
     def price_cents(self) -> int:
@@ -171,6 +214,14 @@ class Candidate:
     @property
     def points_scaled(self) -> int:
         return int(round(self.expected_points * _POINTS_SCALE))
+
+    @property
+    def uncertainty_scaled(self) -> int:
+        return int(round(max(0.0, self.uncertainty) * _POINTS_SCALE))
+
+    @property
+    def future_points_scaled(self) -> int:
+        return int(round(self.future_points * _POINTS_SCALE))
 
 
 @dataclass(frozen=True)
@@ -422,11 +473,131 @@ def candidates_from_forecast(
                 expected_minutes=row.get("expected_minutes"),
                 stat_source=row.get("stat_source"),
                 is_newcomer=row.get("is_newcomer"),
+                uncertainty=float(row.get("uncertainty") or 0.0),
+                future_points=float(row.get("future_points") or 0.0),
             )
         )
     # Deterministic order so the CP-SAT model is built identically every run.
     candidates.sort(key=lambda c: c.player_season_id)
     return candidates
+
+
+def attach_future_points(
+    rows: Sequence[dict[str, Any]],
+    future_rows: Sequence[Sequence[dict[str, Any]]],
+    *,
+    model: str,
+    decay: float | None = None,
+) -> list[dict[str, Any]]:
+    """Stamp each forecast row with the discounted forecast of the tours ahead.
+
+    ``future_rows`` holds one forecast row list per following tour, nearest
+    first, all built at the *current* tour's cutoff. A player's
+    ``future_points`` is ``sum(decay**h x expected_points_h)`` over those
+    tours (``h`` starting at 1); a player absent from a future tour (his club
+    has no match) contributes nothing for it. Rows of other models are left as
+    they are. The default decay is :data:`DEFAULT_HORIZON_DECAY`.
+    """
+    factor = DEFAULT_HORIZON_DECAY if decay is None else float(decay)
+    if factor < 0:
+        raise OptimizerError("horizon decay must be non-negative")
+    ahead: dict[int, float] = {}
+    for offset, future in enumerate(future_rows, start=1):
+        weight = factor**offset
+        for row in future:
+            if row.get("model_name") != model or row.get("player_season_id") is None:
+                continue
+            psid = int(row["player_season_id"])
+            ahead[psid] = ahead.get(psid, 0.0) + weight * float(
+                row.get("expected_points") or 0.0
+            )
+    stamped: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("model_name") != model or row.get("player_season_id") is None:
+            stamped.append(row)
+            continue
+        stamped.append(
+            {**row, "future_points": round(ahead.get(int(row["player_season_id"]), 0.0), 4)}
+        )
+    return stamped
+
+
+def _absence_distribution(p_appearances: Sequence[float]) -> list[float]:
+    """``P(exactly k starters miss the match)`` for independent appearances."""
+    dist = [1.0]
+    for p in p_appearances:
+        q = 1.0 - min(max(float(p), 0.0), 1.0)
+        nxt = [0.0] * (len(dist) + 1)
+        for k, mass in enumerate(dist):
+            nxt[k] += mass * (1.0 - q)
+            nxt[k + 1] += mass * q
+        dist = nxt
+    return dist
+
+
+def expected_auto_sub_points(
+    order: Sequence[Candidate], starters: Sequence[Candidate]
+) -> float:
+    """Expected points the bench brings in through automatic substitutions.
+
+    The k-th outfield sub gets on only if at least ``1 + (subs ahead of him
+    who played)`` starters are missing, and only if he plays himself — which
+    his ``expected_points`` already prices, being ``p_appearance x points if
+    he plays``. Starters' absences are independent Bernoulli draws on their
+    ``p_appearance``; the earlier subs' play states are enumerated. Position
+    limits are ignored here (they rarely bind on a three-man bench), so the
+    number is a ranking device rather than a promise.
+    """
+    absences = _absence_distribution(
+        [float(s.p_appearance or 0.0) for s in starters if s.role != "GOALKEEPER"]
+    )
+    tail = [sum(absences[k:]) for k in range(len(absences) + 1)] + [0.0]
+
+    def _at_least(m: int) -> float:
+        return tail[m] if m < len(tail) else 0.0
+
+    total = 0.0
+    for k, sub in enumerate(order):
+        earlier = [float(s.p_appearance or 0.0) for s in order[:k]]
+        # Distribution of how many earlier subs play.
+        plays = [1.0]
+        for p in earlier:
+            p = min(max(p, 0.0), 1.0)
+            nxt = [0.0] * (len(plays) + 1)
+            for j, mass in enumerate(plays):
+                nxt[j] += mass * (1.0 - p)
+                nxt[j + 1] += mass * p
+            plays = nxt
+        chance = sum(mass * _at_least(1 + j) for j, mass in enumerate(plays))
+        total += max(0.0, sub.expected_points) * chance
+    return total
+
+
+def order_bench(
+    bench: Sequence[Candidate], starters: Sequence[Candidate]
+) -> list[Candidate]:
+    """Order the bench so the automatic substitutions are worth the most.
+
+    Outfield subs are permuted (three players, six orders) and the order with
+    the highest :func:`expected_auto_sub_points` wins; the reserve keeper is
+    always last, since he only ever replaces the starting keeper. Ties fall
+    back to expected points and then the player id, so the result is
+    deterministic.
+    """
+    from itertools import permutations
+
+    keepers = [c for c in bench if c.role == "GOALKEEPER"]
+    outfield = [c for c in bench if c.role != "GOALKEEPER"]
+    default = sorted(outfield, key=lambda c: (-c.points_scaled, c.player_season_id))
+    if len(outfield) > 6:
+        return default + keepers
+    best = default
+    best_value = expected_auto_sub_points(default, starters)
+    for order in permutations(default):
+        value = expected_auto_sub_points(order, starters)
+        if value > best_value + 1e-9:
+            best, best_value = list(order), value
+    return list(best) + sorted(keepers, key=lambda c: (-c.points_scaled, c.player_season_id))
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +628,8 @@ def _candidate_public(candidate: Candidate) -> dict[str, Any]:
         "expected_minutes": candidate.expected_minutes,
         "stat_source": candidate.stat_source,
         "is_newcomer": candidate.is_newcomer,
+        "uncertainty": round(candidate.uncertainty, 4),
+        "future_points": round(candidate.future_points, 4),
     }
 
 
@@ -797,6 +970,8 @@ def solve_squad(
     fixture_conflict_weight: float | None = None,
     solve_limit: float | None = None,
     min_transfer_gain: float | None = None,
+    transfer_gain_sigma: float | None = None,
+    captain_risk_weight: float | None = None,
 ) -> dict[str, Any]:
     """Solve the squad-selection integer program and return an explanation.
 
@@ -822,6 +997,14 @@ def solve_squad(
     ``solve_limit`` caps the search in deterministic time (default
     :data:`DEFAULT_SOLVE_LIMIT`). Exhausting it yields the best squad found so
     far, reported as ``proven_optimal: false``, rather than no answer at all.
+
+    ``captain_risk_weight`` (default :data:`DEFAULT_CAPTAIN_RISK_WEIGHT`) adds
+    that many standard deviations of a player's forecast to his captain score,
+    and ``transfer_gain_sigma`` (default :data:`DEFAULT_TRANSFER_GAIN_SIGMA`)
+    widens the transfer threshold by that many standard deviations of both
+    players' forecasts. A candidate's ``future_points`` count towards the
+    roster in every mode, so a squad with a horizon keeps players whose good
+    fixtures are still to come.
 
     Raises :class:`OptimizerError` when the pool is too small or the constraints
     cannot be satisfied.
@@ -920,6 +1103,13 @@ def solve_squad(
         )
         if min_gain < 0:
             raise OptimizerError("min_transfer_gain must be non-negative")
+        gain_sigma = (
+            DEFAULT_TRANSFER_GAIN_SIGMA
+            if transfer_gain_sigma is None
+            else float(transfer_gain_sigma)
+        )
+        if gain_sigma < 0:
+            raise OptimizerError("transfer_gain_sigma must be non-negative")
         id_to_index = {c.player_season_id: i for i, c in enumerate(candidates)}
         present = [id_to_index[pid] for pid in current_ids if pid in id_to_index]
         missing = [pid for pid in current_ids if pid not in id_to_index]
@@ -931,7 +1121,15 @@ def solve_squad(
             "current_present": present,
             "missing": missing,
             "min_gain": min_gain,
+            "gain_sigma": gain_sigma,
         }
+    risk_weight = (
+        DEFAULT_CAPTAIN_RISK_WEIGHT
+        if captain_risk_weight is None
+        else float(captain_risk_weight)
+    )
+    if risk_weight < 0:
+        raise OptimizerError("captain_risk_weight must be non-negative")
 
     # Fixture awareness (step 16): a pair of starters that meet each other in
     # the tour is charged the priced magnitude of their cancellation, so such a
@@ -959,17 +1157,37 @@ def solve_squad(
 
     # Objective: maximise starting + captain points less the fixture charge, then
     # keep as many current players as possible, then spend as little as possible.
-    points_term = sum(
-        candidates[i].points_scaled * (start[i] + captain[i]) for i in range(n)
-    ) - sum(charge * together for together, charge in clash_terms)
-    if transfers_meta is not None and transfers_meta["min_gain"] > 0:
+    # The captain is chosen on the upper tail of his forecast, the eleven on
+    # the mean, and the roster additionally on what the following tours are
+    # forecast to bring (zero unless the caller built a horizon).
+    captain_scores = [
+        candidates[i].points_scaled
+        + int(round(risk_weight * candidates[i].uncertainty_scaled))
+        for i in range(n)
+    ]
+    points_term = (
+        sum(candidates[i].points_scaled * start[i] for i in range(n))
+        + sum(captain_scores[i] * captain[i] for i in range(n))
+        + sum(candidates[i].future_points_scaled * pick[i] for i in range(n))
+        - sum(charge * together for together, charge in clash_terms)
+    )
+    if transfers_meta is not None and (
+        transfers_meta["min_gain"] > 0 or transfers_meta["gain_sigma"] > 0
+    ):
         # A swap has to pay for itself: every current player kept is worth the
-        # minimum gain in points, so a newcomer to the squad only gets in by
-        # beating the player he replaces by at least that much.
-        stay_bonus = int(round(transfers_meta["min_gain"] * _POINTS_SCALE))
-        points_term += stay_bonus * sum(
-            pick[i] for i in transfers_meta["current_present"]
-        )
+        # minimum gain in points plus a share of his own uncertainty, and a
+        # newcomer to the squad is charged the same share of his, so he only
+        # gets in by beating the player he replaces by the whole margin.
+        present = set(transfers_meta["current_present"])
+        for i in range(n):
+            if i in present:
+                credit = transfers_meta["min_gain"] * _POINTS_SCALE + (
+                    transfers_meta["gain_sigma"] * candidates[i].uncertainty_scaled
+                )
+                points_term += int(round(credit)) * pick[i]
+            elif transfers_meta["gain_sigma"] > 0:
+                charge = transfers_meta["gain_sigma"] * candidates[i].uncertainty_scaled
+                points_term -= int(round(charge)) * pick[i]
     spend_term = sum(candidates[i].price_cents * pick[i] for i in range(n))
     points_weight, keep_weight = _objective_weights(rules)
     objective = points_term * points_weight - spend_term
@@ -1023,12 +1241,14 @@ def solve_squad(
     )
     vice_idx = next((i for i in ordered_starters if i != captain_idx), captain_idx)
 
-    # Bench order: outfield subs first by expected points, reserve keeper last.
-    def _bench_key(i: int) -> tuple[int, int, int]:
-        is_keeper = 1 if candidates[i].role == "GOALKEEPER" else 0
-        return (is_keeper, -candidates[i].points_scaled, candidates[i].player_season_id)
-
-    bench_ordered = sorted(bench_idx, key=_bench_key)
+    # Bench order: the outfield subs in the order that makes the automatic
+    # substitutions worth the most given how likely each starter is to miss
+    # the match, reserve keeper last.
+    index_of = {candidates[i].player_season_id: i for i in bench_idx}
+    bench_ordered = [
+        index_of[c.player_season_id]
+        for c in order_bench([candidates[i] for i in bench_idx], starters)
+    ]
 
     total_price = round(sum(candidates[i].price for i in picked), 2)
     starting_points = round(sum(candidates[i].expected_points for i in starters_idx), 4)
@@ -1077,8 +1297,19 @@ def solve_squad(
         "formation": _formation(starters),
         "total_price": total_price,
         "unused_budget": round(rules.total_budget - total_price, 2),
-        "captain": _candidate_public(candidates[captain_idx]),
+        "captain": _candidate_public(candidates[captain_idx])
+        | {
+            "captain_score": round(captain_scores[captain_idx] / _POINTS_SCALE, 4),
+            "risk_weight": risk_weight,
+        },
         "vice_captain": _candidate_public(candidates[vice_idx]),
+        "bench_expected_auto_sub_points": round(
+            expected_auto_sub_points(
+                [candidates[i] for i in bench_ordered if candidates[i].role != "GOALKEEPER"],
+                starters,
+            ),
+            4,
+        ),
         "squad": squad,
         "starting": [e for e in squad if e["is_starter"]],
         "bench": [
@@ -1117,6 +1348,7 @@ def solve_squad(
         result["transfers"] = {
             "allowed": transfers_meta["allowed"],
             "min_gain": transfers_meta["min_gain"],
+            "gain_sigma": transfers_meta["gain_sigma"],
             "made": len(brought_in),
             "kept": len(kept),
             "in": brought_in,
@@ -1555,6 +1787,10 @@ def build_squad_optimization(
     fixture_conflict_weight: float | None = None,
     solve_limit: float | None = None,
     min_transfer_gain: float | None = None,
+    transfer_gain_sigma: float | None = None,
+    captain_risk_weight: float | None = None,
+    horizon_tours: int | None = None,
+    horizon_decay: float | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build the optimal squad for a tour and return a JSON-serialisable report.
@@ -1566,6 +1802,13 @@ def build_squad_optimization(
     ``locked``/``locked_starters``/``formation`` pin the user's own choices into
     either mode. Pins whose club has no fixture this tour are kept as zero-point
     candidates so "fill around locked" still works through a blank.
+
+    ``horizon_tours`` above one (default :data:`DEFAULT_HORIZON_TOURS`) also
+    forecasts the tours that follow the target one — from the target tour's
+    own cutoff, so nothing played in between leaks in — and lets the roster
+    be chosen on their discounted sum (``horizon_decay``, default
+    :data:`DEFAULT_HORIZON_DECAY`) on top of the target tour's eleven. A
+    transfer is then judged on the run of fixtures it buys.
     """
     generated_at = now or datetime.now(UTC)
     try:
@@ -1580,7 +1823,41 @@ def build_squad_optimization(
     except ForecastError as error:
         raise OptimizerError(str(error)) from error
 
-    candidates = candidates_from_forecast(forecast["rows"], model)
+    horizon = DEFAULT_HORIZON_TOURS if horizon_tours is None else int(horizon_tours)
+    if horizon < 1:
+        raise OptimizerError("horizon_tours must be at least 1")
+    rows = forecast["rows"]
+    horizon_report: dict[str, Any] = {"tours": [], "decay": horizon_decay}
+    if horizon > 1:
+        cutoff = datetime.fromisoformat(forecast["cutoff"])
+        with session_scope(session_factory) as session:
+            following = _following_tours(
+                session, forecast["season_id"], forecast["tour"]["tour_id"], horizon - 1
+            )
+        future_rows: list[list[dict[str, Any]]] = []
+        for tour in following:
+            try:
+                ahead = build_forecast_dataset(
+                    session_factory,
+                    run_id=forecast["run_id"],
+                    tour_ref=tour.fantasy_tour_id,
+                    now=generated_at,
+                    cutoff_override=cutoff,
+                )
+            except ForecastError:
+                # A tour without fixtures yet contributes nothing.
+                continue
+            future_rows.append(ahead["rows"])
+            horizon_report["tours"].append(
+                {"tour_id": tour.id, "fantasy_tour_id": tour.fantasy_tour_id, "name": tour.name}
+            )
+        rows = attach_future_points(rows, future_rows, model=model, decay=horizon_decay)
+    horizon_report["requested"] = horizon
+    horizon_report["decay"] = (
+        DEFAULT_HORIZON_DECAY if horizon_decay is None else float(horizon_decay)
+    )
+
+    candidates = candidates_from_forecast(rows, model)
     if not candidates and not (locked or locked_starters):
         raise OptimizerError(
             f"No priced candidates for model {model!r} in the target tour"
@@ -1622,6 +1899,8 @@ def build_squad_optimization(
         fixture_conflict_weight=fixture_conflict_weight,
         solve_limit=solve_limit,
         min_transfer_gain=min_transfer_gain,
+        transfer_gain_sigma=transfer_gain_sigma,
+        captain_risk_weight=captain_risk_weight,
     )
 
     violations = validate_squad(
@@ -1664,15 +1943,40 @@ def build_squad_optimization(
             "head_to_head_fixtures": len(solution["fixtures"]["head_to_head"]),
             "clashes": len(solution["fixtures"]["clashes"]),
         },
+        "horizon": horizon_report,
         "solution": solution,
         "valid": True,
     }
 
 
+def _following_tours(session, season_id: int, tour_id: int, count: int) -> list[FantasyTour]:
+    """The ``count`` tours after ``tour_id`` in the season's calendar order."""
+    from sqlalchemy import select
+
+    tours = list(
+        session.execute(
+            select(FantasyTour)
+            .where(FantasyTour.season_id == season_id)
+            .order_by(FantasyTour.starts_at.is_(None), FantasyTour.starts_at, FantasyTour.id)
+        ).scalars()
+    )
+    for index, tour in enumerate(tours):
+        if tour.id == tour_id:
+            return tours[index + 1 : index + 1 + count]
+    return []
+
+
 __all__ = [
+    "DEFAULT_CAPTAIN_RISK_WEIGHT",
     "DEFAULT_FIXTURE_CONFLICT_WEIGHT",
+    "DEFAULT_HORIZON_DECAY",
+    "DEFAULT_HORIZON_TOURS",
     "DEFAULT_MIN_TRANSFER_GAIN",
     "DEFAULT_SOLVE_LIMIT",
+    "DEFAULT_TRANSFER_GAIN_SIGMA",
+    "attach_future_points",
+    "expected_auto_sub_points",
+    "order_bench",
     "OPTIMIZER_VERSION",
     "ROLES",
     "Candidate",

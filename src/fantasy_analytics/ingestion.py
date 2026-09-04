@@ -35,7 +35,7 @@ from typing import Any, Callable
 
 from sqlalchemy.orm import sessionmaker
 
-from .client import SportsGraphQLClient
+from .client import GraphQLRequestError, SportsGraphQLClient
 from .competitions import DEFAULT_TOURNAMENT_SLUG, catalogue_seasons
 from .db import session_scope
 from .db.import_repository import DomainImportRepository
@@ -105,6 +105,11 @@ class FetchResult:
     histories: dict[str, list[dict[str, Any]]]
     raw_payloads: list[tuple[str, Any, Any]]
     timings: dict[str, float] = field(default_factory=dict)
+    # Players Sports.ru could not serialise (``got nil for non-null
+    # "statPlayer"``): the page they sat on was re-fetched one player at a
+    # time and they were left out, each recorded here so the quality gate can
+    # surface a warning instead of the whole import failing.
+    skipped_players: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _noop(_message: str) -> None:
@@ -188,6 +193,7 @@ def fetch_all(
 
     stage_start = time.monotonic()
     players: list[dict[str, Any]] = []
+    skipped_players: list[dict[str, Any]] = []
     page = 1
     while True:
         variables = {
@@ -195,7 +201,32 @@ def fetch_all(
             "pageNum": page,
             "pageSize": options.player_page_size,
         }
-        payload = client.execute(PLAYERS_QUERY, variables)
+        try:
+            payload = client.execute(PLAYERS_QUERY, variables)
+        except GraphQLRequestError as error:
+            # One player the API cannot serialise empties the whole page
+            # (``data: null`` plus an error), so the page is walked one player
+            # at a time and only the broken one is left out.
+            on_progress(
+                f"Player page {page} failed ({error}); refetching it player by player"
+            )
+            page_players, page_skipped, has_next = _fetch_players_singly(
+                client,
+                season_id=season_id,
+                page=page,
+                page_size=options.player_page_size,
+                record=record,
+            )
+            players.extend(page_players)
+            skipped_players.extend(page_skipped)
+            on_progress(
+                f"Fetched player page {page} one by one ({len(players)} players, "
+                f"{len(page_skipped)} skipped)"
+            )
+            if not has_next:
+                break
+            page += 1
+            continue
         record("Players", variables, payload)
         players_page = _require_mapping(
             payload.get("data", {}).get("fantasyQueries", {}).get("players"),
@@ -292,7 +323,49 @@ def fetch_all(
         histories=histories,
         raw_payloads=raw_payloads,
         timings=timings,
+        skipped_players=skipped_players,
     )
+
+
+def _fetch_players_singly(
+    client: SportsGraphQLClient,
+    *,
+    season_id: str,
+    page: int,
+    page_size: int,
+    record: Callable[[str, Any, Any], None],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """Re-fetch one page of the player rating with a page size of one.
+
+    Returns the players that could be read, the positions that could not
+    (with the error text), and whether the rating continues past this page.
+    The rating is walked by absolute position (``pageNum`` with ``pageSize``
+    1), so a failure on one position never hides the players after it.
+    """
+    players: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for offset in range(page_size):
+        position = (page - 1) * page_size + offset + 1
+        variables = {"seasonID": season_id, "pageNum": position, "pageSize": 1}
+        try:
+            payload = client.execute(PLAYERS_QUERY, variables)
+        except GraphQLRequestError as error:
+            skipped.append(
+                {"page": page, "position": position, "error": str(error)[:500]}
+            )
+            continue
+        record("Players", variables, payload)
+        players_page = _require_mapping(
+            payload.get("data", {}).get("fantasyQueries", {}).get("players"),
+            "data.fantasyQueries.players",
+        )
+        listed = players_page.get("list") or []
+        if not listed:
+            return players, skipped, False
+        players.extend(listed)
+        if not (players_page.get("pageInfo") or {}).get("hasNextPage"):
+            return players, skipped, False
+    return players, skipped, True
 
 
 def _persist(
@@ -726,6 +799,7 @@ def run_ingestion(
             "is_active": bool(fetch.season.get("isActive")),
         },
         "counts": summary["counts"],
+        "skipped_players": list(fetch.skipped_players),
         "durations_seconds": {
             **{f"fetch_{key}": round(value, 3) for key, value in fetch.timings.items()},
             "fetch_total": round(fetch_seconds, 3),
