@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fantasy-analytics"
+version = "0.1.0"
+description = "Sports.ru Fantasy RPL data discovery prototype"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "SQLAlchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "ortools>=9.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "httpx>=0.27"]
+
+[project.scripts]
+fantasy-discover = "fantasy_analytics.cli:main"
+fantasy-migrate = "fantasy_analytics.db.cli:main"
+fantasy-ingest = "fantasy_analytics.ingest_cli:main"
+fantasy-match-stats = "fantasy_analytics.match_stats_cli:main"
+fantasy-quality = "fantasy_analytics.quality_cli:main"
+fantasy-features = "fantasy_analytics.features_cli:main"
+fantasy-forecast = "fantasy_analytics.forecast_cli:main"
+fantasy-optimize = "fantasy_analytics.optimizer_cli:main"
+fantasy-backtest = "fantasy_analytics.backtest_cli:main"
+fantasy-api = "fantasy_analytics.api:main"
+fantasy-openapi = "fantasy_analytics.openapi_cli:main"
+fantasy-ingestion-worker = "fantasy_analytics.ingestion_worker:main"
+fantasy-nightly-refresh = "fantasy_analytics.nightly_refresh:main"
+fantasy-odds = "fantasy_analytics.odds_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"fantasy_analytics.migrations" = ["*.mako"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

@@ -1,0 +1,4527 @@
+{
+  "components": {
+    "schemas": {
+      "CatalogueSeasonModel": {
+        "description": "A season Sports.ru exposes for a league, imported or not.",
+        "properties": {
+          "fantasy_season_id": {
+            "title": "Fantasy Season Id",
+            "type": "string"
+          },
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "stat_season_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stat Season Id"
+          }
+        },
+        "required": [
+          "fantasy_season_id",
+          "name",
+          "label",
+          "is_active"
+        ],
+        "title": "CatalogueSeasonModel",
+        "type": "object"
+      },
+      "CatalogueSyncResponse": {
+        "description": "Result of refreshing the league catalogue from Sports.ru.",
+        "properties": {
+          "competitions": {
+            "title": "Competitions",
+            "type": "integer"
+          },
+          "seasons": {
+            "title": "Seasons",
+            "type": "integer"
+          },
+          "slugs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Slugs",
+            "type": "array"
+          },
+          "synced_at": {
+            "title": "Synced At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "synced_at",
+          "competitions",
+          "seasons",
+          "slugs"
+        ],
+        "title": "CatalogueSyncResponse",
+        "type": "object"
+      },
+      "CompetitionListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CompetitionModel"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PageMeta"
+          }
+        },
+        "required": [
+          "items",
+          "pagination"
+        ],
+        "title": "CompetitionListResponse",
+        "type": "object"
+      },
+      "CompetitionModel": {
+        "description": "One fantasy league with its catalogue and what has been imported.",
+        "properties": {
+          "available_seasons": {
+            "description": "Seasons Sports.ru offers for this league, oldest first",
+            "items": {
+              "$ref": "#/components/schemas/CatalogueSeasonModel"
+            },
+            "title": "Available Seasons",
+            "type": "array"
+          },
+          "catalogue_synced_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Catalogue Synced At"
+          },
+          "competition_id": {
+            "title": "Competition Id",
+            "type": "integer"
+          },
+          "fantasy_tournament_id": {
+            "title": "Fantasy Tournament Id",
+            "type": "string"
+          },
+          "has_active_season": {
+            "description": "Whether a season is currently in progress (affects 'refresh active season')",
+            "title": "Has Active Season",
+            "type": "boolean"
+          },
+          "is_imported": {
+            "title": "Is Imported",
+            "type": "boolean"
+          },
+          "latest_season": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SeasonModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Season the read API serves: the newest published one"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "seasons": {
+            "description": "Imported seasons, newest first",
+            "items": {
+              "$ref": "#/components/schemas/SeasonModel"
+            },
+            "title": "Seasons",
+            "type": "array"
+          },
+          "slug": {
+            "description": "Tournament slug, e.g. russia, spain, italy",
+            "title": "Slug",
+            "type": "string"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnapshotMeta"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sort_order": {
+            "title": "Sort Order",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "competition_id",
+          "fantasy_tournament_id",
+          "slug",
+          "name",
+          "sort_order",
+          "has_active_season",
+          "is_imported"
+        ],
+        "title": "CompetitionModel",
+        "type": "object"
+      },
+      "FullRefreshRunModel": {
+        "description": "A full refresh: every imported league, both seasons, then odds, in order.",
+        "properties": {
+          "completed_steps": {
+            "title": "Completed Steps",
+            "type": "integer"
+          },
+          "current_step": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FullRefreshStepModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failed_steps": {
+            "title": "Failed Steps",
+            "type": "integer"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "succeeded",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/FullRefreshStepModel"
+            },
+            "title": "Steps",
+            "type": "array"
+          },
+          "total_steps": {
+            "title": "Total Steps",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "started_at",
+          "total_steps",
+          "completed_steps",
+          "failed_steps",
+          "steps"
+        ],
+        "title": "FullRefreshRunModel",
+        "type": "object"
+      },
+      "FullRefreshStatus": {
+        "description": "The run in flight, or the last one this process ran (none after a restart).",
+        "properties": {
+          "is_running": {
+            "title": "Is Running",
+            "type": "boolean"
+          },
+          "run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FullRefreshRunModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "is_running"
+        ],
+        "title": "FullRefreshStatus",
+        "type": "object"
+      },
+      "FullRefreshStepModel": {
+        "description": "One step of the one-button refresh: a season import or a league's odds.",
+        "properties": {
+          "competition_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Name"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The ingestion job an import step created or waited for",
+            "title": "Job Id"
+          },
+          "kind": {
+            "enum": [
+              "latest_completed",
+              "current_season",
+              "odds"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "succeeded",
+              "failed",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tournament_slug": {
+            "title": "Tournament Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tournament_slug",
+          "kind",
+          "status"
+        ],
+        "title": "FullRefreshStepModel",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ImportSquadRequest": {
+        "description": "Load a manager's Sports.ru team from its public URL into the builder.",
+        "properties": {
+          "competition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Expected league slug. The import is rejected when the URL or the remote team belongs to a different league",
+            "title": "Competition"
+          },
+          "model": {
+            "default": "poisson_events",
+            "description": "Forecast model attached to the resolved players",
+            "enum": [
+              "poisson_events",
+              "season_mean",
+              "recent_form",
+              "ridge_stack"
+            ],
+            "title": "Model",
+            "type": "string"
+          },
+          "season_id": {
+            "description": "Internal season the players are resolved in",
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "tour_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tour whose prices and projections are attached to the players",
+            "title": "Tour Id"
+          },
+          "url": {
+            "description": "Public team page, e.g. https://www.sports.ru/fantasy/football/portugal/588960/, or a bare squad id",
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "season_id"
+        ],
+        "title": "ImportSquadRequest",
+        "type": "object"
+      },
+      "ImportSquadResponse": {
+        "properties": {
+          "budget": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "total_price + current_balance: the money a transfer plan may spend",
+            "title": "Budget"
+          },
+          "competition_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Name"
+          },
+          "competition_slug": {
+            "title": "Competition Slug",
+            "type": "string"
+          },
+          "current_balance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Money left in the bank on Sports.ru",
+            "title": "Current Balance"
+          },
+          "missing": {
+            "items": {
+              "$ref": "#/components/schemas/MissingImportedPlayer"
+            },
+            "title": "Missing",
+            "type": "array"
+          },
+          "players": {
+            "items": {
+              "$ref": "#/components/schemas/PlayerModel"
+            },
+            "title": "Players",
+            "type": "array"
+          },
+          "remote_season_id": {
+            "title": "Remote Season Id",
+            "type": "string"
+          },
+          "remote_tour": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteTourRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "squad_id": {
+            "title": "Squad Id",
+            "type": "string"
+          },
+          "squad_name": {
+            "title": "Squad Name",
+            "type": "string"
+          },
+          "total_price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the roster is worth on Sports.ru",
+            "title": "Total Price"
+          },
+          "transfers_done": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Transfers already made this tour",
+            "title": "Transfers Done"
+          },
+          "transfers_left": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Free transfers still available this tour",
+            "title": "Transfers Left"
+          }
+        },
+        "required": [
+          "squad_id",
+          "squad_name",
+          "competition_slug",
+          "remote_season_id",
+          "players"
+        ],
+        "title": "ImportSquadResponse",
+        "type": "object"
+      },
+      "IngestionJobModel": {
+        "description": "A manual refresh job as the admin UI sees it.",
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "data_freshness": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Snapshot time published by a successful job",
+            "title": "Data Freshness"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "ingestion_run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ingestion Run Id"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngestionProgressModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requested_season_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested Season Id"
+          },
+          "requested_season_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested Season Name"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "succeeded",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tournament_slug": {
+            "title": "Tournament Slug",
+            "type": "string"
+          },
+          "trigger_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger Type"
+          },
+          "use_current_season": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Current Season"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "tournament_slug"
+        ],
+        "title": "IngestionJobModel",
+        "type": "object"
+      },
+      "IngestionProgressModel": {
+        "description": "Coarse progress of a running refresh (see ingestion_progress.STAGES).",
+        "properties": {
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Latest progress note from the pipeline",
+            "title": "Message"
+          },
+          "percent": {
+            "description": "Rough completion percentage",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Percent",
+            "type": "integer"
+          },
+          "stage": {
+            "description": "Machine-readable stage key",
+            "title": "Stage",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "stage",
+          "percent"
+        ],
+        "title": "IngestionProgressModel",
+        "type": "object"
+      },
+      "IngestionStatusResponse": {
+        "description": "Everything the admin refresh screen needs in a single request.\n\nIt is deliberately answerable without knowing a job id, so a page reload\n(or a second browser tab) recovers the state of an in-flight refresh.",
+        "properties": {
+          "active_job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngestionJobModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "competition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompetitionModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The league this status describes, once its catalogue is known"
+          },
+          "is_refreshing": {
+            "description": "True while a pending/running job exists for the tournament",
+            "title": "Is Refreshing",
+            "type": "boolean"
+          },
+          "latest_job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngestionJobModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_successful_job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngestionJobModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "odds": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OddsStatusModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Last 1x2 refresh for this league's imported season"
+          },
+          "season": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SeasonModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnapshotMeta"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Active snapshot of the season shown in the UI"
+          },
+          "stages": {
+            "description": "Ordered stage vocabulary with completion percentages",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Stages",
+            "type": "array"
+          },
+          "target_tour": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TourModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Next non-finished tour, else the last one"
+          },
+          "tournament_slug": {
+            "title": "Tournament Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tournament_slug",
+          "is_refreshing"
+        ],
+        "title": "IngestionStatusResponse",
+        "type": "object"
+      },
+      "MatchListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MatchModel"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PageMeta"
+          }
+        },
+        "required": [
+          "items",
+          "pagination"
+        ],
+        "title": "MatchListResponse",
+        "type": "object"
+      },
+      "MatchModel": {
+        "properties": {
+          "away_club_id": {
+            "title": "Away Club Id",
+            "type": "integer"
+          },
+          "away_club_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Away Club Name"
+          },
+          "away_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Away Score"
+          },
+          "fantasy_tour_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fantasy Tour Id"
+          },
+          "home_club_id": {
+            "title": "Home Club Id",
+            "type": "integer"
+          },
+          "home_club_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Home Club Name"
+          },
+          "home_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Home Score"
+          },
+          "match_id": {
+            "title": "Match Id",
+            "type": "integer"
+          },
+          "scheduled_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduled At"
+          },
+          "season_id": {
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "stat_match_id": {
+            "title": "Stat Match Id",
+            "type": "string"
+          },
+          "tour_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tour Id"
+          },
+          "tour_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tour Name"
+          },
+          "tour_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tour Status"
+          }
+        },
+        "required": [
+          "match_id",
+          "season_id",
+          "stat_match_id",
+          "home_club_id",
+          "away_club_id"
+        ],
+        "title": "MatchModel",
+        "type": "object"
+      },
+      "MissingImportedPlayer": {
+        "properties": {
+          "fantasy_player_id": {
+            "title": "Fantasy Player Id",
+            "type": "string"
+          },
+          "player_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Name"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          }
+        },
+        "required": [
+          "fantasy_player_id"
+        ],
+        "title": "MissingImportedPlayer",
+        "type": "object"
+      },
+      "NightlyEligibleLeague": {
+        "description": "A league whose current season is already imported and will be refreshed.",
+        "properties": {
+          "fantasy_season_id": {
+            "title": "Fantasy Season Id",
+            "type": "string"
+          },
+          "season_id": {
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "season_name": {
+            "title": "Season Name",
+            "type": "string"
+          },
+          "tournament_slug": {
+            "title": "Tournament Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tournament_slug",
+          "season_id",
+          "fantasy_season_id",
+          "season_name"
+        ],
+        "title": "NightlyEligibleLeague",
+        "type": "object"
+      },
+      "NightlyRefreshReport": {
+        "description": "Result of one nightly sweep across every eligible league.",
+        "properties": {
+          "eligible": {
+            "items": {
+              "$ref": "#/components/schemas/NightlyEligibleLeague"
+            },
+            "title": "Eligible",
+            "type": "array"
+          },
+          "enqueued": {
+            "items": {
+              "$ref": "#/components/schemas/IngestionJobModel"
+            },
+            "title": "Enqueued",
+            "type": "array"
+          },
+          "force": {
+            "title": "Force",
+            "type": "boolean"
+          },
+          "ran_at": {
+            "title": "Ran At",
+            "type": "string"
+          },
+          "skipped": {
+            "items": {
+              "$ref": "#/components/schemas/NightlySkippedLeague"
+            },
+            "title": "Skipped",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ran_at",
+          "force",
+          "eligible",
+          "enqueued",
+          "skipped"
+        ],
+        "title": "NightlyRefreshReport",
+        "type": "object"
+      },
+      "NightlyRefreshStatus": {
+        "description": "Scheduler configuration, who is eligible, and today's scheduled jobs.",
+        "properties": {
+          "catchup_hours": {
+            "title": "Catchup Hours",
+            "type": "integer"
+          },
+          "eligible": {
+            "items": {
+              "$ref": "#/components/schemas/NightlyEligibleLeague"
+            },
+            "title": "Eligible",
+            "type": "array"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "hour": {
+            "title": "Hour",
+            "type": "integer"
+          },
+          "minute": {
+            "title": "Minute",
+            "type": "integer"
+          },
+          "next_run_at": {
+            "title": "Next Run At",
+            "type": "string"
+          },
+          "now": {
+            "title": "Now",
+            "type": "string"
+          },
+          "scheduled_today": {
+            "items": {
+              "$ref": "#/components/schemas/IngestionJobModel"
+            },
+            "title": "Scheduled Today",
+            "type": "array"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "timezone",
+          "hour",
+          "minute",
+          "catchup_hours",
+          "now",
+          "next_run_at",
+          "eligible",
+          "scheduled_today"
+        ],
+        "title": "NightlyRefreshStatus",
+        "type": "object"
+      },
+      "NightlySkippedLeague": {
+        "description": "A league the sweep considered but did not enqueue.",
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "tournament_slug": {
+            "title": "Tournament Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tournament_slug",
+          "reason"
+        ],
+        "title": "NightlySkippedLeague",
+        "type": "object"
+      },
+      "OddsRefreshResponse": {
+        "description": "Result of fetching the 1x2 line for one league.",
+        "properties": {
+          "calendar_matches": {
+            "default": 0,
+            "title": "Calendar Matches",
+            "type": "integer"
+          },
+          "competition_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Name"
+          },
+          "fetched": {
+            "default": 0,
+            "title": "Fetched",
+            "type": "integer"
+          },
+          "forecast_rows": {
+            "default": 0,
+            "title": "Forecast Rows",
+            "type": "integer"
+          },
+          "linked": {
+            "default": 0,
+            "title": "Linked",
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "season_id": {
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "season_name": {
+            "title": "Season Name",
+            "type": "string"
+          },
+          "sports_tag_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sports Tag Id"
+          },
+          "stored": {
+            "default": 0,
+            "title": "Stored",
+            "type": "integer"
+          },
+          "synced_at": {
+            "title": "Synced At",
+            "type": "string"
+          },
+          "tour_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tour Id"
+          },
+          "tour_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tour Name"
+          },
+          "tournament_slug": {
+            "title": "Tournament Slug",
+            "type": "string"
+          },
+          "unmatched": {
+            "default": 0,
+            "title": "Unmatched",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tournament_slug",
+          "season_id",
+          "season_name",
+          "synced_at"
+        ],
+        "title": "OddsRefreshResponse",
+        "type": "object"
+      },
+      "OddsStatusModel": {
+        "description": "Compact odds block on the admin refresh status.",
+        "properties": {
+          "matches": {
+            "default": 0,
+            "title": "Matches",
+            "type": "integer"
+          },
+          "season_id": {
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "sports_tag_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sports Tag Id"
+          },
+          "synced_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Synced At"
+          },
+          "tour_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tour Id"
+          },
+          "tour_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tour Name"
+          }
+        },
+        "required": [
+          "season_id"
+        ],
+        "title": "OddsStatusModel",
+        "type": "object"
+      },
+      "OptimizerResponse": {
+        "additionalProperties": true,
+        "description": "The optimizer report; nested explanation kept permissive on purpose.",
+        "properties": {
+          "counts": {
+            "additionalProperties": true,
+            "title": "Counts",
+            "type": "object"
+          },
+          "cutoff": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cutoff"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "optimizer_version": {
+            "title": "Optimizer Version",
+            "type": "string"
+          },
+          "rules": {
+            "additionalProperties": true,
+            "title": "Rules",
+            "type": "object"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "season": {
+            "additionalProperties": true,
+            "title": "Season",
+            "type": "object"
+          },
+          "season_id": {
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "solution": {
+            "additionalProperties": true,
+            "title": "Solution",
+            "type": "object"
+          },
+          "tour": {
+            "additionalProperties": true,
+            "title": "Tour",
+            "type": "object"
+          },
+          "valid": {
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "optimizer_version",
+          "model",
+          "mode",
+          "generated_at",
+          "run_id",
+          "season_id",
+          "season",
+          "tour",
+          "rules",
+          "counts",
+          "solution",
+          "valid"
+        ],
+        "title": "OptimizerResponse",
+        "type": "object"
+      },
+      "PageMeta": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "limit",
+          "offset",
+          "total",
+          "count"
+        ],
+        "title": "PageMeta",
+        "type": "object"
+      },
+      "PlayerDetailModel": {
+        "properties": {
+          "availability_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Availability Status"
+          },
+          "average_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Average Score"
+          },
+          "club_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Club Id"
+          },
+          "club_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Club Name"
+          },
+          "fantasy_player_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fantasy Player Id"
+          },
+          "form": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Form"
+          },
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/PlayerHistoryEntry"
+            },
+            "title": "History",
+            "type": "array"
+          },
+          "last_tour_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Tour Score"
+          },
+          "player_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Name"
+          },
+          "player_season_id": {
+            "title": "Player Season Id",
+            "type": "integer"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price"
+          },
+          "prior_season": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PriorSeasonModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "projection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProjectionModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rank"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "season_id": {
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "season_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Season Score"
+          },
+          "selected_by": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected By"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnapshotMeta"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status_description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Description"
+          }
+        },
+        "required": [
+          "player_season_id",
+          "role",
+          "season_id"
+        ],
+        "title": "PlayerDetailModel",
+        "type": "object"
+      },
+      "PlayerHistoryEntry": {
+        "properties": {
+          "assists": {
+            "title": "Assists",
+            "type": "integer"
+          },
+          "ball_recoveries": {
+            "title": "Ball Recoveries",
+            "type": "integer"
+          },
+          "goals": {
+            "title": "Goals",
+            "type": "integer"
+          },
+          "goals_conceded": {
+            "title": "Goals Conceded",
+            "type": "integer"
+          },
+          "match_id": {
+            "title": "Match Id",
+            "type": "integer"
+          },
+          "minutes": {
+            "title": "Minutes",
+            "type": "integer"
+          },
+          "points": {
+            "title": "Points",
+            "type": "integer"
+          },
+          "red_cards": {
+            "title": "Red Cards",
+            "type": "integer"
+          },
+          "saves": {
+            "title": "Saves",
+            "type": "integer"
+          },
+          "scheduled_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduled At"
+          },
+          "tour_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tour Id"
+          },
+          "yellow_cards": {
+            "title": "Yellow Cards",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "match_id",
+          "minutes",
+          "points",
+          "goals",
+          "assists",
+          "saves",
+          "ball_recoveries",
+          "yellow_cards",
+          "red_cards",
+          "goals_conceded"
+        ],
+        "title": "PlayerHistoryEntry",
+        "type": "object"
+      },
+      "PlayerListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PlayerModel"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PageMeta"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnapshotMeta"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "pagination"
+        ],
+        "title": "PlayerListResponse",
+        "type": "object"
+      },
+      "PlayerModel": {
+        "properties": {
+          "availability_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Availability Status"
+          },
+          "average_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Average Score"
+          },
+          "club_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Club Id"
+          },
+          "club_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Club Name"
+          },
+          "fantasy_player_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fantasy Player Id"
+          },
+          "form": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Form"
+          },
+          "last_tour_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Tour Score"
+          },
+          "player_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Name"
+          },
+          "player_season_id": {
+            "title": "Player Season Id",
+            "type": "integer"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price"
+          },
+          "prior_season": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PriorSeasonModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "projection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProjectionModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rank"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "season_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Season Score"
+          },
+          "selected_by": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected By"
+          },
+          "status_description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Description"
+          }
+        },
+        "required": [
+          "player_season_id",
+          "role"
+        ],
+        "title": "PlayerModel",
+        "type": "object"
+      },
+      "PriorSeasonModel": {
+        "description": "What the same player did in the previous season.\n\nEarly in a new season the current-season columns are nearly empty, so these\nnumbers are what a manager actually judges a player by. They come from the\nprevious season's published snapshot, matched through the cross-season\nplayer identity, and are absent when only one season has been imported.",
+        "properties": {
+          "assists": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assists"
+          },
+          "average_points": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Average Points"
+          },
+          "ball_recoveries": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ball Recoveries"
+          },
+          "club_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Club the player belonged to last season",
+            "title": "Club Name"
+          },
+          "goals": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goals"
+          },
+          "goals_conceded": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goals Conceded"
+          },
+          "matches": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Matches with at least one minute played",
+            "title": "Matches"
+          },
+          "minutes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minutes"
+          },
+          "player_season_id": {
+            "title": "Player Season Id",
+            "type": "integer"
+          },
+          "points": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Fantasy points scored over the whole season",
+            "title": "Points"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Price at the end of the previous season",
+            "title": "Price"
+          },
+          "rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Fantasy rank inside the season (1 is best)",
+            "title": "Rank"
+          },
+          "red_cards": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Red Cards"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "saves": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Saves"
+          },
+          "season_id": {
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "season_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Season Name"
+          },
+          "yellow_cards": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Yellow Cards"
+          }
+        },
+        "required": [
+          "season_id",
+          "player_season_id"
+        ],
+        "title": "PriorSeasonModel",
+        "type": "object"
+      },
+      "ProjectionModel": {
+        "properties": {
+          "components": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Components"
+          },
+          "expected_minutes": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Minutes"
+          },
+          "expected_points": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Points"
+          },
+          "feature_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feature Version"
+          },
+          "has_history": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whether the projection is backed by real history",
+            "title": "Has History"
+          },
+          "match_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Match Id"
+          },
+          "model_name": {
+            "title": "Model Name",
+            "type": "string"
+          },
+          "model_version": {
+            "title": "Model Version",
+            "type": "string"
+          },
+          "p_appearance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P Appearance"
+          },
+          "scoring_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scoring Version"
+          },
+          "stat_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "History source: 'current_season' or 'prior_season' (cross-season)",
+            "title": "Stat Source"
+          },
+          "uncertainty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uncertainty"
+          }
+        },
+        "required": [
+          "model_name",
+          "model_version"
+        ],
+        "title": "ProjectionModel",
+        "type": "object"
+      },
+      "RefreshRequest": {
+        "description": "Optional season selector for a refresh; defaults to latest completed.",
+        "properties": {
+          "current": {
+            "default": false,
+            "description": "Refresh the active season instead of the latest",
+            "title": "Current",
+            "type": "boolean"
+          },
+          "season_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Exact fantasy season id",
+            "title": "Season Id"
+          },
+          "season_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Exact stat season name, e.g. 2025/2026",
+            "title": "Season Name"
+          }
+        },
+        "title": "RefreshRequest",
+        "type": "object"
+      },
+      "RemoteTourRef": {
+        "properties": {
+          "fantasy_tour_id": {
+            "title": "Fantasy Tour Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fantasy_tour_id",
+          "name",
+          "status"
+        ],
+        "title": "RemoteTourRef",
+        "type": "object"
+      },
+      "SeasonDetailModel": {
+        "properties": {
+          "competition_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Id"
+          },
+          "competition_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Name"
+          },
+          "competition_slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Slug"
+          },
+          "ends_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          },
+          "fantasy_season_id": {
+            "title": "Fantasy Season Id",
+            "type": "string"
+          },
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "label": {
+            "description": "Display name, unique within the competition: the season name, with the fantasy id appended when a tournament splits one season into phases (Champions League league phase vs knockout stage)",
+            "title": "Label",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "rules": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SeasonRulesModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "season_id": {
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnapshotMeta"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          },
+          "stat_season_id": {
+            "title": "Stat Season Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "season_id",
+          "fantasy_season_id",
+          "stat_season_id",
+          "name",
+          "label",
+          "is_active"
+        ],
+        "title": "SeasonDetailModel",
+        "type": "object"
+      },
+      "SeasonListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SeasonModel"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PageMeta"
+          }
+        },
+        "required": [
+          "items",
+          "pagination"
+        ],
+        "title": "SeasonListResponse",
+        "type": "object"
+      },
+      "SeasonModel": {
+        "properties": {
+          "competition_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Id"
+          },
+          "competition_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Name"
+          },
+          "competition_slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Slug"
+          },
+          "ends_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          },
+          "fantasy_season_id": {
+            "title": "Fantasy Season Id",
+            "type": "string"
+          },
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "label": {
+            "description": "Display name, unique within the competition: the season name, with the fantasy id appended when a tournament splits one season into phases (Champions League league phase vs knockout stage)",
+            "title": "Label",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "season_id": {
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnapshotMeta"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          },
+          "stat_season_id": {
+            "title": "Stat Season Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "season_id",
+          "fantasy_season_id",
+          "stat_season_id",
+          "name",
+          "label",
+          "is_active"
+        ],
+        "title": "SeasonModel",
+        "type": "object"
+      },
+      "SeasonRulesModel": {
+        "properties": {
+          "full_roster_constraints": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Full Roster Constraints"
+          },
+          "starting_players": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starting Players"
+          },
+          "starting_roster_constraints": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starting Roster Constraints"
+          },
+          "total_budget": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Budget"
+          },
+          "total_players": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Players"
+          }
+        },
+        "title": "SeasonRulesModel",
+        "type": "object"
+      },
+      "SnapshotMeta": {
+        "properties": {
+          "data_freshness": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ISO time the active snapshot finished importing",
+            "title": "Data Freshness"
+          },
+          "quality_checked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality Checked At"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "season_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Season Id"
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "title": "SnapshotMeta",
+        "type": "object"
+      },
+      "SquadRequest": {
+        "properties": {
+          "captain_risk_weight": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Standard deviations of a player's forecast added to his captain score, so the armband goes to the upper tail rather than the mean (default 0.5)",
+            "title": "Captain Risk Weight"
+          },
+          "competition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "League to optimize: tournament slug or fantasy tournament id. With several leagues imported there is no single active snapshot, so name this (or season/run_id) to avoid getting whichever league was published most recently",
+            "title": "Competition"
+          },
+          "fixture_conflict_weight": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How hard starters that meet each other in the tour are penalised (default 0.25); 0 ignores the schedule but still reports clashes",
+            "title": "Fixture Conflict Weight"
+          },
+          "formation": {
+            "anyOf": [
+              {
+                "pattern": "^\\d{1,2}-\\d{1,2}-\\d{1,2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Starting formation as defenders-midfielders-forwards, e.g. '4-4-2'; goalkeepers fill the remaining starting slots",
+            "title": "Formation"
+          },
+          "locked": {
+            "description": "Fantasy (or internal) player ids forced into the squad; the remaining slots are filled optimally",
+            "items": {
+              "type": "string"
+            },
+            "title": "Locked",
+            "type": "array"
+          },
+          "locked_starters": {
+            "description": "Player ids forced into the starting eleven (implies locked)",
+            "items": {
+              "type": "string"
+            },
+            "title": "Locked Starters",
+            "type": "array"
+          },
+          "model": {
+            "default": "poisson_events",
+            "description": "Forecast model to optimize on",
+            "enum": [
+              "poisson_events",
+              "season_mean",
+              "recent_form",
+              "ridge_stack"
+            ],
+            "title": "Model",
+            "type": "string"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Ingestion run to build from",
+            "title": "Run Id"
+          },
+          "season": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Season fantasy id, stat id or name",
+            "title": "Season"
+          },
+          "tour": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Target tour fantasy id or name",
+            "title": "Tour"
+          }
+        },
+        "title": "SquadRequest",
+        "type": "object"
+      },
+      "TourListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TourModel"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PageMeta"
+          }
+        },
+        "required": [
+          "items",
+          "pagination"
+        ],
+        "title": "TourListResponse",
+        "type": "object"
+      },
+      "TourModel": {
+        "properties": {
+          "fantasy_tour_id": {
+            "title": "Fantasy Tour Id",
+            "type": "string"
+          },
+          "finishes_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finishes At"
+          },
+          "max_same_team_players": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Same Team Players"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "season_id": {
+            "title": "Season Id",
+            "type": "integer"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "total_transfers": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Transfers"
+          },
+          "tour_id": {
+            "title": "Tour Id",
+            "type": "integer"
+          },
+          "transfers_deadline_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transfers Deadline At"
+          },
+          "transfers_start_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transfers Start At"
+          }
+        },
+        "required": [
+          "tour_id",
+          "season_id",
+          "fantasy_tour_id",
+          "name",
+          "status"
+        ],
+        "title": "TourModel",
+        "type": "object"
+      },
+      "TransfersRequest": {
+        "properties": {
+          "budget": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Money the plan may spend on the whole roster (team value plus bank, as reported by the squad import); defaults to the season's opening budget",
+            "title": "Budget"
+          },
+          "captain_risk_weight": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Standard deviations of a player's forecast added to his captain score, so the armband goes to the upper tail rather than the mean (default 0.5)",
+            "title": "Captain Risk Weight"
+          },
+          "competition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "League to optimize: tournament slug or fantasy tournament id. With several leagues imported there is no single active snapshot, so name this (or season/run_id) to avoid getting whichever league was published most recently",
+            "title": "Competition"
+          },
+          "current_squad": {
+            "description": "Fantasy player ids of the current squad (limited-transfers mode)",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Current Squad",
+            "type": "array"
+          },
+          "fixture_conflict_weight": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How hard starters that meet each other in the tour are penalised (default 0.25); 0 ignores the schedule but still reports clashes",
+            "title": "Fixture Conflict Weight"
+          },
+          "formation": {
+            "anyOf": [
+              {
+                "pattern": "^\\d{1,2}-\\d{1,2}-\\d{1,2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Starting formation as defenders-midfielders-forwards, e.g. '4-4-2'; goalkeepers fill the remaining starting slots",
+            "title": "Formation"
+          },
+          "horizon_decay": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Discount per tour ahead for horizon_tours (default 0.7)",
+            "title": "Horizon Decay"
+          },
+          "horizon_tours": {
+            "anyOf": [
+              {
+                "maximum": 6.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How many tours the roster is judged on: the target tour plus the following ones, forecast from the target tour's cutoff and discounted by horizon_decay per tour (default 2)",
+            "title": "Horizon Tours"
+          },
+          "locked": {
+            "description": "Fantasy (or internal) player ids forced into the squad; the remaining slots are filled optimally",
+            "items": {
+              "type": "string"
+            },
+            "title": "Locked",
+            "type": "array"
+          },
+          "locked_starters": {
+            "description": "Player ids forced into the starting eleven (implies locked)",
+            "items": {
+              "type": "string"
+            },
+            "title": "Locked Starters",
+            "type": "array"
+          },
+          "max_transfers": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Override the tour's transfer limit",
+            "title": "Max Transfers"
+          },
+          "min_transfer_gain": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Least expected-points gain a single transfer must bring to be proposed (default 0.5; 0 proposes any gain)",
+            "title": "Min Transfer Gain"
+          },
+          "model": {
+            "default": "poisson_events",
+            "description": "Forecast model to optimize on",
+            "enum": [
+              "poisson_events",
+              "season_mean",
+              "recent_form",
+              "ridge_stack"
+            ],
+            "title": "Model",
+            "type": "string"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Ingestion run to build from",
+            "title": "Run Id"
+          },
+          "season": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Season fantasy id, stat id or name",
+            "title": "Season"
+          },
+          "tour": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Target tour fantasy id or name",
+            "title": "Tour"
+          },
+          "transfer_gain_sigma": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Extra margin a transfer must clear, in standard deviations of both players' forecasts (default 0)",
+            "title": "Transfer Gain Sigma"
+          }
+        },
+        "required": [
+          "current_squad"
+        ],
+        "title": "TransfersRequest",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Read API and squad optimizer for the Sports.ru fantasy pipeline, plus the manual ingestion control plane. Every league in the catalogue is served by the same endpoints; catalog reads never call Sports.ru. POST /squads/import fetches one public team. Leagues whose current season is already imported are refreshed automatically once a night.",
+    "title": "Fantasy Analytics API",
+    "version": "0.3.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/admin/competitions/sync": {
+      "post": {
+        "description": "Refresh the catalogue of leagues and their seasons from Sports.ru.\n\nThe only admin call that reaches the GraphQL API inline: it is a single\nrequest, and without it a freshly created database has no league list for\nthe switcher or the import screen to offer.",
+        "operationId": "sync_competition_catalogue_admin_competitions_sync_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogueSyncResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Sync Competition Catalogue",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/ingestion/full-refresh": {
+      "get": {
+        "description": "Show the one-button refresh: the run in flight, or the last one.",
+        "operationId": "get_full_refresh_admin_ingestion_full_refresh_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FullRefreshStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Full Refresh",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "Refresh everything: every imported league, both seasons, then odds.\n\nFor each imported league in catalogue order the latest completed\nseason is imported, then the current one (when the league has one),\nthen the 1x2 line is fetched and the next-tour forecast rebuilt. The\nsteps run one after another as regular ingestion jobs; poll the GET\nfor progress. A ``409`` means a full refresh is already running.",
+        "operationId": "start_full_refresh_admin_ingestion_full_refresh_post",
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FullRefreshStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Start Full Refresh",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/ingestion/nightly": {
+      "get": {
+        "description": "Show the nightly scheduler: next run, eligible leagues, today's jobs.\n\nEligibility is \"this league already has its current season imported\".\nCatalogued-only leagues and leagues with only a finished historical\nseason are not on the list and will not be touched at night.",
+        "operationId": "get_nightly_refresh_admin_ingestion_nightly_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NightlyRefreshStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Nightly Refresh",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "Run the nightly sweep now, without waiting for the scheduled hour.\n\nEach eligible league is enqueued as a regular current-season job with\n``trigger_type=scheduled``. A league that already has a pending or\nrunning refresh is skipped; ``force`` only bypasses the once-a-day\nguard, not the per-tournament lock.",
+        "operationId": "trigger_nightly_refresh_admin_ingestion_nightly_post",
+        "parameters": [
+          {
+            "description": "Re-queue even if a scheduled job already ran today",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": true,
+              "description": "Re-queue even if a scheduled job already ran today",
+              "title": "Force",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NightlyRefreshReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trigger Nightly Refresh",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/ingestion/runs/{job_id}": {
+      "get": {
+        "operationId": "get_run_admin_ingestion_runs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionJobModel"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Run",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/ingestion/{tournament_slug}/odds": {
+      "post": {
+        "description": "Fetch the 1x2 line for one league and rebuild the next-tour forecast.\n\nAddressed at the same calendar widget Sports.ru uses for tournament\nodds. The optimizer is not touched: expected points change, and the\nsquad picker follows them.",
+        "operationId": "refresh_competition_odds_admin_ingestion__tournament_slug__odds_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_slug",
+            "required": true,
+            "schema": {
+              "title": "Tournament Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OddsRefreshResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Refresh Competition Odds",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/ingestion/{tournament_slug}/refresh": {
+      "post": {
+        "description": "Queue an import of one league's season.\n\nThe job is keyed by ``tournament_slug``, and the ``ingestion_jobs``\npartial unique index only forbids two concurrent refreshes *of the same\nleague* — so different leagues can be imported in parallel.",
+        "operationId": "refresh_competition_admin_ingestion__tournament_slug__refresh_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_slug",
+            "required": true,
+            "schema": {
+              "title": "Tournament Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RefreshRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Refresh Competition",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/ingestion/{tournament_slug}/status": {
+      "get": {
+        "description": "Report one league's refresh state plus the snapshot and tour to show.\n\nThe admin screen calls this on load (and while polling), so it never has\nto remember a job id: an in-flight refresh is discovered from the\ndatabase, which is also what makes a second browser tab consistent.",
+        "operationId": "ingestion_status_admin_ingestion__tournament_slug__status_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_slug",
+            "required": true,
+            "schema": {
+              "title": "Tournament Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ingestion Status",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/competitions": {
+      "get": {
+        "description": "List the leagues the pipeline knows about.\n\nThis is what a league switcher reads: with ``imported_only=true`` it\nreturns exactly the leagues the read API can serve, each with the season\nand snapshot the rest of the UI should use.",
+        "operationId": "list_competitions_competitions_get",
+        "parameters": [
+          {
+            "description": "Only leagues that already have an imported season",
+            "in": "query",
+            "name": "imported_only",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Only leagues that already have an imported season",
+              "title": "Imported Only",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompetitionListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Competitions",
+        "tags": [
+          "catalog"
+        ]
+      }
+    },
+    "/competitions/{slug}": {
+      "get": {
+        "operationId": "get_competition_competitions__slug__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompetitionModel"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Competition",
+        "tags": [
+          "catalog"
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Health Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/matches": {
+      "get": {
+        "operationId": "list_matches_matches_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "season_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Season Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tour_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tour Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "club_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Club Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Matches",
+        "tags": [
+          "catalog"
+        ]
+      }
+    },
+    "/matches/{match_id}": {
+      "get": {
+        "operationId": "get_match_matches__match_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "match_id",
+            "required": true,
+            "schema": {
+              "title": "Match Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchModel"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Match",
+        "tags": [
+          "catalog"
+        ]
+      }
+    },
+    "/optimizer/squad": {
+      "post": {
+        "operationId": "optimize_squad_optimizer_squad_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SquadRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptimizerResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Optimize Squad",
+        "tags": [
+          "optimizer"
+        ]
+      }
+    },
+    "/optimizer/transfers": {
+      "post": {
+        "operationId": "optimize_transfers_optimizer_transfers_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransfersRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptimizerResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Optimize Transfers",
+        "tags": [
+          "optimizer"
+        ]
+      }
+    },
+    "/players": {
+      "get": {
+        "operationId": "list_players_players_get",
+        "parameters": [
+          {
+            "description": "Internal season id",
+            "in": "query",
+            "name": "season_id",
+            "required": true,
+            "schema": {
+              "description": "Internal season id",
+              "title": "Season Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Join projections for this tour",
+            "in": "query",
+            "name": "tour_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Join projections for this tour",
+              "title": "Tour Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "model",
+            "required": false,
+            "schema": {
+              "default": "poisson_events",
+              "enum": [
+                "poisson_events",
+                "season_mean",
+                "recent_form",
+                "ridge_stack"
+              ],
+              "title": "Model",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Position filter",
+            "in": "query",
+            "name": "role",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "GOALKEEPER",
+                    "DEFENDER",
+                    "MIDFIELDER",
+                    "FORWARD"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Position filter",
+              "title": "Role"
+            }
+          },
+          {
+            "in": "query",
+            "name": "club_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Club Id"
+            }
+          },
+          {
+            "description": "Availability status filter",
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Availability status filter",
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_price",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Price"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_price",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Price"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "default": "name",
+              "enum": [
+                "projection",
+                "price",
+                "name",
+                "selected_by",
+                "season_score"
+              ],
+              "title": "Order",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Players",
+        "tags": [
+          "players"
+        ]
+      }
+    },
+    "/players/{player_season_id}": {
+      "get": {
+        "operationId": "get_player_players__player_season_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "player_season_id",
+            "required": true,
+            "schema": {
+              "title": "Player Season Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tour_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tour Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "model",
+            "required": false,
+            "schema": {
+              "default": "poisson_events",
+              "enum": [
+                "poisson_events",
+                "season_mean",
+                "recent_form",
+                "ridge_stack"
+              ],
+              "title": "Model",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerDetailModel"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Player",
+        "tags": [
+          "players"
+        ]
+      }
+    },
+    "/seasons": {
+      "get": {
+        "operationId": "list_seasons_seasons_get",
+        "parameters": [
+          {
+            "description": "Restrict to one league",
+            "in": "query",
+            "name": "competition_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Restrict to one league",
+              "title": "Competition Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Seasons",
+        "tags": [
+          "catalog"
+        ]
+      }
+    },
+    "/seasons/{season_id}": {
+      "get": {
+        "operationId": "get_season_seasons__season_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season_id",
+            "required": true,
+            "schema": {
+              "title": "Season Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonDetailModel"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Season",
+        "tags": [
+          "catalog"
+        ]
+      }
+    },
+    "/squads/import": {
+      "post": {
+        "description": "Load a public Sports.ru team into the squad builder.\n\nThe live roster comes from GraphQL (``currentTourInfo``); each player is\nthen resolved against the imported snapshot for ``season_id`` / ``tour_id``\nso prices and projections match the tour the user is editing. A Portugal\nlink against an RPL season is rejected before the pitch is touched.",
+        "operationId": "import_squad_squads_import_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportSquadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportSquadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import Squad",
+        "tags": [
+          "squads"
+        ]
+      }
+    },
+    "/tours": {
+      "get": {
+        "operationId": "list_tours_tours_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "season_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Season Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TourListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Tours",
+        "tags": [
+          "catalog"
+        ]
+      }
+    },
+    "/tours/{tour_id}": {
+      "get": {
+        "operationId": "get_tour_tours__tour_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tour_id",
+            "required": true,
+            "schema": {
+              "title": "Tour Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TourModel"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Tour",
+        "tags": [
+          "catalog"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,85 @@
+name: CI & Deploy
+
+# Runs backend + frontend checks on every PR and push to develop, and — only
+# after those checks pass on a push/merge to develop — triggers a Dokploy
+# redeploy via its webhook. See docs/deployment.md.
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: fantasy_test
+          POSTGRES_USER: fantasy
+          POSTGRES_PASSWORD: fantasy
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fantasy -d fantasy_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://fantasy:fantasy@localhost:5432/fantasy_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install .[dev]
+      - name: Syntax check
+        run: PYTHONPATH=src python3 -m compileall src
+      - name: Run tests
+        run: PYTHONPATH=src python3 -m unittest discover -s tests -v
+
+  frontend-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+
+  deploy:
+    needs: [backend-tests, frontend-checks]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Dokploy deployment
+        env:
+          DOKPLOY_DEPLOY_WEBHOOK: ${{ secrets.DOKPLOY_DEPLOY_WEBHOOK }}
+        run: |
+          if [ -z "${DOKPLOY_DEPLOY_WEBHOOK}" ]; then
+            echo "::error::Secret DOKPLOY_DEPLOY_WEBHOOK is not configured." >&2
+            echo "Add it under repo Settings -> Secrets and variables -> Actions." >&2
+            exit 1
+          fi
+          curl -fsSL --retry 3 --retry-delay 5 -X POST "${DOKPLOY_DEPLOY_WEBHOOK}"
+          echo "Dokploy deployment triggered."
