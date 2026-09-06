@@ -484,6 +484,41 @@ the pieces that touch the data model are:
   into a warning (`ingestion_skipped_players`). RPL 2023/24 and 2024/25 each
   have exactly one such player.
 
+## European cups from the national leagues (step 24)
+
+The Champions League and Europa League fantasy seasons are forecast from the
+national championships their clubs are playing at the same time
+([`european-cups-plan.md`](european-cups-plan.md)). No schema change: the
+model already had what the join needs.
+
+- **Identity.** `players.stat_player_id` and `clubs.stat_team_id` are UNIQUE
+  across the whole database, and Sports.ru's stat slugs are global, so a cup
+  import lands on the same `players` / `clubs` rows as the league imports.
+  Checked on 2026-09-05: 153 of the 167 players of the five Spanish clubs in
+  the Champions League 2026/27 already had a La Liga 2026/27 `player_season`;
+  the rest are youth players the league catalogue does not carry. Five players
+  in the local database already sat in both the RPL and La Liga on one row.
+- **Which seasons are parallel** is decided at feature-build time from
+  `seasons.starts_at` / `ends_at` (the stat season's `startedAt` / `endedAt`):
+  an active run of a competition outside `NON_LEAGUE_SLUGS` whose season has
+  started by the cutoff and has not ended before the target season began.
+  Nothing links a club to "its" league in the schema; a club's league is
+  whichever parallel season has it in `season_clubs`.
+- **Two-phase seasons.** The cup's league phase and knockout stage are two
+  fantasy seasons on one stat season (migration 0007); each is forecast on its
+  own, and `resolve_prior_run` treats the league phase as the knockout stage's
+  prior because it starts earlier.
+- **Snapshots.** A league snapshot's `availability_status` can mark a cup
+  row out when the cup snapshot says `UNKNOWN` (which it does for every player
+  before the first tour); the feature row records the lender in
+  `availability_source`.
+- **Odds.** The calendar widget resolves `champions_league` to tag 1365242
+  and lists every league-phase fixture by stat team slug, so `match_odds`
+  joins to the cup's `matches.stat_match_id` exactly as for a league; lines
+  appear about two days before kickoff.
+- **Provenance.** `player_forecasts.stat_source` gains the value
+  `parallel_league`; the read API's `stat_source` field documents it.
+
 ## Questions left for the next discovery iteration
 
 - Which `statMatch` fields reliably expose shots, possession, xG and lineups for

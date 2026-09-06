@@ -403,6 +403,10 @@ table.players th.num {
   background: rgba(220, 160, 40, 0.18);
   color: #c58a13;
 }
+.source-parallel {
+  background: rgba(40, 160, 120, 0.16);
+  color: #1f8f6a;
+}
 .chip {
   display: inline-flex;
   align-items: center;
