@@ -211,7 +211,11 @@ class ProjectionModel(BaseModel):
     scoring_version: str | None = None
     stat_source: str | None = Field(
         default=None,
-        description="History source: 'current_season' or 'prior_season' (cross-season)",
+        description=(
+            "History source: 'current_season', 'prior_season' (cross-season) or "
+            "'parallel_league' (a cup player whose only play this season is in "
+            "his national league)"
+        ),
     )
     has_history: bool | None = Field(
         default=None, description="Whether the projection is backed by real history"

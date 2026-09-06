@@ -1094,6 +1094,7 @@ def run_backtest(
     captain_risk_weight: float | None = None,
     horizon_tours: int = 1,
     horizon_decay: float | None = None,
+    parallel_sources: bool = True,
 ) -> dict[str, Any]:
     """Replay a season tour by tour and compare the models.
 
@@ -1179,6 +1180,7 @@ def run_backtest(
             run_id=resolved_run_id,
             tour_ref=tour.fantasy_tour_id,
             now=generated_at,
+            parallel_sources=parallel_sources,
         )
         forecast = forecast_from_features(
             features, now=generated_at, training_pool=pool, include_learned=learned
@@ -1195,6 +1197,7 @@ def run_backtest(
                     tour_ref=ahead.fantasy_tour_id,
                     now=generated_at,
                     cutoff_override=this_cutoff,
+                    parallel_sources=parallel_sources,
                 )
                 future_forecasts.append(
                     forecast_from_features(
@@ -1469,6 +1472,7 @@ def run_backtest(
             "captain_risk_weight": captain_risk_weight,
             "horizon_tours": horizon_tours,
             "horizon_decay": horizon_decay,
+            "parallel_sources": parallel_sources,
         },
         "versions": {
             "backtest": BACKTEST_VERSION,

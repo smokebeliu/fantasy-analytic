@@ -45,6 +45,7 @@ from sqlalchemy.orm import sessionmaker
 from .db import session_scope
 from .db.models import (
     ClubMatchStats,
+    Competition,
     FantasyPlayerSnapshot,
     FantasyTour,
     Match,
@@ -100,7 +101,18 @@ from .db.models import (
 #   anchors can be the average of the player's *price bucket* within his role
 #   (``PRICE_BUCKET_PRIORS``) and ownership can lift a low appearance share
 #   (``OWNERSHIP_APPEARANCE_WEIGHT``).
-FEATURE_VERSION = "1.7.0"
+# 1.8.0 (step 24) sources a European cup from the national leagues its clubs
+#   are playing in at the same time. Sports.ru's stat identities are global,
+#   so a Champions League player is the same ``players`` row as his La Liga
+#   self; his league appearances (and his club's league results) enter the
+#   history as *parallel layers* at ``PARALLEL_WEIGHT``, cut at the target
+#   tour's deadline like everything else, with the league's own last season
+#   behind them. Goals across leagues are made comparable by
+#   ``LEAGUE_STRENGTH``. An injury known only to the league snapshot marks the
+#   player out in the cup too; a red card stays inside the competition it was
+#   shown in. ``stat_source`` gains ``parallel_league`` and every row lists
+#   its ``sources``.
+FEATURE_VERSION = "1.8.0"
 
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
 
@@ -114,6 +126,65 @@ ROLLING_WINDOWS = (3, 5, 10)
 # now dominates the blend even though last season is still contributing.
 STAT_SOURCE_CURRENT = "current_season"
 STAT_SOURCE_PRIOR = "prior_season"
+# A player who has not played in the target competition yet but has played
+# in his national league this season (step 24).
+STAT_SOURCE_PARALLEL = "parallel_league"
+
+# Parallel sourcing (step 24). A European cup is forecast from the national
+# leagues its clubs play in at the same time; only the competitions listed
+# here are *targets* of that sourcing, so a domestic league's forecast (and its
+# backtests) is untouched by a cup being imported next to it.
+PARALLEL_TARGET_SLUGS = frozenset({"champions-league", "europa-league"})
+
+# Competitions that are never a parallel *source*: cups, whose own rows are
+# the target, and national-team tournaments, whose "clubs" are countries.
+# Everything else Sports.ru catalogues is a domestic league.
+NON_LEAGUE_SLUGS = frozenset(
+    {
+        "champions-league",
+        "europa-league",
+        "world-cup",
+        "club-world-cup",
+        "european-championship",
+        "copa-america",
+        "africa-cup",
+        "nations-league",
+    }
+)
+
+# What one national-league observation is worth against one of the cup's own.
+# The cup's matches are the thing being predicted, so they always count in
+# full; the league is the same players against different opposition, and a
+# big club rotates differently in the two. Provisional until the Champions
+# League 2025/26 backtest fixes it.
+PARALLEL_WEIGHT = 0.7
+
+# How a league's goals translate into the cup's. A club scoring ``g`` per
+# match in its league is expected to score ``g x LEAGUE_STRENGTH`` against
+# the cup's field and to concede ``c / LEAGUE_STRENGTH``; the same factor
+# scales a player's goals and assists (and his saves the other way). Every
+# league is below one because the cup's field is stronger than the average
+# domestic opponent; the spread between leagues follows the UEFA coefficient
+# ranking. Provisional starting values, to be fitted on the 2025/26 backtest.
+LEAGUE_STRENGTH: dict[str, float] = {
+    "england": 0.92,
+    "spain": 0.90,
+    "italy": 0.88,
+    "germany": 0.88,
+    "france": 0.84,
+    "portugal": 0.78,
+    "netherlands": 0.76,
+    "turkey": 0.72,
+    "russia": 0.72,
+    "belarus": 0.60,
+    "kazakhstan": 0.58,
+    "championship": 0.66,
+    "eliteserien": 0.64,
+    "allsvenskan": 0.64,
+    "brazil": 0.80,
+    "argentina": 0.78,
+}
+DEFAULT_LEAGUE_STRENGTH = 0.66
 
 # Documented priors applied to a newcomer that has no history in either season
 # (step 14). Offensive/defensive per-90 rates default to the league's role
@@ -431,11 +502,131 @@ class PriorContext:
     club_matches: dict[int, list[ClubMatch]]
     by_player_id: dict[int, PriorPlayer]
     role_priors: dict[str, RolePrior]
+    season_name: str = ""
+
+
+@dataclass(frozen=True)
+class HistoryLayer:
+    """One extra slice of a player's (or club's) history from another competition.
+
+    A layer is what one national-league season says about a cup row: the
+    player's appearances there, his club's results there, how much each
+    observation counts (``weight``), how the league's goals translate into the
+    cup's (``factor``) and whether it is the league's current season or the one
+    before it (``is_prior``, which then decays like the cup's own last season).
+    """
+
+    source: str
+    season_name: str
+    appearances: list[Appearance]
+    club_matches: list[ClubMatch]
+    weight: float
+    factor: float
+    is_prior: bool
+
+
+@dataclass(frozen=True)
+class ParallelContext:
+    """A national league running alongside the target cup season (step 24)."""
+
+    run_id: int
+    season_id: int
+    competition_slug: str
+    competition_name: str
+    season_name: str
+    factor: float
+    appearances: dict[int, list[Appearance]]
+    club_matches: dict[int, list[ClubMatch]]
+    by_player_id: dict[int, PriorPlayer]
+    snapshots: dict[int, dict[str, Any]]
+    prior: PriorContext | None
 
 
 # ---------------------------------------------------------------------------
 # Pure helpers (unit-tested in isolation).
 # ---------------------------------------------------------------------------
+
+
+def league_strength(slug: str | None) -> float:
+    """The goal-translation factor of a league (see :data:`LEAGUE_STRENGTH`)."""
+    if slug is None:
+        return DEFAULT_LEAGUE_STRENGTH
+    return float(LEAGUE_STRENGTH.get(slug, DEFAULT_LEAGUE_STRENGTH))
+
+
+def scale_club_match(match: ClubMatch, factor: float) -> ClubMatch:
+    """A league result expressed in the cup's goals: scored x factor, conceded / factor."""
+    if factor == 1.0 or factor <= 0:
+        return match
+    return ClubMatch(
+        match_id=match.match_id,
+        scheduled_at=match.scheduled_at,
+        is_home=match.is_home,
+        goals_scored=round(match.goals_scored * factor, 4),
+        goals_conceded=round(match.goals_conceded / factor, 4),
+    )
+
+
+def parallel_season_overlaps(
+    starts_at: datetime | None,
+    ends_at: datetime | None,
+    *,
+    target_starts_at: datetime | None,
+    cutoff: datetime,
+) -> bool:
+    """True when a league season runs alongside the target one at the cutoff.
+
+    A season that has not started by the cutoff is the future; one that ended
+    before the target season began is last year's, which the league's own
+    prior-season mechanism covers. Unknown dates are taken as overlapping.
+    """
+    if starts_at is not None and starts_at > cutoff:
+        return False
+    if ends_at is not None and target_starts_at is not None and ends_at < target_starts_at:
+        return False
+    return True
+
+
+def _informative_status(snapshot: dict[str, Any] | None) -> bool:
+    """Whether a snapshot status says anything (out or doubtful) about playing."""
+    if not snapshot:
+        return False
+    key = (snapshot.get("availability_status") or "").upper()
+    return key in UNAVAILABLE_STATUSES or key in QUESTIONABLE_STATUSES
+
+
+def merge_availability(
+    own: dict[str, Any] | None,
+    parallel: Sequence[tuple[str, dict[str, Any] | None]],
+) -> dict[str, Any] | None:
+    """Let a league snapshot mark a player out when the cup's does not.
+
+    The cup snapshot says ``UNKNOWN`` about everyone before its first tour;
+    the league snapshot, refreshed nightly, knows who is injured. An
+    informative status on the cup's own snapshot always wins; otherwise the
+    first league that reports the player out or doubtful lends its status (and
+    its description, which may carry the return date). Price, ownership and
+    form always stay the cup's own.
+    """
+    if _informative_status(own):
+        return own
+    for slug, snapshot in parallel:
+        if _informative_status(snapshot):
+            merged = dict(
+                own
+                or {
+                    "availability_status": None,
+                    "status_description": None,
+                    "price": None,
+                    "selected_by": None,
+                    "form": None,
+                }
+            )
+            merged["availability_status"] = snapshot["availability_status"]
+            merged["status_description"] = snapshot.get("status_description")
+            merged["availability_source"] = slug
+            return merged
+    return own
 
 
 def recent_before_cutoff(
@@ -867,9 +1058,15 @@ FEATURE_DICTIONARY: tuple[dict[str, str], ...] = (
     {"name": "club_defense", "description": "Club goals conceded per match at the fixture venue; league mean when no venue matches at all."},
     {"name": "opponent_attack", "description": "Opponent goals scored per match at their fixture venue; league mean fallback."},
     {"name": "opponent_defense", "description": "Opponent goals conceded per match at their fixture venue; league mean fallback."},
-    {"name": "has_history", "description": "True when the player has at least one appearance in either season."},
-    {"name": "stat_source", "description": "'current_season' once the player has played in the target season, otherwise 'prior_season'."},
-    {"name": "is_newcomer", "description": "True when the player has no appearance in either season and is scored from documented role priors."},
+    {"name": "has_history", "description": "True when the player has at least one appearance in either season, in the target competition or a parallel league."},
+    {"name": "stat_source", "description": "'current_season' once the player has played in the target season; 'parallel_league' when his only play this season is in his national league (a cup target, step 24); otherwise 'prior_season'."},
+    {"name": "is_newcomer", "description": "True when the player has no appearance in any season or source and is scored from documented role priors."},
+    {"name": "parallel_appearances", "description": "Appearances this season in the parallel leagues before the cutoff, unweighted (0 outside a cup target)."},
+    {"name": "parallel_club_matches", "description": "The player's league club's matches this season before the cutoff, unweighted."},
+    {"name": "parallel_weight", "description": "What one parallel-league observation is worth against one of the target competition's own (PARALLEL_WEIGHT); 0 when there is no parallel layer."},
+    {"name": "league_factor", "description": "The LEAGUE_STRENGTH factor the parallel league's goals were translated by; 1.0 when there is none."},
+    {"name": "availability_source", "description": "null when availability_status is the target season's own; the slug of the parallel league whose snapshot lent an out/doubtful status."},
+    {"name": "sources", "description": "Every layer of the row's history: the target competition's current and prior season, then each parallel league's, with appearances, club matches, the weight they entered at and the goal factor."},
 )
 
 
@@ -1406,6 +1603,7 @@ def _league_role_priors(
     *,
     cutoff: datetime,
     exclude_match_ids: frozenset[int],
+    parallel: Sequence[ParallelContext] = (),
 ) -> dict[str, RolePrior]:
     """Role priors pooled from both seasons, leakage-free.
 
@@ -1414,6 +1612,12 @@ def _league_role_priors(
     is, so the prior can never carry the tour being predicted. Both seasons are
     pooled unweighted: a league average built from thousands of minutes is
     stable, and the point of it is to be a stable anchor.
+
+    The parallel leagues of a cup (step 24) are pooled in the same way, cut at
+    the same cutoff: before its first tour a cup has no appearances of its own
+    to anchor anything to, and the leagues its clubs come from are the closest
+    population there is. Their goals are not translated by the league factor
+    here — an anchor built from seven leagues is a broad average already.
     """
     filtered = {
         ps_id: played_before_cutoff(
@@ -1428,6 +1632,24 @@ def _league_role_priors(
             for player in prior.by_player_id.values()
         }
         totals = _role_totals(prior.appearances, prior_roles, totals)
+    for context in parallel:
+        roles = {
+            player.player_season_id: player.role
+            for player in context.by_player_id.values()
+        }
+        pooled = {
+            ps_id: played_before_cutoff(
+                items, cutoff, exclude_match_ids=exclude_match_ids
+            )
+            for ps_id, items in context.appearances.items()
+        }
+        totals = _role_totals(pooled, roles, totals)
+        if context.prior is not None:
+            prior_roles = {
+                player.player_season_id: player.role
+                for player in context.prior.by_player_id.values()
+            }
+            totals = _role_totals(context.prior.appearances, prior_roles, totals)
     return _priors_from_totals(totals)
 
 
@@ -1512,6 +1734,7 @@ def _load_prior_context(session, prior_run, cutoff: datetime) -> PriorContext:
             role=player["role"],
         )
     role_priors = _role_priors(appearances, role_by_ps)
+    prior_season = session.get(Season, season_id)
     return PriorContext(
         run_id=run_id,
         season_id=season_id,
@@ -1519,6 +1742,7 @@ def _load_prior_context(session, prior_run, cutoff: datetime) -> PriorContext:
         club_matches=club_matches,
         by_player_id=by_player_id,
         role_priors=role_priors,
+        season_name=prior_season.name if prior_season is not None else "",
     )
 
 
@@ -1577,6 +1801,234 @@ def _resolve_history_source(
             else None
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Parallel sourcing (step 24): the national leagues behind a European cup.
+# ---------------------------------------------------------------------------
+
+
+def resolve_parallel_runs(session, season: Season, competition, cutoff: datetime):
+    """The active runs of the leagues running alongside a cup season.
+
+    Returns ``(run, season, competition)`` triples, one per league, ordered as
+    the catalogue orders the leagues. Empty unless the target competition is
+    one of :data:`PARALLEL_TARGET_SLUGS`, so a domestic league never sources
+    from anything but itself. A league qualifies through
+    :func:`parallel_season_overlaps`; when two of its seasons both do (the
+    dates are unknown, say) the later-starting one is taken.
+    """
+    from .db.models import Competition, IngestionRun
+
+    if competition is None or competition.slug not in PARALLEL_TARGET_SLUGS:
+        return []
+    rows = session.execute(
+        select(IngestionRun, Season, Competition)
+        .join(Season, IngestionRun.season_id == Season.id)
+        .join(Competition, Season.competition_id == Competition.id)
+        .where(
+            IngestionRun.is_active.is_(True),
+            Season.competition_id != season.competition_id,
+            Competition.slug.not_in(NON_LEAGUE_SLUGS),
+        )
+    ).all()
+    chosen: dict[int, tuple[Any, Season, Any]] = {}
+    for run, other, league in rows:
+        if not parallel_season_overlaps(
+            other.starts_at,
+            other.ends_at,
+            target_starts_at=season.starts_at,
+            cutoff=cutoff,
+        ):
+            continue
+        best = chosen.get(league.id)
+        if best is None or (other.starts_at or datetime.min.replace(tzinfo=UTC)) > (
+            best[1].starts_at or datetime.min.replace(tzinfo=UTC)
+        ):
+            chosen[league.id] = (run, other, league)
+    return sorted(chosen.values(), key=lambda item: (item[2].sort_order, item[2].slug))
+
+
+def _load_parallel_contexts(
+    session, season: Season | None, competition, cutoff: datetime
+) -> list[ParallelContext]:
+    """Load every parallel league of the target season, with its own last season.
+
+    Everything is keyed by the cross-competition identities (``player_id``,
+    ``club_id``) so a cup row can find its league half. Club results are cut
+    at the cutoff on load; appearances are cut per row, like the cup's own.
+    """
+    if season is None:
+        return []
+    contexts: list[ParallelContext] = []
+    for run, other, league in resolve_parallel_runs(session, season, competition, cutoff):
+        players = _load_players(session, other.id)
+        season_clubs = _load_season_clubs(session, other.id)
+        by_player_id: dict[int, PriorPlayer] = {}
+        for player in players:
+            season_club_id = player["current_season_club_id"]
+            club_info = season_clubs.get(season_club_id) if season_club_id else None
+            by_player_id[player["player_id"]] = PriorPlayer(
+                player_season_id=player["player_season_id"],
+                club_id=club_info["club_id"] if club_info else None,
+                role=player["role"],
+            )
+        prior_run = resolve_prior_run(session, other, require_earlier=True)
+        contexts.append(
+            ParallelContext(
+                run_id=run.id,
+                season_id=other.id,
+                competition_slug=league.slug,
+                competition_name=league.name,
+                season_name=other.name,
+                factor=league_strength(league.slug),
+                appearances=load_appearances(session, other.id, run.id),
+                club_matches=_load_club_matches(session, other.id, run.id, cutoff),
+                by_player_id=by_player_id,
+                snapshots=_load_snapshots(session, run.id),
+                prior=(
+                    _load_prior_context(session, prior_run, cutoff)
+                    if prior_run is not None
+                    else None
+                ),
+            )
+        )
+    return contexts
+
+
+def parallel_layers_for_player(
+    player_id: int,
+    contexts: Sequence[ParallelContext],
+    *,
+    club_id: int | None = None,
+) -> list[HistoryLayer]:
+    """A player's league history, this season and last, as layers.
+
+    The current-season layer is kept even when the player has not played in
+    the league yet: his club's matches without him are evidence, exactly as the
+    cup's own club matches are — but only when the league registers him with
+    the same club (``club_id``) the cup does. A player the league still lists
+    at the club he left in the window keeps his own appearances and loses
+    that club's matches, which are no longer evidence about him. The
+    prior-season layer needs appearances to mean anything, as the cup's own
+    prior does.
+    """
+    layers: list[HistoryLayer] = []
+    for context in contexts:
+        current = context.by_player_id.get(player_id)
+        if current is not None:
+            appearances = context.appearances.get(current.player_season_id, [])
+            same_club = club_id is None or current.club_id == club_id
+            club_matches = (
+                context.club_matches.get(current.club_id, [])
+                if current.club_id is not None and same_club
+                else []
+            )
+            if appearances or club_matches:
+                layers.append(
+                    HistoryLayer(
+                        source=context.competition_slug,
+                        season_name=context.season_name,
+                        appearances=appearances,
+                        club_matches=club_matches,
+                        weight=PARALLEL_WEIGHT,
+                        factor=context.factor,
+                        is_prior=False,
+                    )
+                )
+        if context.prior is not None:
+            prior_player = context.prior.by_player_id.get(player_id)
+            if prior_player is None:
+                continue
+            appearances = context.prior.appearances.get(prior_player.player_season_id, [])
+            if not appearances:
+                continue
+            layers.append(
+                HistoryLayer(
+                    source=context.competition_slug,
+                    season_name=_season_name_of(context.prior),
+                    appearances=appearances,
+                    club_matches=(
+                        context.prior.club_matches.get(prior_player.club_id, [])
+                        if prior_player.club_id is not None
+                        else []
+                    ),
+                    weight=PARALLEL_WEIGHT,
+                    factor=context.factor,
+                    is_prior=True,
+                )
+            )
+    return layers
+
+
+def _season_name_of(prior: PriorContext) -> str:
+    return prior.season_name or f"season {prior.season_id}"
+
+
+def parallel_snapshots_for_player(
+    player_id: int, contexts: Sequence[ParallelContext]
+) -> list[tuple[str, dict[str, Any] | None]]:
+    """The league snapshots of a player, for :func:`merge_availability`."""
+    found: list[tuple[str, dict[str, Any] | None]] = []
+    for context in contexts:
+        current = context.by_player_id.get(player_id)
+        if current is not None:
+            found.append(
+                (context.competition_slug, context.snapshots.get(current.player_season_id))
+            )
+    return found
+
+
+def parallel_club_layers(
+    contexts: Sequence[ParallelContext], club_ids: Sequence[int]
+) -> dict[int, list[HistoryLayer]]:
+    """The league results of the cup's clubs, this season and last, as layers.
+
+    Only the clubs asked for are returned: the pool the strengths are shrunk
+    towards should be the cup's field, not every club of every league.
+    """
+    layers: dict[int, list[HistoryLayer]] = {}
+    for context in contexts:
+        for club_id in club_ids:
+            matches = context.club_matches.get(club_id)
+            if matches:
+                layers.setdefault(club_id, []).append(
+                    HistoryLayer(
+                        source=context.competition_slug,
+                        season_name=context.season_name,
+                        appearances=[],
+                        club_matches=matches,
+                        weight=PARALLEL_WEIGHT,
+                        factor=context.factor,
+                        is_prior=False,
+                    )
+                )
+            if context.prior is None:
+                continue
+            prior_matches = context.prior.club_matches.get(club_id)
+            if prior_matches:
+                layers.setdefault(club_id, []).append(
+                    HistoryLayer(
+                        source=context.competition_slug,
+                        season_name=_season_name_of(context.prior),
+                        appearances=[],
+                        club_matches=prior_matches,
+                        weight=PARALLEL_WEIGHT,
+                        factor=context.factor,
+                        is_prior=True,
+                    )
+                )
+    return layers
+
+
+def _scaled_totals(totals: dict[str, float], layer: HistoryLayer) -> dict[str, float]:
+    """A layer's event totals at its weight, with its goals in the cup's units."""
+    scaled = {key: float(value) * layer.weight for key, value in totals.items()}
+    scaled["goals"] *= layer.factor
+    scaled["assists"] *= layer.factor
+    if layer.factor > 0:
+        scaled["saves"] /= layer.factor
+    return scaled
 
 
 # ---------------------------------------------------------------------------
@@ -1705,6 +2157,7 @@ def _season_progress(club_matches: dict[int, list[ClubMatch]]) -> int:
 def _blended_club_matches(
     current: dict[int, list[ClubMatch]],
     prior: dict[int, list[ClubMatch]],
+    parallel: dict[int, list[HistoryLayer]] | None = None,
 ) -> dict[int, list[tuple[ClubMatch, float]]]:
     """Weigh each club's matches by the season they belong to.
 
@@ -1714,18 +2167,41 @@ def _blended_club_matches(
     admitted for at most :data:`STRENGTH_PRIOR_WINDOW` matches' worth of
     evidence (:func:`rate_prior_scale`), so a finished season cannot outvote
     the new one merely by being longer.
+
+    ``parallel`` (step 24) adds a cup club's league results: the league's
+    current season counts as fresh evidence at the layer's weight, expressed in
+    the cup's goals through the layer's factor, and pushes the priors down the
+    same way the cup's own matches do; the league's last season is one more
+    prior, capped and decayed like the cup's own.
     """
+    parallel = parallel or {}
     blended: dict[int, list[tuple[ClubMatch, float]]] = {}
+    fresh: dict[int, float] = {
+        club_id: float(len(matches)) for club_id, matches in current.items()
+    }
     for club_id, matches in current.items():
         ordered = sorted(matches, key=lambda m: m.scheduled_at, reverse=True)
         blended[club_id] = [
             (match, round(CLUB_RECENCY_DECAY**index, 6))
             for index, match in enumerate(ordered)
         ]
+    for club_id, layers in parallel.items():
+        for layer in layers:
+            if layer.is_prior:
+                continue
+            ordered = sorted(layer.club_matches, key=lambda m: m.scheduled_at, reverse=True)
+            fresh[club_id] = fresh.get(club_id, 0.0) + layer.weight * len(ordered)
+            blended.setdefault(club_id, []).extend(
+                (
+                    scale_club_match(match, layer.factor),
+                    round(layer.weight * CLUB_RECENCY_DECAY**index, 6),
+                )
+                for index, match in enumerate(ordered)
+            )
     for club_id, matches in prior.items():
         weight = rate_prior_scale(
             len(matches),
-            prior_season_weight(len(current.get(club_id, []))),
+            prior_season_weight(fresh.get(club_id, 0.0)),
             window=STRENGTH_PRIOR_WINDOW,
         )
         if weight <= 0:
@@ -1733,6 +2209,21 @@ def _blended_club_matches(
         blended.setdefault(club_id, []).extend(
             (match, weight) for match in matches
         )
+    for club_id, layers in parallel.items():
+        for layer in layers:
+            if not layer.is_prior:
+                continue
+            weight = layer.weight * rate_prior_scale(
+                len(layer.club_matches),
+                prior_season_weight(fresh.get(club_id, 0.0)),
+                window=STRENGTH_PRIOR_WINDOW,
+            )
+            if weight <= 0:
+                continue
+            blended.setdefault(club_id, []).extend(
+                (scale_club_match(match, layer.factor), round(weight, 6))
+                for match in layer.club_matches
+            )
     return blended
 
 
@@ -1877,8 +2368,16 @@ def _build_row(
     prior_available: bool = False,
     club_matches_by_club: dict[int, list[ClubMatch]] | None = None,
     bucket_prior: RolePrior | None = None,
+    parallel_layers: Sequence[HistoryLayer] = (),
 ) -> dict[str, Any]:
     """Build one player's feature row from both seasons of his history.
+
+    ``parallel_layers`` (step 24) are the player's national-league history
+    when the target is a European cup: the league's current season counts as
+    fresh evidence at the layer's weight, the league's last season joins the
+    cup's own last season as the prior, and both are cut at the cutoff like
+    everything else. Red cards are not read from them: a ban is served in the
+    competition it was earned in.
 
     The two seasons are kept apart until the very end and then blended, because
     they answer the same questions with different authority: what happened this
@@ -1925,12 +2424,34 @@ def _build_row(
     )
     prior_clubs = prior_club_matches or []
 
+    # The parallel leagues (step 24), each cut at the cutoff: the league's
+    # current season is fresh evidence, its last season is one more prior.
+    par_current: list[tuple[HistoryLayer, list[Appearance], list[ClubMatch]]] = []
+    par_prior: list[tuple[HistoryLayer, list[Appearance], list[ClubMatch]]] = []
+    for layer in parallel_layers:
+        played = played_before_cutoff(
+            layer.appearances, cutoff, exclude_match_ids=target_match_ids
+        )
+        clubs = sorted(
+            (
+                match
+                for match in layer.club_matches
+                if match.scheduled_at < cutoff
+                and match.match_id not in target_match_ids
+            ),
+            key=lambda m: m.scheduled_at,
+            reverse=True,
+        )
+        (par_prior if layer.is_prior else par_current).append((layer, played, clubs))
+    par_current_played = [item for _, played, _ in par_current for item in played]
+    par_prior_played = [item for _, played, _ in par_prior for item in played]
+
     # A newcomer is a player with no appearance in either season *before the
     # cutoff*. Judging it on the raw lists instead made a backtest's opening
     # tour treat every player who would play later in the season as a known
     # quantity with an empty history, and reserved the newcomer prior for the
     # handful who never play at all — which is exactly backwards.
-    if not current and not prior:
+    if not current and not prior and not par_current_played and not par_prior_played:
         is_newcomer = True
         newcomer_prior = newcomer_prior or role_prior
 
@@ -1938,8 +2459,24 @@ def _build_row(
     # matches — a signing who has not played yet keeps last season's profile
     # intact — while whether he features is judged on his club's, because eight
     # matches spent on the bench are exactly the evidence that matters there.
-    rate_prior_weight = prior_season_weight(len(current))
-    share_prior_weight = prior_season_weight(len(current_clubs))
+    # A league match counts towards "this season" at the layer's weight.
+    fresh_matches = len(current) + sum(
+        layer.weight * len(played) for layer, played, _ in par_current
+    )
+    fresh_club_matches = len(current_clubs) + sum(
+        layer.weight * len(clubs) for layer, _, clubs in par_current
+    )
+    rate_prior_weight = prior_season_weight(fresh_matches)
+    share_prior_weight = prior_season_weight(fresh_club_matches)
+
+    if current:
+        stat_source = STAT_SOURCE_CURRENT
+    elif par_current_played:
+        stat_source = STAT_SOURCE_PARALLEL
+    elif prior or par_prior_played or (is_newcomer and prior_available):
+        stat_source = STAT_SOURCE_PRIOR
+    else:
+        stat_source = STAT_SOURCE_CURRENT
 
     row: dict[str, Any] = {
         "feature_version": FEATURE_VERSION,
@@ -1955,13 +2492,11 @@ def _build_row(
         # blend". Once the player has kicked a ball this season it is his own
         # season being reported, however much last season still weighs. A
         # newcomer scored from the priors carries the label too, but only
-        # when there is a last season for the priors to have come from.
-        "stat_source": (
-            STAT_SOURCE_PRIOR
-            if not current and (prior or (is_newcomer and prior_available))
-            else STAT_SOURCE_CURRENT
-        ),
-        "prior_season_weight": rate_prior_weight if prior else 0.0,
+        # when there is a last season for the priors to have come from. A
+        # player whose only play this season is in his national league is
+        # labelled by that league.
+        "stat_source": stat_source,
+        "prior_season_weight": rate_prior_weight if (prior or par_prior_played) else 0.0,
         "is_newcomer": is_newcomer,
         # Every match of the tour, plus the first one flattened onto the row so
         # a consumer that only ever expected one keeps working.
@@ -1977,7 +2512,18 @@ def _build_row(
     # Rolling form windows run across the season boundary: while this season is
     # short the window is topped up from last one, and every new appearance
     # pushes one of last season's out, so the old numbers fade on their own.
-    blended_history = [*current, *prior]
+    # The parallel leagues' matches take their place in the windows by date
+    # among the cup's own; last seasons come after, cup first.
+    fresh_history = (
+        sorted(
+            [*current, *par_current_played],
+            key=lambda a: (a.scheduled_at, a.match_id),
+            reverse=True,
+        )
+        if par_current_played
+        else current
+    )
+    blended_history = [*fresh_history, *prior, *par_prior_played]
     for window_size in ROLLING_WINDOWS:
         stats = _window_stats(blended_history[:window_size])
         row[f"appearances_{window_size}"] = stats["appearances"]
@@ -1992,11 +2538,31 @@ def _build_row(
     # fractional early in a season.
     now_totals = _event_totals(current)
     was_totals = _event_totals(prior)
-    prior_scale = rate_prior_scale(was_totals["appearances"], rate_prior_weight)
+    # The league layers at their weight, their goals in the cup's units. The
+    # prior window caps the cup's and the leagues' last seasons together.
+    par_now_totals = [
+        _scaled_totals(_event_totals(played), layer) for layer, played, _ in par_current
+    ]
+    par_was_totals = [
+        _scaled_totals(_event_totals(played), layer) for layer, played, _ in par_prior
+    ]
+    prior_pool_appearances = was_totals["appearances"] + sum(
+        totals["appearances"] for totals in par_was_totals
+    )
+    prior_scale = rate_prior_scale(prior_pool_appearances, rate_prior_weight)
     row["prior_season_scale"] = prior_scale
 
+    def _layered(
+        key: str, own: dict[str, float], parallel: list[dict[str, float]]
+    ) -> float:
+        return (
+            own[key]
+            + sum(totals[key] for totals in parallel)
+            + prior_scale * (was_totals[key] + sum(totals[key] for totals in par_was_totals))
+        )
+
     def _blended(key: str) -> float:
-        return now_totals[key] + prior_scale * was_totals[key]
+        return _layered(key, now_totals, par_now_totals)
 
     total_minutes = _blended("minutes")
     total_points = _blended("points")
@@ -2013,18 +2579,22 @@ def _build_row(
     # either (a role nobody has played yet) the target is zero, which is the
     # pre-1.6.0 behaviour of trusting the sample as it stands.
     recent_totals = _event_totals(current, CURRENT_RATE_DECAY)
-    rate_minutes = recent_totals["minutes"] + prior_scale * was_totals["minutes"]
+    par_recent_totals = [
+        _scaled_totals(_event_totals(played, CURRENT_RATE_DECAY), layer)
+        for layer, played, _ in par_current
+    ]
+    rate_minutes = _layered("minutes", recent_totals, par_recent_totals)
     anchor = bucket_prior or role_prior or RolePrior(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     rare_anchor = role_prior or anchor
     for key in RATE_KEYS:
         row[f"{key}_per90"] = shrunk_per90(
-            recent_totals[key] + prior_scale * was_totals[key],
+            _layered(key, recent_totals, par_recent_totals),
             rate_minutes,
             anchor.rate(key),
         )
     for key in RARE_RATE_KEYS:
         row[f"{key}_per90"] = shrunk_per90(
-            recent_totals[key] + prior_scale * was_totals[key],
+            _layered(key, recent_totals, par_recent_totals),
             rate_minutes,
             rare_anchor.rate(key),
             pseudo_matches=RARE_EVENT_SHRINK_MATCHES,
@@ -2046,31 +2616,99 @@ def _build_row(
     share_now_weight, carry_weight = share_blend_weights(
         len(current_clubs), share_prior_weight
     )
-    share_prior_weight_scaled = carry_weight if prior_clubs else 0.0
+    # The league layers vote the same way: each current-season layer with its
+    # own capped match count at the layer's weight, the last seasons pooled
+    # into one prior vote by how much each of them saw.
+    par_now_shares = [
+        (
+            layer,
+            _club_participation(
+                clubs, {a.match_id: a.minutes for a in played}, CURRENT_RECENCY_DECAY
+            ),
+        )
+        for layer, played, clubs in par_current
+    ]
+    par_was_shares = [
+        (
+            layer,
+            _club_participation(
+                clubs, {a.match_id: a.minutes for a in played}, PRIOR_RECENCY_DECAY
+            ),
+        )
+        for layer, played, clubs in par_prior
+    ]
+    any_prior_clubs = bool(prior_clubs) or any(
+        share["matches"] for _, share in par_was_shares
+    )
+    share_prior_weight_scaled = carry_weight if any_prior_clubs else 0.0
     row["club_matches_before"] = now_share["matches"]
     row["prior_club_matches"] = was_share["matches"]
-    appearance_share = blend(
-        now_share["appearance_share"],
-        share_now_weight,
-        was_share["appearance_share"],
-        share_prior_weight_scaled,
-    )
-    start_share = blend(
-        now_share["start_share"],
-        share_now_weight,
-        was_share["start_share"],
-        share_prior_weight_scaled,
-    )
-    ninety_share = blend(
-        now_share["ninety_share"],
-        share_now_weight,
-        was_share["ninety_share"],
-        share_prior_weight_scaled,
-    )
+
+    def _share(key: str) -> float:
+        votes = [(now_share[key], share_now_weight)]
+        votes += [
+            (share[key], float(min(share["matches"], SHARE_BLEND_WINDOW)) * layer.weight)
+            for layer, share in par_now_shares
+        ]
+        prior_value, _ = _weighted_mean(
+            [(was_share[key], float(was_share["matches"]))]
+            + [
+                (share[key], float(share["matches"]) * layer.weight)
+                for layer, share in par_was_shares
+            ]
+        )
+        votes.append((prior_value, share_prior_weight_scaled))
+        value, _ = _weighted_mean(votes)
+        return value
+
+    appearance_share = _share("appearance_share")
+    start_share = _share("start_share")
+    ninety_share = _share("ninety_share")
     row["appearance_share"] = round(appearance_share, 4)
     row["start_share"] = round(start_share, 4)
     row["ninety_share"] = round(ninety_share, 4)
     row["club_matches_available"] = len(current_clubs)
+    row["parallel_appearances"] = len(par_current_played)
+    row["parallel_club_matches"] = sum(len(clubs) for _, _, clubs in par_current)
+    row["parallel_weight"] = (
+        max(layer.weight for layer in parallel_layers) if parallel_layers else 0.0
+    )
+    row["league_factor"] = parallel_layers[0].factor if parallel_layers else 1.0
+    row["sources"] = [
+        {
+            "competition": None,
+            "season": None,
+            "kind": "own",
+            "prior": False,
+            "appearances": len(current),
+            "club_matches": len(current_clubs),
+            "weight": 1.0,
+            "factor": 1.0,
+        },
+        {
+            "competition": None,
+            "season": None,
+            "kind": "own",
+            "prior": True,
+            "appearances": len(prior),
+            "club_matches": len(prior_clubs),
+            "weight": round(prior_scale, 6),
+            "factor": 1.0,
+        },
+        *[
+            {
+                "competition": layer.source,
+                "season": layer.season_name,
+                "kind": "parallel",
+                "prior": layer.is_prior,
+                "appearances": len(played),
+                "club_matches": len(clubs),
+                "weight": round(layer.weight * (prior_scale if layer.is_prior else 1.0), 6),
+                "factor": layer.factor,
+            }
+            for layer, played, clubs in [*par_current, *par_prior]
+        ],
+    ]
 
     # Availability: the snapshot status covers injuries and published bans
     # (honouring an end date it may carry, and a "questionable" status as a
@@ -2097,6 +2735,9 @@ def _build_row(
     is_available = status_ok and not red_card_suspension
     row["availability_status"] = status
     row["status_description"] = description
+    # Which snapshot the status came from: ``None`` for the season's own, a
+    # league slug when a parallel league's snapshot lent it (step 24).
+    row["availability_source"] = snapshot.get("availability_source") if snapshot else None
     row["price"] = snapshot["price"] if snapshot else None
     row["selected_by"] = snapshot["selected_by"] if snapshot else None
     row["form"] = snapshot["form"] if snapshot else None
@@ -2124,12 +2765,30 @@ def _build_row(
     # Minutes when he does play are a *current* fact — a squad player promoted
     # to the eleven in October plays 90 minutes now whatever he averaged in
     # August — so they are recency-weighted the same way the share is.
-    mean_minutes = blend(
-        decayed_mean([a.minutes for a in current], CURRENT_RECENCY_DECAY),
-        share_now_weight if current else 0.0,
-        _mean([a.minutes for a in prior]),
-        carry_weight if prior else 0.0,
+    minute_votes = [
+        (
+            decayed_mean([a.minutes for a in current], CURRENT_RECENCY_DECAY),
+            share_now_weight if current else 0.0,
+        )
+    ]
+    minute_votes += [
+        (
+            decayed_mean([a.minutes for a in played], CURRENT_RECENCY_DECAY),
+            float(min(len(clubs), SHARE_BLEND_WINDOW)) * layer.weight if played else 0.0,
+        )
+        for layer, played, clubs in par_current
+    ]
+    prior_minutes, _ = _weighted_mean(
+        [(_mean([a.minutes for a in prior]), float(len(prior)))]
+        + [
+            (_mean([a.minutes for a in played]), float(len(played)) * layer.weight)
+            for layer, played, _ in par_prior
+        ]
     )
+    minute_votes.append(
+        (prior_minutes, carry_weight if (prior or par_prior_played) else 0.0)
+    )
+    mean_minutes, _ = _weighted_mean(minute_votes)
     row["expected_minutes"] = round(p_appearance * mean_minutes, 2)
 
     # Rest days since the club's previous match of *this* season. Before the
@@ -2155,7 +2814,7 @@ def _build_row(
             # like every other prior-season quantity, against every match the
             # club has actually played without him.
             prior_share=share_prior_weight * NEWCOMER_PRIOR_MATCHES,
-            current_share=float(len(current_clubs)),
+            current_share=float(fresh_club_matches),
             p_base=newcomer_appearance_prior(
                 player["role"], row["price"], role_median_price
             )
@@ -2228,6 +2887,7 @@ def build_feature_dataset(
     now: datetime | None = None,
     feature_version: str = FEATURE_VERSION,
     cutoff_override: datetime | None = None,
+    parallel_sources: bool = True,
 ) -> dict[str, Any]:
     """Build the leakage-free feature dataset for a target tour.
 
@@ -2239,6 +2899,9 @@ def build_feature_dataset(
     later): it is how a tour two weeks ahead is forecast from today's
     knowledge, for a transfer plan or a backtest with a horizon, without the
     tours in between leaking into its history.
+
+    ``parallel_sources`` switches the national leagues off for a cup target
+    (step 24), which is how a backtest measures what they are worth.
     """
     generated_at = now or datetime.now(UTC)
     with session_scope(session_factory) as session:
@@ -2277,8 +2940,27 @@ def build_feature_dataset(
         )
         cross_season = prior is not None and not club_matches
 
+        # Parallel sourcing (step 24): when the target is a European cup, the
+        # national leagues its clubs play in at the same time, each with its
+        # own last season, keyed by the cross-competition identities.
+        competition = (
+            session.get(Competition, season.competition_id)
+            if season is not None and season.competition_id is not None
+            else None
+        )
+        parallel = (
+            _load_parallel_contexts(session, season, competition, cutoff)
+            if parallel_sources
+            else []
+        )
+        season_club_ids = sorted({info["club_id"] for info in season_clubs.values()})
+
         strengths, league = _club_strengths(
-            _blended_club_matches(club_matches, prior.club_matches if prior else {})
+            _blended_club_matches(
+                club_matches,
+                prior.club_matches if prior else {},
+                parallel_club_layers(parallel, season_club_ids) if parallel else None,
+            )
         )
 
         # League-wide role averages from both seasons: the anchor every
@@ -2290,6 +2972,7 @@ def build_feature_dataset(
             prior,
             cutoff=cutoff,
             exclude_match_ids=target_match_ids,
+            parallel=parallel,
         )
 
         # The median price per position, the yardstick a newcomer's assumed
@@ -2353,6 +3036,9 @@ def build_feature_dataset(
         players_without_fixture = 0
         newcomers = 0
         prior_sourced = 0
+        parallel_sourced = 0
+        players_with_parallel = 0
+        availability_lent = 0
         double_fixture_rows = 0
         for player in players:
             season_club_id = player["current_season_club_id"]
@@ -2373,17 +3059,39 @@ def build_feature_dataset(
                 current_club_matches=club_matches,
                 prior=prior,
             )
-            if source["is_newcomer"]:
+            # The player's league half (step 24): his league appearances and
+            # club results, this season and last, and the league snapshot's
+            # word on whether he is fit.
+            layers = (
+                parallel_layers_for_player(
+                    player["player_id"], parallel, club_id=club_id
+                )
+                if parallel
+                else []
+            )
+            if layers:
+                players_with_parallel += 1
+            is_newcomer = source["is_newcomer"] and not any(
+                layer.appearances for layer in layers
+            )
+            if is_newcomer:
                 newcomers += 1
             # A newcomer is scored from the league's pooled role prior; the
             # prior-season-only one is the fallback for a role that nobody has
             # played yet this season.
             newcomer_prior = (
                 role_priors.get(player["role"]) or source["newcomer_prior"]
-                if source["is_newcomer"]
+                if is_newcomer
                 else None
             )
             snapshot = snapshots.get(player["player_season_id"])
+            if parallel:
+                merged = merge_availability(
+                    snapshot, parallel_snapshots_for_player(player["player_id"], parallel)
+                )
+                if merged is not snapshot:
+                    availability_lent += 1
+                snapshot = merged
             bucket_prior = None
             if bucket_priors and snapshot and snapshot["price"] is not None:
                 bucket = price_bucket(snapshot["price"], bucket_edges.get(player["role"], []))
@@ -2403,17 +3111,20 @@ def build_feature_dataset(
                 snapshot=snapshot,
                 strengths=strengths,
                 league=league,
-                is_newcomer=source["is_newcomer"],
+                is_newcomer=is_newcomer,
                 newcomer_prior=newcomer_prior,
                 role_prior=role_priors.get(player["role"]),
                 role_median_price=median_price_by_role.get(player["role"]),
-                prior_available=prior is not None,
+                prior_available=prior is not None or bool(layers),
                 club_matches_by_club=club_matches,
                 bucket_prior=bucket_prior,
+                parallel_layers=layers,
             )
             if row["stat_source"] == STAT_SOURCE_PRIOR:
                 prior_sourced += 1
-            if row["is_newcomer"] and not source["is_newcomer"]:
+            elif row["stat_source"] == STAT_SOURCE_PARALLEL:
+                parallel_sourced += 1
+            if row["is_newcomer"] and not is_newcomer:
                 newcomers += 1
             rows.append(row)
 
@@ -2438,12 +3149,29 @@ def build_feature_dataset(
             "cross_season": cross_season,
             "prior_run_id": prior.run_id if prior else None,
             "prior_season_weight": season_weight if prior else 0.0,
+            "parallel_runs": [
+                {
+                    "run_id": context.run_id,
+                    "season_id": context.season_id,
+                    "competition": context.competition_slug,
+                    "competition_name": context.competition_name,
+                    "season": context.season_name,
+                    "factor": context.factor,
+                    "weight": PARALLEL_WEIGHT,
+                    "prior_run_id": context.prior.run_id if context.prior else None,
+                    "prior_season": context.prior.season_name if context.prior else None,
+                }
+                for context in parallel
+            ],
             "counts": {
                 "rows": len(rows),
                 "fixtures": len(target_match_ids),
                 "players_without_fixture": players_without_fixture,
                 "clubs_with_history": len(strengths),
                 "prior_sourced": prior_sourced,
+                "parallel_sourced": parallel_sourced,
+                "players_with_parallel": players_with_parallel,
+                "availability_lent": availability_lent,
                 "newcomers": newcomers,
                 "clubs_with_fixture": len(fixtures_by_club),
                 "double_fixture_clubs": double_fixture_clubs,
@@ -2491,6 +3219,22 @@ __all__ = [
     "UNAVAILABLE_STATUSES",
     "STAT_SOURCE_CURRENT",
     "STAT_SOURCE_PRIOR",
+    "STAT_SOURCE_PARALLEL",
+    "PARALLEL_TARGET_SLUGS",
+    "NON_LEAGUE_SLUGS",
+    "PARALLEL_WEIGHT",
+    "LEAGUE_STRENGTH",
+    "DEFAULT_LEAGUE_STRENGTH",
+    "HistoryLayer",
+    "ParallelContext",
+    "league_strength",
+    "scale_club_match",
+    "parallel_season_overlaps",
+    "merge_availability",
+    "resolve_parallel_runs",
+    "parallel_layers_for_player",
+    "parallel_snapshots_for_player",
+    "parallel_club_layers",
     "NEWCOMER_P_APPEARANCE",
     "NEWCOMER_P_APPEARANCE_GOALKEEPER",
     "NEWCOMER_PRICE_SLOPE",
