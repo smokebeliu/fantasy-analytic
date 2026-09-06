@@ -127,7 +127,8 @@ export interface ProjectionModel {
   feature_version?: string | null;
   scoring_version?: string | null;
   // Cross-season provenance (step 14): where the underlying history came from
-  // and whether the projection is backed by any real history.
+  // and whether the projection is backed by any real history. Values:
+  // "current_season", "prior_season", "parallel_league" (step 24).
   stat_source?: string | null;
   has_history?: boolean | null;
   match_id?: number | null;

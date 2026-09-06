@@ -6,7 +6,7 @@ the `fantasy-features` CLI. It turns the *active* snapshot published by the
 quality gate (step 4) into a reproducible, leakage-free table with one row per
 player whose club plays a target tour.
 
-The current `feature_version` is `1.7.0`. Version `1.1.0` added the
+The current `feature_version` is `1.8.0`. Version `1.1.0` added the
 `saves_per90`, `recoveries_per90` and `yellows_per90` rates that the step-7
 event forecast consumes; version `1.2.0` added cross-season sourcing (step 14),
 the `stat_source` / `is_newcomer` labels and newcomer priors; version `1.3.0`
@@ -20,7 +20,10 @@ tour when a red card from a previous match has not yet been served; version
 the role average (step 22); version `1.7.0` (step 23) adds the full-match
 share, the rare-event rates, recency decay inside the current season,
 within-season transfers, the second match of a straight red, ban end dates and
-the pooled venue strengths — see [Step 23](#step-23-what-the-forecast-never-saw).
+the pooled venue strengths — see [Step 23](#step-23-what-the-forecast-never-saw);
+version `1.8.0` (step 24) sources a European cup from the national leagues its
+clubs play in at the same time — see
+[Step 24](#step-24-a-european-cup-from-the-national-leagues).
 
 ## Reproducibility and leakage guarantees
 
@@ -187,6 +190,54 @@ venue and opponent always come from the active season.
   only take from the end of the season, so what they measure there is an
   upper bound; both stayed off (see the step-23 card).
 
+## Step 24: a European cup from the national leagues
+
+A Champions League or Europa League season (`PARALLEL_TARGET_SLUGS`) has no
+history of its own before its first tour and only eight matches per club in
+its league phase, while its clubs are playing their national championships at
+the same time. Version `1.8.0` reads those championships as *parallel
+layers* of the same history:
+
+- **Identity is free.** Sports.ru's stat slugs are global, so a cup player is
+  the same `players` row as his league self and a cup club the same `clubs`
+  row. No name matching is involved; a player the leagues do not know (a
+  youth player, a club from a league Sports.ru has no fantasy for) stays a
+  newcomer on the position priors.
+- **Which leagues.** Every imported league (every catalogued competition
+  outside `NON_LEAGUE_SLUGS`) whose active season overlaps the target one at
+  the cutoff (`parallel_season_overlaps`): started by the cutoff, not ended
+  before the target season began. Each league brings its own previous season
+  as well, so on 8 September a player is not described by three matches.
+- **Weights.** The league's current season counts at `PARALLEL_WEIGHT` (0.7)
+  per observation against 1.0 for the cup's own; it also counts as "fresh"
+  evidence that decays both last seasons (`prior_season_weight` is judged on
+  own matches plus `0.7 x` league matches). The league's last season and the
+  cup's last season share one prior window (`RATE_PRIOR_WINDOW`), so a full
+  Bundesliga cannot outvote by being long.
+- **Goals are translated.** A league's goals enter the cup's numbers through
+  `LEAGUE_STRENGTH` (`league_factor` on the row): a player's goals and assists
+  `x factor`, his saves `/ factor`, his club's goals scored `x factor` and
+  conceded `/ factor`. Minutes, appearances, cards and recoveries are not
+  scaled. The factors are provisional constants ordered by the UEFA
+  coefficient ranking; a fixture with a stored 1x2 line is mostly corrected
+  by the odds anyway.
+- **Appearance shares** blend every layer by its capped match count
+  (`SHARE_BLEND_WINDOW`) at the layer's weight; a league club's matches count
+  only when the league registers the player with the club the cup does
+  (`club_id`), so a player who left in the window does not inherit his old
+  club's silence.
+- **Availability** is lent: an out or doubtful status on a league snapshot
+  marks the cup row out when the cup's own says nothing
+  (`availability_source` names the league). Red cards are not: a ban is
+  served in the competition it was earned in.
+- **Provenance.** `stat_source` becomes `parallel_league` when the player's
+  only play this season is in his league; `sources` lists every layer with
+  the counts and weights it entered at; the dataset reports `parallel_runs`
+  and counts `parallel_sourced` / `players_with_parallel` /
+  `availability_lent`. The `current_*` totals remain the cup's own, so the
+  backtest's leakage audit is unchanged. `fantasy-backtest --no-parallel`
+  measures the cup on its own matches only.
+
 ## A tour is a slice of the calendar, not a round
 
 Fantasy tours are time windows that cannot overlap, unlike league rounds, which
@@ -278,7 +329,13 @@ which used to forecast them at exactly zero for the whole following season.
 | `club_attack`, `club_defense` | Club goals scored/conceded per match at the fixture venue, blended across seasons. |
 | `opponent_attack`, `opponent_defense` | Opponent goals scored/conceded per match at their venue. |
 | `has_history` | `true` when at least one appearance exists in either season. |
-| `stat_source` | `current_season` once the player has played this season, otherwise `prior_season`. |
+| `stat_source` | `current_season` once the player has played this season; `parallel_league` when his only play this season is in his national league (cup target, step 24); otherwise `prior_season`. |
+| `parallel_appearances` | Appearances this season in the parallel leagues before the cutoff, unweighted (0 outside a cup target). |
+| `parallel_club_matches` | The player's league club's matches this season before the cutoff, unweighted. |
+| `parallel_weight` | What one parallel-league observation is worth against one of the cup's own (`PARALLEL_WEIGHT`); 0 without a parallel layer. |
+| `league_factor` | The `LEAGUE_STRENGTH` factor the league's goals were translated by; 1.0 without one. |
+| `availability_source` | `null` when the status is the season's own; the slug of the league whose snapshot lent an out/doubtful status. |
+| `sources` | Every layer of the history — the cup's current and prior season, then each league's — with appearances, club matches, weight and goal factor. |
 | `is_newcomer` | `true` when the player has no appearance in either season and is scored from role priors. |
 
 ## Command

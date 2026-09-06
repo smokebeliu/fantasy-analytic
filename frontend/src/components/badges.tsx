@@ -56,5 +56,17 @@ export function SourceBadge({
       </span>
     );
   }
+  // A cup row whose only play this season is in the player's national league
+  // (step 24): the numbers are his, but from a different competition.
+  if (statSource === "parallel_league") {
+    return (
+      <span
+        className="source-badge source-parallel"
+        title="Прогноз построен по текущему сезону национального чемпионата"
+      >
+        чемпионат
+      </span>
+    );
+  }
   return null;
 }

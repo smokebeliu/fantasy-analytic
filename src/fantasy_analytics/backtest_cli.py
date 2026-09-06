@@ -111,6 +111,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Discount per tour ahead for --horizon-tours (default: 0.7)",
     )
     parser.add_argument(
+        "--no-parallel",
+        action="store_true",
+        help=(
+            "Forecast a European cup from its own matches only, without the "
+            "national leagues its clubs play in (step 24) — the baseline the "
+            "parallel sourcing is measured against"
+        ),
+    )
+    parser.add_argument(
         "--tour",
         dest="tours",
         action="append",
@@ -537,6 +546,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         captain_risk_weight=args.captain_risk_weight,
         horizon_tours=args.horizon_tours,
         horizon_decay=args.horizon_decay,
+        parallel_sources=not args.no_parallel,
     )
 
     reports: list[dict[str, Any]] = []
