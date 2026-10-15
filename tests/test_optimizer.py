@@ -1753,7 +1753,19 @@ class StepTwentyThreeOptimizerTest(unittest.TestCase):
         # This tour's lineup is then picked on this tour alone, so he waits
         # on the bench, flagged as a horizon starter, and the eleven is the
         # best this tour's forecast allows from the roster.
-        pool = [c for c in self._pool() if c.role != "FORWARD"]
+        #
+        # At a bench weight of 0 the roster's bench earns nothing, so among
+        # equal prices its defender and midfielder would be an arbitrary pick
+        # (the solver took a 3.0 on one machine and a 2.5 on another). The
+        # weaker ones cost more here, which makes the 3.0s the cheapest bench
+        # and the expected eleven below unique.
+        pool = [
+            replace(c, price=4.5)
+            if c.role in ("DEFENDER", "MIDFIELDER") and c.expected_points < 3.0
+            else c
+            for c in self._pool()
+            if c.role != "FORWARD"
+        ]
         pool.append(self._candidate(311, "FORWARD", 3.5, future=0.0, price=4.0, club=311))
         pool.append(self._candidate(312, "FORWARD", 2.0, future=4.0, price=4.0, club=312))
         pool.append(self._candidate(300, "FORWARD", 0.5, future=0.0, price=3.5, club=300))
