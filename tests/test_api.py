@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest import mock
 
 import pydantic
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from fantasy_analytics.api import RefreshRequest, create_app
+from fantasy_analytics.api import RefreshRequest, create_app, default_spawn_worker
 from fantasy_analytics.db import (
     IngestionJobRepository,
     create_db_engine,
@@ -315,6 +316,19 @@ class IngestionStatusTest(unittest.TestCase):
         # Nothing was published, so no snapshot is offered to the UI.
         self.assertIsNone(body["snapshot"])
 
+
+
+class DefaultSpawnWorkerTest(unittest.TestCase):
+    def test_several_jobs_go_to_one_worker_in_order(self) -> None:
+        # The nightly sweep hands every league to one worker so Sports.ru
+        # sees one import at a time.
+        with mock.patch("fantasy_analytics.api.subprocess.Popen") as popen:
+            default_spawn_worker([7, 8, 9])
+            default_spawn_worker(4)
+        chain, single = (call.args[0] for call in popen.call_args_list)
+        self.assertEqual(["7", "8", "9"], chain[3:6])
+        self.assertEqual("--endpoint", chain[6])
+        self.assertEqual(["4", "--endpoint"], single[3:5])
 
 if __name__ == "__main__":
     unittest.main()

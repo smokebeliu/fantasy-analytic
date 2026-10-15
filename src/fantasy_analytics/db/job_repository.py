@@ -19,7 +19,7 @@ boundary (typically :func:`fantasy_analytics.db.session_scope`).
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -31,6 +31,13 @@ from .models import IngestionJob
 JOB_STATUSES = ("pending", "running", "succeeded", "failed")
 ACTIVE_STATUSES = ("pending", "running")
 _TERMINAL_STATUSES = ("succeeded", "failed")
+
+# A job still ``pending`` this long after it was queued has no worker coming
+# for it: the nightly sweep runs its leagues one after another in a single
+# worker (about a minute each), so a queue that old means that worker died —
+# a redeploy mid-sweep, say. Left alone, such a job would hold the league's
+# one active slot for ever and swallow every manual refresh.
+STALE_PENDING_AFTER = timedelta(hours=2)
 
 
 def advisory_lock_key(tournament_slug: str) -> int:
@@ -70,6 +77,7 @@ class IngestionJobRepository:
         requested_season_name: str | None = None,
         use_current_season: bool = False,
         trigger_type: str = "manual",
+        now: datetime | None = None,
     ) -> tuple[IngestionJob, bool]:
         """Insert a pending job unless one is already active.
 
@@ -77,9 +85,21 @@ class IngestionJobRepository:
         tournament it is returned with ``created=False`` and no row is inserted,
         so the caller can answer with a conflict. The partial unique index makes
         this safe under a race: a concurrent insert raises ``IntegrityError`` and
-        we fall back to returning the winner.
+        we fall back to returning the winner. A job left ``pending`` for longer
+        than :data:`STALE_PENDING_AFTER` is marked failed as abandoned first.
         """
         existing = self.active_job(tournament_slug)
+        moment = now or datetime.now(UTC)
+        if (
+            existing is not None
+            and existing.status == "pending"
+            and existing.created_at is not None
+            and moment - existing.created_at > STALE_PENDING_AFTER
+        ):
+            self.mark_failed(
+                existing, "Abandoned: queued but never picked up by a worker"
+            )
+            existing = None
         if existing is not None:
             return existing, False
 
@@ -190,5 +210,6 @@ __all__ = [
     "ACTIVE_STATUSES",
     "IngestionJobRepository",
     "JOB_STATUSES",
+    "STALE_PENDING_AFTER",
     "advisory_lock_key",
 ]

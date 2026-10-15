@@ -302,6 +302,48 @@ class NightlyRefreshIntegrationTest(unittest.TestCase):
             self.assertTrue(job["use_current_season"])
             self.assertEqual("pending", job["status"])
 
+    def test_one_worker_runs_the_leagues_first_and_the_cups_last(self) -> None:
+        # Launched together, a dozen imports hit Sports.ru at once and several
+        # failed every night; and a cup's forecast reads the leagues, so it
+        # must not be built before them.
+        self._mark_imported_season_active()
+        self._insert_second_active_league()
+        self._exec(
+            """
+            INSERT INTO competitions (fantasy_tournament_id, slug, name, sort_order)
+            VALUES ('500', 'champions-league', 'Лига чемпионов', -1)
+            ON CONFLICT (slug) DO UPDATE SET sort_order = -1
+            """
+        )
+        cup_id = self._exec(
+            "SELECT id FROM competitions WHERE slug = 'champions-league'"
+        ).scalar_one()
+        self._exec(
+            """
+            INSERT INTO seasons
+                (competition_id, fantasy_season_id, stat_season_id, name, is_active)
+            VALUES (:cid, '85', 'ucl_26-27', '2026/2027', true)
+            """,
+            cid=cup_id,
+        )
+        spawned: list[int] = []
+        chains: list[list[int]] = []
+
+        report = enqueue_nightly_jobs(
+            self.session_factory,
+            spawned.append,
+            settings=self.settings,
+            now=self._tonight(),
+            spawn_chain=chains.append,
+        )
+
+        self.assertEqual(
+            ["russia", "italy", "champions-league"],
+            [item["tournament_slug"] for item in report["enqueued"]],
+        )
+        self.assertEqual([], spawned)
+        self.assertEqual([[item["id"] for item in report["enqueued"]]], chains)
+
     def test_second_sweep_the_same_day_is_skipped(self) -> None:
         self._mark_imported_season_active()
         spawned: list[int] = []

@@ -284,9 +284,18 @@ def execute_job(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fantasy-ingestion-worker",
-        description="Execute a queued manual ingestion job by id.",
+        description=(
+            "Execute queued ingestion jobs by id, one after another (the "
+            "nightly sweep passes all its leagues to a single worker)."
+        ),
     )
-    parser.add_argument("job_id", type=int, help="ingestion_jobs.id to execute")
+    parser.add_argument(
+        "job_ids",
+        type=int,
+        nargs="+",
+        metavar="job_id",
+        help="ingestion_jobs.id to execute; several run in the order given",
+    )
     parser.add_argument(
         "--database-url", help="Override DATABASE_URL for this worker"
     )
@@ -323,18 +332,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.quiet:
             print(message, file=sys.stderr)
 
+    statuses: list[str] = []
     try:
-        status = execute_job(
-            engine,
-            session_factory,
-            args.job_id,
-            client=client,
-            on_progress=on_progress,
-        )
+        for job_id in args.job_ids:
+            # One job's crash must not strand the ones queued behind it.
+            try:
+                statuses.append(
+                    execute_job(
+                        engine,
+                        session_factory,
+                        job_id,
+                        client=client,
+                        on_progress=on_progress,
+                    )
+                )
+            except Exception as error:  # noqa: BLE001 - report and carry on
+                on_progress(f"Job {job_id} crashed: {error}")
+                statuses.append("failed")
     finally:
         engine.dispose()
 
-    return 0 if status in ("succeeded", "skipped") else 1
+    return 0 if all(status in ("succeeded", "skipped") for status in statuses) else 1
 
 
 if __name__ == "__main__":
