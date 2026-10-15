@@ -23,7 +23,9 @@ within-season transfers, the second match of a straight red, ban end dates and
 the pooled venue strengths — see [Step 23](#step-23-what-the-forecast-never-saw);
 version `1.8.0` (step 24) sources a European cup from the national leagues its
 clubs play in at the same time — see
-[Step 24](#step-24-a-european-cup-from-the-national-leagues).
+[Step 24](#step-24-a-european-cup-from-the-national-leagues); version `1.9.0`
+lets the red-card check see the matches of a tour dropped from the calendar
+and the fixtures a forecast ahead skips over.
 
 ## Reproducibility and leakage guarantees
 
@@ -67,6 +69,13 @@ that skips the next tour). Any other snapshot value (including `FIERY` and
 `UNKNOWN`) is treated as available so a new status never silently zeroes a
 player; the red-card ban is derived from `player_match_stats.red_cards`, not
 from the snapshot, so it also applies when backtesting a historical tour.
+A match of a tour Sports.ru dropped after it was played has no fantasy
+history, so its cards come from `unscored_appearances` (read from the stat
+API at import). A club fixture the history cannot contain yet — past an
+earlier cutoff when a tour is forecast ahead, or past the snapshot when it is
+planned weeks out — counts as having served the ban, since it will have been
+played by the target tour; one long past without a result was postponed and
+serves nothing.
 
 ## Cross-season blending
 

@@ -515,6 +515,168 @@ class FeatureDatasetIntegrationTest(unittest.TestCase):
         self.assertTrue(available["is_available"])
         self.assertGreater(available["p_appearance"], 0.0)
 
+    def _add_dropped_match(self, appearances: dict[str, tuple[int, int, int]]) -> None:
+        """A played club_a v club_b match of a tour Sports.ru dropped.
+
+        It falls between tour 1 and the future tour, and only the stat API
+        knows who played and was booked: ``appearances`` maps a fantasy
+        player id to its (minutes, yellow cards, red cards).
+        """
+        season_id = self._scalar("SELECT id FROM seasons LIMIT 1")
+        club_a = self._scalar(
+            "SELECT club_id FROM season_clubs WHERE fantasy_team_id = '10'"
+        )
+        club_b = self._scalar(
+            "SELECT club_id FROM season_clubs WHERE fantasy_team_id = '20'"
+        )
+        tour_id = self._exec(
+            """
+            INSERT INTO fantasy_tours
+                (season_id, fantasy_tour_id, name, status, starts_at,
+                 transfers_deadline_at)
+            VALUES (:season, '1799', 'убранный тур', 'REMOVED',
+                    '2025-07-21T16:00:00Z', '2025-07-21T16:00:00Z')
+            RETURNING id
+            """,
+            season=season_id,
+        ).scalar_one()
+        match_id = self._exec(
+            """
+            INSERT INTO matches
+                (season_id, tour_id, stat_match_id, scheduled_at,
+                 home_club_id, away_club_id, home_score, away_score)
+            VALUES (:season, :tour, '900009', '2025-07-21T16:00:00Z',
+                    :home, :away, 1, 0)
+            RETURNING id
+            """,
+            season=season_id,
+            tour=tour_id,
+            home=club_a,
+            away=club_b,
+        ).scalar_one()
+        for fantasy_id, (minutes, yellow, red) in appearances.items():
+            self._exec(
+                """
+                INSERT INTO unscored_appearances
+                    (player_season_id, match_id, ingestion_run_id, minutes,
+                     yellow_cards, red_cards)
+                SELECT id, :match, :run, :minutes, :yellow, :red
+                FROM player_seasons WHERE fantasy_player_id = :player
+                """,
+                match=match_id,
+                run=self.run_id,
+                minutes=minutes,
+                yellow=yellow,
+                red=red,
+                player=fantasy_id,
+            )
+
+    def _send_off_in_tour_one(self, fantasy_player_id: str) -> None:
+        """A straight red (the fixture's match already carries a yellow)."""
+        self._exec(
+            "UPDATE player_match_stats SET red_cards = 1, yellow_cards = 0 "
+            "WHERE player_season_id = ("
+            "  SELECT id FROM player_seasons WHERE fantasy_player_id = :player)",
+            player=fantasy_player_id,
+        )
+
+    def test_a_red_card_in_a_dropped_tour_still_bans_the_player(self) -> None:
+        self._add_future_tour()
+        self._add_dropped_match({"111": (73, 1, 1), "222": (90, 0, 0)})
+
+        rows = self._rows_by_player(
+            build_feature_dataset(self.session_factory, tour_ref="1773")
+        )
+
+        self.assertTrue(rows["111"]["red_card_suspension"])
+        self.assertEqual(0.0, rows["111"]["p_appearance"])
+        self.assertFalse(rows["222"]["red_card_suspension"])
+        # The match carries no fantasy points, so it is no appearance either.
+        self.assertEqual(
+            rows["222"]["total_appearances"], rows["111"]["total_appearances"]
+        )
+
+    def test_a_ban_served_in_a_dropped_tour_is_served(self) -> None:
+        self._add_future_tour()
+        self._send_off_in_tour_one("111")
+        self._add_dropped_match({"222": (90, 0, 0)})
+
+        rows = self._rows_by_player(
+            build_feature_dataset(self.session_factory, tour_ref="1773")
+        )
+
+        # Served in the dropped match; a straight red still discounts the
+        # second match after it.
+        self.assertFalse(rows["111"]["red_card_suspension"])
+        self.assertTrue(rows["111"]["is_available"])
+        self.assertLess(rows["111"]["availability_factor"], 1.0)
+
+    def test_a_forecast_ahead_lets_the_fixtures_in_between_serve_a_ban(self) -> None:
+        self._add_future_tour()
+        season_id = self._scalar("SELECT id FROM seasons LIMIT 1")
+        club_a = self._scalar(
+            "SELECT club_id FROM season_clubs WHERE fantasy_team_id = '10'"
+        )
+        club_b = self._scalar(
+            "SELECT club_id FROM season_clubs WHERE fantasy_team_id = '20'"
+        )
+        tour_id = self._exec(
+            """
+            INSERT INTO fantasy_tours
+                (season_id, fantasy_tour_id, name, status, starts_at,
+                 transfers_deadline_at)
+            VALUES (:season, '1774', '3 тур', 'SCHEDULED',
+                    '2025-08-01T16:00:00Z', '2025-07-31T16:00:00Z')
+            RETURNING id
+            """,
+            season=season_id,
+        ).scalar_one()
+        self._exec(
+            """
+            INSERT INTO matches
+                (season_id, tour_id, stat_match_id, scheduled_at,
+                 home_club_id, away_club_id, home_score, away_score)
+            VALUES (:season, :tour, '900004', '2025-08-01T16:00:00Z',
+                    :home, :away, NULL, NULL)
+            """,
+            season=season_id,
+            tour=tour_id,
+            home=club_b,
+            away=club_a,
+        )
+        # A second yellow: a one-match ban, served by the next tour's match.
+        self._exec(
+            "UPDATE player_match_stats SET red_cards = 1, yellow_cards = 1 "
+            "WHERE player_season_id = ("
+            "  SELECT id FROM player_seasons WHERE fantasy_player_id = '111')"
+        )
+
+        def banned(**kwargs) -> bool:
+            rows = self._rows_by_player(
+                build_feature_dataset(self.session_factory, tour_ref=kwargs.pop("tour"), **kwargs)
+            )
+            return rows["111"]["red_card_suspension"]
+
+        self.assertTrue(banned(tour="1773"))
+        # Tour 2's match is long past for this snapshot yet has no result: it
+        # was postponed, and a match not played serves nothing.
+        self.assertTrue(banned(tour="1774"))
+        # The optimizer's horizon: tour 3 forecast from tour 2's deadline,
+        # where tour 2's match is past the cutoff yet will have served the ban.
+        self.assertFalse(
+            banned(
+                tour="1774",
+                cutoff_override=datetime(2025, 7, 24, 16, 0, tzinfo=timezone.utc),
+            )
+        )
+        # A tour planned weeks ahead of the snapshot: tour 2's match had not
+        # been played when the data was taken, but will have by tour 3.
+        self._exec(
+            "UPDATE ingestion_runs SET started_at = '2025-07-23T00:00:00Z' WHERE id = :run",
+            run=self.run_id,
+        )
+        self.assertFalse(banned(tour="1774"))
+
     def test_target_tour_match_never_leaks_into_history(self) -> None:
         # Tour 1's deadline (17:50) is after its own kickoff (17:30) in the
         # fixture, so only the explicit target-tour exclusion prevents leakage.

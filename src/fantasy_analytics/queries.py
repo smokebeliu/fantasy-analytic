@@ -471,6 +471,40 @@ query DiscoverMatchStats($id: ID!, $source: statSourceList) {{
 
 MATCH_STATS_QUERY = build_match_stats_query()
 
+# A match the fantasy calendar no longer lists (its tour was dropped after it
+# was played): only what the suspension check needs — the result and every
+# player's minutes and cards. ``redCards`` counts every sending-off and
+# ``yellowRedCards`` the ones that came from a second yellow.
+UNSCORED_MATCH_QUERY = """
+query UnscoredMatch($id: ID!) {
+  statQueries {
+    football {
+      match(id: $id) {
+        id
+        matchStatus
+        scheduledAt
+        home {
+          score
+          team { id }
+          lineup(skipPreview: false) {
+            player { id }
+            stat { minutesPlayed yellowCards yellowRedCards redCards }
+          }
+        }
+        away {
+          score
+          team { id }
+          lineup(skipPreview: false) {
+            player { id }
+            stat { minutesPlayed yellowCards yellowRedCards redCards }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
 
 # A user's fantasy team (the public /fantasy/football/{slug}/{squadId}/ page).
 # currentTourInfo is the squad as it stands now — what a manager pastes when

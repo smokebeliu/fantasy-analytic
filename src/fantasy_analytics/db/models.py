@@ -585,6 +585,43 @@ class PlayerSeasonStats(_PlayerStatMixin, Base):
     )
 
 
+class UnscoredAppearance(Base):
+    """A player's minutes and cards in a match the fantasy does not score.
+
+    Sports.ru can drop a tour from the calendar after its matches were played
+    (the UCL 2026/27 second round): the matches still happened, so a red card
+    shown in one still bans the player from the next, but no fantasy history
+    covers them. The import reads them from the stat API instead, and only the
+    suspension check uses them — they carry no fantasy points, so they stay out
+    of every rate and appearance share.
+    """
+
+    __tablename__ = "unscored_appearances"
+    __table_args__ = (
+        UniqueConstraint(
+            "player_season_id", "match_id", name="unscored_appearances_player_match_key"
+        ),
+    )
+
+    id: Mapped[int] = _identity_pk()
+    player_season_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("player_seasons.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    match_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("matches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    ingestion_run_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("ingestion_runs.id"), nullable=False
+    )
+    minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    yellow_cards: Mapped[int] = mapped_column(Integer, nullable=False)
+    red_cards: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class PlayerMatchStats(_PlayerStatMixin, Base):
     __tablename__ = "player_match_stats"
     __table_args__ = (
