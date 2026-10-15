@@ -151,7 +151,10 @@ PostgreSQL (season, rules, clubs, tours, matches, every player page with its
 fantasy snapshot and season aggregate, club season aggregates and each player's
 match history with minutes). Catalog rows are upserted idempotently by external
 identifier, while price/score/aggregate snapshots are versioned per ingestion
-run. It needs both `DATABASE_URL` and outbound access to the GraphQL API.
+run. A tour the season no longer lists (Sports.ru dropped the UCL 2026/27 second
+round and moved its transfers to the third) is kept but marked `REMOVED`: the
+read API stops listing it unless asked for that status, and no tool picks it as
+the next tour. It needs both `DATABASE_URL` and outbound access to the GraphQL API.
 
 ```bash
 export DATABASE_URL=postgresql+psycopg://fantasy:fantasy@localhost:5432/fantasy
@@ -722,9 +725,12 @@ spells out, because the labels alone cannot:
   formation is chosen it is unavailable with the reason on the button: it would
   return the same squad as building from scratch;
 - **`Оптимизировать замены (N)`** keeps the squad you own and suggests at most `N`
-  replacements, `N` defaulting to the tour's own allowance (three in the RPL) or,
-  after a Sports.ru import, to the transfers the team actually has left. The
-  import also brings the team's money (its value plus the bank, `budget` in the
+  replacements, `N` defaulting to the tour's own allowance (three in the RPL, but
+  the game raises it now and then — the UCL 2026/27 third round allows six) or,
+  after a Sports.ru import on the same tour, to the transfers the team actually
+  has left, which wins over a stored allowance that has gone stale since the
+  last refresh. With none left the only choice is `0`, which still re-picks the
+  eleven, the captain and the bench. The import also brings the team's money (its value plus the bank, `budget` in the
   response), which replaces the season's opening budget in the builder and in
   the plan (`budget` on `POST /optimizer/transfers`), since prices drift and a
   squad is rarely worth exactly the opening budget mid-season. The

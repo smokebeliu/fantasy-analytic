@@ -211,6 +211,31 @@ class DomainImportRepository:
         )
         return {key[0]: value for key, value in mapping.items()}
 
+    def retire_missing_tours(
+        self, season_id: int, listed_fantasy_tour_ids: Iterable[str]
+    ) -> list[str]:
+        """Mark the season's tours the payload no longer lists as removed.
+
+        Returns the fantasy ids newly marked, in calendar order. Tours already
+        marked are left alone, so a repeated import reports nothing.
+        """
+        listed = set(listed_fantasy_tour_ids)
+        tours = self._session.execute(
+            select(models.FantasyTour)
+            .where(
+                models.FantasyTour.season_id == season_id,
+                models.FantasyTour.status != models.REMOVED_TOUR_STATUS,
+            )
+            .order_by(models.FantasyTour.starts_at, models.FantasyTour.id)
+        ).scalars()
+        retired: list[str] = []
+        for tour in tours:
+            if tour.fantasy_tour_id not in listed:
+                tour.status = models.REMOVED_TOUR_STATUS
+                retired.append(tour.fantasy_tour_id)
+        self._session.flush()
+        return retired
+
     def upsert_matches(self, matches: Sequence[dict[str, Any]]) -> dict[str, int]:
         """Upsert matches keyed by ``stat_match_id``; returns stat_match_id -> id."""
         mapping = self._bulk_upsert(

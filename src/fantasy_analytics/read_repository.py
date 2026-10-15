@@ -35,6 +35,7 @@ from sqlalchemy import func, null, select
 from sqlalchemy.orm import Session
 
 from .db.models import (
+    REMOVED_TOUR_STATUS,
     Club,
     Competition,
     FantasyPlayerSnapshot,
@@ -307,6 +308,10 @@ class ReadRepository:
             conditions.append(FantasyTour.season_id == season_id)
         if status is not None:
             conditions.append(func.upper(FantasyTour.status) == status.upper())
+        else:
+            # A tour Sports.ru dropped from the calendar is not a tour any
+            # more; it is listed only when asked for by its status.
+            conditions.append(FantasyTour.status != REMOVED_TOUR_STATUS)
 
         total = self._session.execute(
             select(func.count()).select_from(FantasyTour).where(*conditions)

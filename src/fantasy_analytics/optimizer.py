@@ -52,6 +52,7 @@ from sqlalchemy.orm import sessionmaker
 
 from .db import session_scope
 from .db.models import (
+    REMOVED_TOUR_STATUS,
     FantasyPlayerSnapshot,
     FantasyTour,
     Player,
@@ -2200,7 +2201,10 @@ def _following_tours(session, season_id: int, tour_id: int, count: int) -> list[
     tours = list(
         session.execute(
             select(FantasyTour)
-            .where(FantasyTour.season_id == season_id)
+            .where(
+                FantasyTour.season_id == season_id,
+                FantasyTour.status != REMOVED_TOUR_STATUS,
+            )
             .order_by(FantasyTour.starts_at.is_(None), FantasyTour.starts_at, FantasyTour.id)
         ).scalars()
     )

@@ -36,7 +36,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import sessionmaker
 
 from .db import ForecastRepository, session_scope
-from .db.models import FantasyTour, IngestionRun
+from .db.models import REMOVED_TOUR_STATUS, FantasyTour, IngestionRun
 
 ProgressCallback = Callable[[str], None]
 
@@ -193,6 +193,7 @@ def ensure_next_tour_forecasts(
             .where(
                 FantasyTour.season_id == run.season_id,
                 func.upper(func.coalesce(FantasyTour.status, "")) != "FINISHED",
+                FantasyTour.status != REMOVED_TOUR_STATUS,
             )
             .order_by(
                 FantasyTour.starts_at.is_(None), FantasyTour.starts_at, FantasyTour.id

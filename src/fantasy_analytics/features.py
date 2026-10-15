@@ -44,6 +44,7 @@ from sqlalchemy.orm import sessionmaker
 
 from .db import session_scope
 from .db.models import (
+    REMOVED_TOUR_STATUS,
     ClubMatchStats,
     Competition,
     FantasyPlayerSnapshot,
@@ -1150,7 +1151,8 @@ def resolve_target_tour(
     """Resolve the tour to build features for.
 
     A ``tour_ref`` matches a tour by its fantasy id or name. Without one, the
-    earliest tour that is not ``FINISHED`` is chosen (the natural "next tour");
+    earliest tour that is neither ``FINISHED`` nor dropped from the calendar
+    (:data:`REMOVED_TOUR_STATUS`) is chosen (the natural "next tour");
     a fully finished season therefore requires an explicit tour, which is what
     backtesting (step 12) needs.
     """
@@ -1173,7 +1175,7 @@ def resolve_target_tour(
         )
 
     for tour in tours:
-        if (tour.status or "").upper() != "FINISHED":
+        if (tour.status or "").upper() not in ("FINISHED", REMOVED_TOUR_STATUS):
             return tour
     raise FeaturesError(
         "Every tour in the season is FINISHED; pass an explicit --tour to build "

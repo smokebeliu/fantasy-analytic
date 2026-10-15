@@ -45,17 +45,45 @@ const TOURS: TourModel[] = [
   },
 ];
 
-function renderSquadBuilder() {
+function renderSquadBuilder(tours: TourModel[] = TOURS, defaultTourId = 15) {
   return render(
     <SquadBuilder
       seasonId={1}
       fantasySeasonId={FANTASY_SEASON_ID}
       competitionSlug="russia"
-      tours={TOURS}
-      defaultTourId={15}
+      tours={tours}
+      defaultTourId={defaultTourId}
       rules={RPL_RULES}
     />,
   );
+}
+
+// Two tours of a cup where the game handed out extra transfers: the first
+// already allows six, and the second's stored allowance is stale.
+const CUP_TOURS: TourModel[] = [
+  {
+    tour_id: 21,
+    season_id: 1,
+    fantasy_tour_id: "2755",
+    name: "3 тур",
+    status: "OPENED",
+    max_same_team_players: 3,
+    total_transfers: 6,
+  },
+  {
+    tour_id: 22,
+    season_id: 1,
+    fantasy_tour_id: "2756",
+    name: "4 тур",
+    status: "NOT_STARTED",
+    max_same_team_players: 3,
+    total_transfers: 3,
+  },
+];
+
+function transferOptions(): string[] {
+  const select = screen.getByTestId("transfers-select") as HTMLSelectElement;
+  return Array.from(select.options).map((option) => option.value);
 }
 
 function poolResponse() {
@@ -575,6 +603,123 @@ describe("SquadBuilder", () => {
     await waitFor(() =>
       expect(optimizeTransfers).toHaveBeenCalledWith(
         expect.objectContaining({ season: FANTASY_SEASON_ID, max_transfers: 1 }),
+      ),
+    );
+  });
+
+  it("offers every transfer a generous tour allows", async () => {
+    const squad = makeValidSquad();
+    listPlayers.mockResolvedValue({
+      items: squad,
+      pagination: { limit: 200, offset: 0, total: squad.length, count: squad.length },
+    });
+    optimizeTransfers.mockResolvedValue(transfersResponse());
+
+    renderSquadBuilder(CUP_TOURS, 21);
+    await waitFor(() =>
+      expect(screen.getAllByTestId("pool-row").length).toBe(squad.length),
+    );
+    for (const row of screen.getAllByTestId("pool-row")) {
+      await userEvent.click(within(row).getByRole("button", { name: /Добавить/ }));
+    }
+
+    expect(transferOptions()).toEqual(["1", "2", "3", "4", "5", "6"]);
+    expect(screen.getByTestId("transfers-select")).toHaveValue("6");
+    await userEvent.click(screen.getByTestId("optimize-transfers"));
+    await waitFor(() =>
+      expect(optimizeTransfers).toHaveBeenCalledWith(
+        expect.objectContaining({ tour: "2755", max_transfers: 6 }),
+      ),
+    );
+
+    // The next tour is back to the usual three.
+    await userEvent.selectOptions(screen.getByLabelText("Тур"), "22");
+    expect(transferOptions()).toEqual(["1", "2", "3"]);
+  });
+
+  it("trusts the game's live transfer count for the tour the team is on", async () => {
+    const squad = makeValidSquad();
+    listPlayers.mockResolvedValue({
+      items: squad,
+      pagination: { limit: 200, offset: 0, total: squad.length, count: squad.length },
+    });
+    // Our copy of the calendar still says three; the game now gives six.
+    const staleTours = CUP_TOURS.map((tour) => ({ ...tour, total_transfers: 3 }));
+    importSquad.mockResolvedValue({
+      squad_id: "588960",
+      squad_name: "бегим",
+      competition_slug: "russia",
+      remote_season_id: "85",
+      remote_tour: { fantasy_tour_id: "2755", name: "3 тур", status: "OPENED" },
+      players: squad,
+      missing: [],
+      transfers_left: 6,
+      transfers_done: 0,
+    });
+    optimizeTransfers.mockResolvedValue(transfersResponse());
+
+    renderSquadBuilder(staleTours, 21);
+    await waitFor(() =>
+      expect(screen.getAllByTestId("pool-row").length).toBe(squad.length),
+    );
+    await userEvent.type(
+      screen.getByTestId("squad-import-url"),
+      "https://www.sports.ru/fantasy/football/russia/588960/",
+    );
+    await userEvent.click(screen.getByTestId("squad-import-submit"));
+    expect(await screen.findByTestId("squad-import-note")).toHaveTextContent(
+      "замен осталось: 6",
+    );
+
+    expect(transferOptions()).toEqual(["1", "2", "3", "4", "5", "6"]);
+    await userEvent.click(screen.getByTestId("optimize-transfers"));
+    await waitFor(() =>
+      expect(optimizeTransfers).toHaveBeenCalledWith(
+        expect.objectContaining({ tour: "2755", max_transfers: 6 }),
+      ),
+    );
+
+    // Planning a later tour: what is left of this one's transfers says
+    // nothing about it, so that tour's own allowance applies.
+    await userEvent.selectOptions(screen.getByLabelText("Тур"), "22");
+    expect(transferOptions()).toEqual(["1", "2", "3"]);
+  });
+
+  it("offers zero transfers when the team has none left", async () => {
+    const squad = makeValidSquad();
+    listPlayers.mockResolvedValue({
+      items: squad,
+      pagination: { limit: 200, offset: 0, total: squad.length, count: squad.length },
+    });
+    importSquad.mockResolvedValue({
+      squad_id: "588960",
+      squad_name: "бегим",
+      competition_slug: "russia",
+      remote_season_id: "85",
+      remote_tour: { fantasy_tour_id: "2755", name: "3 тур", status: "OPENED" },
+      players: squad,
+      missing: [],
+      transfers_left: 0,
+      transfers_done: 6,
+    });
+    optimizeTransfers.mockResolvedValue(transfersResponse());
+
+    renderSquadBuilder(CUP_TOURS, 21);
+    await waitFor(() =>
+      expect(screen.getAllByTestId("pool-row").length).toBe(squad.length),
+    );
+    await userEvent.type(
+      screen.getByTestId("squad-import-url"),
+      "https://www.sports.ru/fantasy/football/russia/588960/",
+    );
+    await userEvent.click(screen.getByTestId("squad-import-submit"));
+    await screen.findByTestId("squad-import-note");
+
+    expect(transferOptions()).toEqual(["0"]);
+    await userEvent.click(screen.getByTestId("optimize-transfers"));
+    await waitFor(() =>
+      expect(optimizeTransfers).toHaveBeenCalledWith(
+        expect.objectContaining({ max_transfers: 0 }),
       ),
     );
   });

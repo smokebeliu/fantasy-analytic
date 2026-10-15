@@ -358,6 +358,14 @@ class PlayerSeason(Base):
     )
 
 
+# Status of a tour Sports.ru has dropped from the season's calendar (the UCL
+# 2026/27 lost its second round that way and handed its transfers to the
+# third, which then allowed six). The row stays — forecasts, odds and stats may
+# point at it — but nothing lists or targets it; a later import that finds the
+# tour again overwrites the status with the real one.
+REMOVED_TOUR_STATUS = "REMOVED"
+
+
 class FantasyTour(Base):
     __tablename__ = "fantasy_tours"
     __table_args__ = (
