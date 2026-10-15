@@ -251,7 +251,11 @@ touch the data model are:
   probability). Independently, a red card in `player_match_stats` that has not
   been served by a later club match before the cutoff also marks the player
   unavailable for the target tour (`red_card_suspension`), so a sending-off
-  skips the next tour even when the snapshot status is still `FIT`.
+  skips the next tour even when the snapshot status is still `FIT`. The
+  matches of a dropped tour (`unscored_appearances`) count for that check, and
+  so do the club's fixtures the history cannot contain yet — past an earlier
+  cutoff (a horizon) or past the snapshot (a tour planned ahead) — which will
+  have served the ban by the time the target tour starts.
 
 ## Baseline points forecast (step 7)
 
@@ -518,6 +522,23 @@ model already had what the join needs.
   appear about two days before kickoff.
 - **Provenance.** `player_forecasts.stat_source` gains the value
   `parallel_league`; the read API's `stat_source` field documents it.
+
+### Tours dropped from the calendar
+
+Sports.ru removed the UCL 2026/27 second round after its matches were
+played and handed its transfers to the third round, which then allowed six.
+The import marks a tour the season no longer lists `REMOVED`
+(`REMOVED_TOUR_STATUS`): the row and its matches stay, but `/tours` and every
+"next tour" pick skip it. Its matches still happened, so the import reads each
+one that has kicked off from the stat API (`UNSCORED_MATCH_QUERY`): the final
+score goes on `matches`, and every player's minutes and cards go into
+`unscored_appearances` (migration 0010; a second yellow is stored as one
+yellow and one red, like the fantasy history). The suspension check is the
+only reader — Olise's sending-off in that round bans him from the third, and
+a ban served there is served — while the rates and appearance shares, which
+need fantasy points, never see these rows. Only matches already in the
+database can be read this way: an environment that first imports the season
+after the round was dropped never learns of them.
 
 ## Questions left for the next discovery iteration
 

@@ -36,6 +36,7 @@ from fantasy_analytics.queries import (
     PLAYER_HISTORY_QUERY,
     SEASON_QUERY,
     TOURNAMENT_QUERY,
+    UNSCORED_MATCH_QUERY,
 )
 from fantasy_analytics.features import resolve_target_tour
 from fantasy_analytics.quality import run_quality_checks
@@ -378,6 +379,9 @@ class FakeClient:
         if "stat_season" in query:
             self.calls.append("TeamSeasonStats")
             return copy.deepcopy(self._fixture["team_stats"])
+        if query is UNSCORED_MATCH_QUERY:
+            self.calls.append("UnscoredMatch")
+            return copy.deepcopy(self._fixture["unscored"][variables["id"]])
         raise AssertionError(f"Unexpected query: {query[:40]!r}")
 
 
@@ -669,6 +673,123 @@ class IngestionIntegrationTest(unittest.TestCase):
             IngestionOptions(),
         )
         self.assertEqual(("OPENED", 3), tours()["1773"])
+
+    def test_a_dropped_tour_keeps_its_red_cards_for_the_suspension_check(self) -> None:
+        """The UCL's dropped second round had been played: Olise was sent off
+        there. The import reads such a match from the stat API — result,
+        minutes and cards — so the next tour can still see the ban."""
+
+        def with_second_tour(listed: bool) -> dict:
+            fixture = _build_fixture()
+            season = fixture["season"]["data"]["fantasyQueries"]["season"]
+            if listed:
+                season["tours"].append(
+                    {
+                        "id": "1773",
+                        "name": "2 тур",
+                        "status": "FINISHED",
+                        "startedAt": "2025-07-25T17:30:00Z",
+                        "finishedAt": "2025-07-25T19:30:00Z",
+                        "transfersStartedAt": None,
+                        "transfersFinishedAt": "2025-07-25T17:30:00Z",
+                        "constraints": {"totalTransfers": 3, "maxSameTeamPlayers": 3},
+                        "matches": [
+                            {
+                                "id": "900002",
+                                "scheduledAt": "2025-07-25T17:30:00Z",
+                                "matchStatus": "CLOSED",
+                                "home": {"score": 0, "team": {"id": "club_b", "name": "Клуб B"}},
+                                "away": {"score": 0, "team": {"id": "club_a", "name": "Клуб A"}},
+                            }
+                        ],
+                    }
+                )
+            fixture["unscored"] = {
+                "900002": {
+                    "data": {
+                        "statQueries": {
+                            "football": {
+                                "match": {
+                                    "id": "900002",
+                                    "matchStatus": "CLOSED",
+                                    "scheduledAt": "2025-07-25T17:30:00Z",
+                                    "home": {
+                                        "score": 1,
+                                        "team": {"id": "club_b"},
+                                        "lineup": [
+                                            {
+                                                "player": {"id": "p_two"},
+                                                "stat": {
+                                                    "minutesPlayed": 90,
+                                                    "yellowCards": 1,
+                                                    "yellowRedCards": 0,
+                                                    "redCards": 0,
+                                                },
+                                            },
+                                            {
+                                                "player": {"id": "not_in_the_fantasy"},
+                                                "stat": {"minutesPlayed": 90},
+                                            },
+                                        ],
+                                    },
+                                    "away": {
+                                        "score": 2,
+                                        "team": {"id": "club_a"},
+                                        "lineup": [
+                                            {
+                                                # A second yellow: the stat API
+                                                # leaves yellowCards at 0.
+                                                "player": {"id": "p_one"},
+                                                "stat": {
+                                                    "minutesPlayed": 73,
+                                                    "yellowCards": 0,
+                                                    "yellowRedCards": 1,
+                                                    "redCards": 1,
+                                                },
+                                            },
+                                        ],
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return fixture
+
+        run_ingestion(
+            FakeClient(with_second_tour(listed=True)), self.session_factory, IngestionOptions()
+        )
+        client = FakeClient(with_second_tour(listed=False))
+        report = run_ingestion(client, self.session_factory, IngestionOptions())
+
+        self.assertEqual(["UnscoredMatch"], [c for c in client.calls if c == "UnscoredMatch"])
+        self.assertEqual(1, report["counts"]["unscored_matches"])
+        self.assertEqual(2, report["counts"]["unscored_appearances"])
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    "SELECT ps.fantasy_player_id, u.minutes, u.yellow_cards, "
+                    "u.red_cards, u.ingestion_run_id "
+                    "FROM unscored_appearances u "
+                    "JOIN player_seasons ps ON ps.id = u.player_season_id "
+                    "ORDER BY ps.fantasy_player_id"
+                )
+            ).all()
+            score = connection.execute(
+                text(
+                    "SELECT home_score, away_score FROM matches "
+                    "WHERE stat_match_id = '900002'"
+                )
+            ).one()
+        self.assertEqual(
+            [
+                ("111", 73, 1, 1, report["run_id"]),
+                ("222", 90, 1, 0, report["run_id"]),
+            ],
+            [tuple(row) for row in rows],
+        )
+        self.assertEqual((1, 2), tuple(score))
 
     def test_failed_fetch_publishes_no_partial_snapshot(self) -> None:
         client = FakeClient(_build_fixture(), fail_on_history=True)

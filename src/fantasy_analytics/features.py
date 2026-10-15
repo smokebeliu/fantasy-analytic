@@ -55,6 +55,7 @@ from .db.models import (
     PlayerSeason,
     Season,
     SeasonClub,
+    UnscoredAppearance,
 )
 
 # Bumped whenever the feature set or its computation changes so that datasets
@@ -113,7 +114,18 @@ from .db.models import (
 #   player out in the cup too; a red card stays inside the competition it was
 #   shown in. ``stat_source`` gains ``parallel_league`` and every row lists
 #   its ``sources``.
-FEATURE_VERSION = "1.8.0"
+# 1.9.0 lets the suspension check see the matches a dropped tour leaves
+#   behind (``unscored_appearances``): Sports.ru removed the UCL 2026/27
+#   second round after it was played, so a red card shown there — Olise's,
+#   for one — had left no trace in the fantasy history and the player was
+#   forecast to start the next tour. Those matches count for the ban only,
+#   both ways (a red earned there, or a ban served there); they carry no
+#   fantasy points, so every rate and appearance share is unchanged. A tour
+#   forecast ahead — from an earlier cutoff (the optimizer's horizon) or from
+#   a snapshot older than its deadline (a tour planned weeks out) — also
+#   counts the club's fixtures in between as serving a ban, which used to
+#   last until the next import.
+FEATURE_VERSION = "1.9.0"
 
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
 
@@ -1352,6 +1364,111 @@ def load_appearances(
     return by_player
 
 
+def load_unscored_matches(
+    session,
+    season_id: int,
+    run_id: int,
+    cutoff: datetime,
+    exclude_match_ids: frozenset[int] = frozenset(),
+) -> tuple[dict[int, list[Appearance]], dict[int, list[ClubMatch]]]:
+    """The matches no fantasy tour covers, for the suspension check alone.
+
+    Returns each player's appearances there (minutes and cards, no points)
+    and each club's results there, both cut at the cutoff. See
+    :class:`~fantasy_analytics.db.models.UnscoredAppearance`.
+    """
+    rows = session.execute(
+        select(
+            UnscoredAppearance.player_season_id,
+            UnscoredAppearance.minutes,
+            UnscoredAppearance.yellow_cards,
+            UnscoredAppearance.red_cards,
+            Match.id,
+            Match.scheduled_at,
+            Match.home_club_id,
+            Match.away_club_id,
+            Match.home_score,
+            Match.away_score,
+        )
+        .join(Match, UnscoredAppearance.match_id == Match.id)
+        .where(
+            Match.season_id == season_id,
+            UnscoredAppearance.ingestion_run_id == run_id,
+            Match.scheduled_at < cutoff,
+        )
+    ).all()
+    by_player: dict[int, list[Appearance]] = {}
+    by_club: dict[int, dict[int, ClubMatch]] = {}
+    for row in rows:
+        if row.id in exclude_match_ids:
+            continue
+        by_player.setdefault(row.player_season_id, []).append(
+            Appearance(
+                match_id=row.id,
+                scheduled_at=row.scheduled_at,
+                minutes=row.minutes,
+                points=0,
+                goals=0,
+                assists=0,
+                yellow_cards=row.yellow_cards,
+                red_cards=row.red_cards,
+            )
+        )
+        if row.home_score is None or row.away_score is None:
+            continue
+        for club_id, is_home, scored, conceded in (
+            (row.home_club_id, True, row.home_score, row.away_score),
+            (row.away_club_id, False, row.away_score, row.home_score),
+        ):
+            by_club.setdefault(club_id, {})[row.id] = ClubMatch(
+                match_id=row.id,
+                scheduled_at=row.scheduled_at,
+                is_home=is_home,
+                goals_scored=scored,
+                goals_conceded=conceded,
+            )
+    return by_player, {club: list(matches.values()) for club, matches in by_club.items()}
+
+
+def _load_intervening_matches(
+    session,
+    season_id: int,
+    start: datetime,
+    end: datetime,
+    exclude_match_ids: frozenset[int],
+) -> dict[int, list[ClubMatch]]:
+    """Each club's fixtures scheduled from ``start`` up to ``end``.
+
+    The history cannot contain these matches — they lie past the cutoff or
+    past the snapshot — yet they will have been played by the time the target
+    tour starts, so they serve a ban. Only the calendar is read: the results
+    are not known and the suspension check has no use for them, so they are
+    left at 0.
+    """
+    rows = session.execute(
+        select(Match.id, Match.scheduled_at, Match.home_club_id, Match.away_club_id).where(
+            Match.season_id == season_id,
+            Match.scheduled_at >= start,
+            Match.scheduled_at < end,
+        )
+    ).all()
+    by_club: dict[int, list[ClubMatch]] = {}
+    for match_id, scheduled_at, home_club_id, away_club_id in rows:
+        if match_id in exclude_match_ids:
+            continue
+        for club_id, is_home in ((home_club_id, True), (away_club_id, False)):
+            by_club.setdefault(club_id, []).append(
+                ClubMatch(
+                    match_id=match_id,
+                    scheduled_at=scheduled_at,
+                    is_home=is_home,
+                    goals_scored=0,
+                    goals_conceded=0,
+                )
+            )
+    return by_club
+
+
 def _load_snapshots(session, run_id: int) -> dict[int, dict[str, Any]]:
     rows = session.execute(
         select(
@@ -2371,6 +2488,8 @@ def _build_row(
     club_matches_by_club: dict[int, list[ClubMatch]] | None = None,
     bucket_prior: RolePrior | None = None,
     parallel_layers: Sequence[HistoryLayer] = (),
+    suspension_appearances: Sequence[Appearance] = (),
+    suspension_club_matches: Sequence[ClubMatch] = (),
 ) -> dict[str, Any]:
     """Build one player's feature row from both seasons of his history.
 
@@ -2380,6 +2499,13 @@ def _build_row(
     cup's own last season as the prior, and both are cut at the cutoff like
     everything else. Red cards are not read from them: a ban is served in the
     competition it was earned in.
+
+    ``suspension_appearances`` and ``suspension_club_matches`` feed the
+    suspension check and nothing else: the player's and his club's matches no
+    fantasy tour covers (:func:`load_unscored_matches`), and the club's
+    fixtures the history cannot have seen yet (past an earlier cutoff, or past
+    the snapshot), which will have been played, and so served a ban, by the
+    time the tour starts.
 
     The two seasons are kept apart until the very end and then blended, because
     they answer the same questions with different authority: what happened this
@@ -2717,20 +2843,23 @@ def _build_row(
     # half chance), and a red card on the last match before the cutoff covers
     # the suspension that status may not yet (or, for a historical tour, may
     # no longer) reflect — the next match for certain, the one after at a
-    # discount when the card was a straight red.
+    # discount when the card was a straight red. Matches a dropped tour left
+    # behind count here too (a red shown there bans, a ban served there is
+    # served, whatever the fantasy history says), and so do the fixtures a
+    # forecast ahead skips over, or a one-match ban would last the horizon.
     status = snapshot["availability_status"] if snapshot else None
     description = snapshot["status_description"] if snapshot else None
     status_ok, status_factor = status_availability(
         status, description, primary.scheduled_at
     )
     card_history = recent_before_cutoff(
-        [*appearances, *(prior_appearances or [])],
+        [*appearances, *(prior_appearances or []), *suspension_appearances],
         cutoff,
         exclude_match_ids=target_match_ids,
     )
     red_factor = red_card_availability_factor(
         card_history,
-        [*current_clubs, *prior_clubs],
+        [*current_clubs, *prior_clubs, *suspension_club_matches],
     )
     red_card_suspension = red_factor <= 0.0
     availability_factor = round(status_factor * red_factor, 4)
@@ -2913,7 +3042,8 @@ def build_feature_dataset(
 
         tour = resolve_target_tour(session, season_id, tour_ref)
         fixtures = _load_fixtures(session, tour.id)
-        cutoff = _tour_cutoff(tour, fixtures)
+        tour_cutoff = _tour_cutoff(tour, fixtures)
+        cutoff = tour_cutoff
         if cutoff_override is not None and cutoff_override < cutoff:
             cutoff = cutoff_override
         target_match_ids = frozenset(f.match_id for f in fixtures)
@@ -2922,6 +3052,22 @@ def build_feature_dataset(
             session, season_id, run.id, cutoff, exclude_match_ids=target_match_ids
         )
         appearances = load_appearances(session, season_id, run.id)
+        unscored_by_player, unscored_by_club = load_unscored_matches(
+            session, season_id, run.id, cutoff, exclude_match_ids=target_match_ids
+        )
+        # The fixtures the history cannot have seen yet will have been
+        # played, and a ban served, by the time the target tour starts: the
+        # ones an earlier cutoff skips over (a horizon), and the ones still to
+        # come when the snapshot was taken (a tour planned weeks ahead).
+        # Anything older without a result was postponed and serves nothing.
+        known_until = min(cutoff, run.started_at) if run.started_at else cutoff
+        intervening_by_club = (
+            _load_intervening_matches(
+                session, season_id, known_until, tour_cutoff, target_match_ids
+            )
+            if known_until < tour_cutoff
+            else {}
+        )
         snapshots = _load_snapshots(session, run.id)
         players = _load_players(session, season_id)
         season_clubs = _load_season_clubs(session, season_id)
@@ -3121,6 +3267,13 @@ def build_feature_dataset(
                 club_matches_by_club=club_matches,
                 bucket_prior=bucket_prior,
                 parallel_layers=layers,
+                suspension_appearances=unscored_by_player.get(
+                    player["player_season_id"], ()
+                ),
+                suspension_club_matches=[
+                    *unscored_by_club.get(club_id, ()),
+                    *intervening_by_club.get(club_id, ()),
+                ],
             )
             if row["stat_source"] == STAT_SOURCE_PRIOR:
                 prior_sourced += 1
@@ -3263,6 +3416,7 @@ __all__ = [
     "pending_red_card_suspension",
     "per90",
     "load_appearances",
+    "load_unscored_matches",
     "resolve_prior_run",
     "resolve_run",
     "resolve_target_tour",

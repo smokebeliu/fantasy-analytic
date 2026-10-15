@@ -12,6 +12,7 @@ time-series keyed by ``ingestion_run_id``.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -360,6 +361,79 @@ class DomainImportRepository:
             ],
             returning=["player_season_id", "match_id"],
         )
+
+    def unlisted_past_matches(
+        self,
+        fantasy_season_id: str,
+        listed_stat_match_ids: Iterable[str],
+        *,
+        before: datetime,
+    ) -> list[str]:
+        """Stat ids of the season's matches the calendar no longer lists.
+
+        Only matches scheduled before ``before`` count: a dropped tour's
+        matches still happened, a future one has nothing to read yet. A season
+        imported for the first time has no such matches.
+        """
+        listed = set(listed_stat_match_ids)
+        rows = self._session.execute(
+            select(models.Match.stat_match_id)
+            .join(models.Season, models.Match.season_id == models.Season.id)
+            .where(
+                models.Season.fantasy_season_id == fantasy_season_id,
+                models.Match.scheduled_at < before,
+            )
+            .order_by(models.Match.scheduled_at, models.Match.stat_match_id)
+        ).scalars()
+        return [stat_id for stat_id in rows if stat_id not in listed]
+
+    def record_unscored_matches(
+        self,
+        results: Sequence[tuple[str, int | None, int | None]],
+        appearances: Sequence[dict[str, Any]],
+    ) -> int:
+        """Store the results and appearances of matches no tour covers.
+
+        ``results`` are ``(stat_match_id, home_score, away_score)``;
+        ``appearances`` carry a ``stat_match_id`` in place of the match id.
+        Returns how many appearances were written.
+        """
+        stat_ids = {stat_id for stat_id, _, _ in results}
+        match_by_stat = dict(
+            self._session.execute(
+                select(models.Match.stat_match_id, models.Match.id).where(
+                    models.Match.stat_match_id.in_(stat_ids or {""})
+                )
+            ).all()
+        )
+        for stat_id, home_score, away_score in results:
+            if stat_id not in match_by_stat:
+                continue
+            match = self._session.get(models.Match, match_by_stat[stat_id])
+            match.home_score = home_score
+            match.away_score = away_score
+        rows = [
+            {
+                "player_season_id": row["player_season_id"],
+                "match_id": match_by_stat[row["stat_match_id"]],
+                "ingestion_run_id": row["ingestion_run_id"],
+                "minutes": row["minutes"],
+                "yellow_cards": row["yellow_cards"],
+                "red_cards": row["red_cards"],
+            }
+            for row in appearances
+            if row["stat_match_id"] in match_by_stat
+        ]
+        if rows:
+            self._bulk_upsert(
+                models.UnscoredAppearance,
+                rows,
+                conflict=["player_season_id", "match_id"],
+                update=["ingestion_run_id", "minutes", "yellow_cards", "red_cards"],
+                returning=["player_season_id", "match_id"],
+            )
+        self._session.flush()
+        return len(rows)
 
     def upsert_point_details(self, rows: Sequence[dict[str, Any]]) -> None:
         if not rows:

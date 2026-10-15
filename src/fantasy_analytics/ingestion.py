@@ -55,6 +55,7 @@ from .queries import (
     PLAYERS_QUERY,
     SEASON_QUERY,
     TOURNAMENT_QUERY,
+    UNSCORED_MATCH_QUERY,
     build_team_stats_query,
 )
 
@@ -110,6 +111,10 @@ class FetchResult:
     # time and they were left out, each recorded here so the quality gate can
     # surface a warning instead of the whole import failing.
     skipped_players: list[dict[str, Any]] = field(default_factory=list)
+    # Played matches of this season the calendar no longer lists (a tour
+    # dropped after the fact), as the stat API returns them; see
+    # :func:`fetch_unscored_matches`.
+    unscored_matches: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _noop(_message: str) -> None:
@@ -368,6 +373,97 @@ def _fetch_players_singly(
     return players, skipped, True
 
 
+def fetch_unscored_matches(
+    client: SportsGraphQLClient,
+    session_factory: sessionmaker,
+    fetch: FetchResult,
+    on_progress: ProgressCallback = _noop,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Read the played matches the season's calendar has dropped.
+
+    Sports.ru can remove a tour after its matches were played (the UCL
+    2026/27 second round): the fantasy history then never covers them, but a
+    red card shown there still bans the player from the next match. Every
+    match of this season already in the database that the payload no longer
+    lists and that has kicked off is fetched from the stat API; the closed ones
+    land on ``fetch.unscored_matches``. One that cannot be fetched is reported
+    and skipped — it only feeds the suspension check, which is no reason to
+    fail the whole import.
+    """
+    listed = {str(match["id"]) for match in _flatten_matches(fetch.season)}
+    with session_scope(session_factory) as session:
+        stat_ids = DomainImportRepository(session).unlisted_past_matches(
+            str(fetch.season["id"]), listed, before=now or datetime.now(UTC)
+        )
+    if not stat_ids:
+        return
+    started = time.monotonic()
+    for stat_id in stat_ids:
+        variables = {"id": stat_id}
+        try:
+            response = client.execute(UNSCORED_MATCH_QUERY, variables)
+        except GraphQLRequestError as error:
+            on_progress(f"Could not fetch unscored match {stat_id}: {error}")
+            continue
+        fetch.raw_payloads.append(("UnscoredMatch", variables, response))
+        match = (
+            ((response.get("data") or {}).get("statQueries") or {}).get("football") or {}
+        ).get("match")
+        if isinstance(match, dict) and _is_match_finished(match.get("matchStatus")):
+            fetch.unscored_matches.append(match)
+    fetch.timings["unscored_matches"] = time.monotonic() - started
+    on_progress(
+        f"Fetched {len(fetch.unscored_matches)} played match(es) the calendar "
+        f"no longer lists ({len(stat_ids)} checked)"
+    )
+
+
+def _unscored_rows(
+    matches: list[dict[str, Any]],
+    player_season_by_stat: dict[str, int],
+    run_id: int,
+) -> tuple[list[tuple[str, int | None, int | None]], list[dict[str, Any]]]:
+    """Results and per-player minutes/cards of the dropped matches.
+
+    A sending-off after a second yellow comes back as ``yellowRedCards`` with
+    ``yellowCards`` left at 0; it is stored the way the fantasy history writes
+    it — one yellow and one red — so the suspension check reads it as a
+    second yellow (a one-match ban) rather than a straight red.
+    """
+    results: list[tuple[str, int | None, int | None]] = []
+    appearances: list[dict[str, Any]] = []
+    for match in matches:
+        stat_id = str(match["id"])
+        home = match.get("home") or {}
+        away = match.get("away") or {}
+        results.append((stat_id, _to_int(home.get("score")), _to_int(away.get("score"))))
+        for side in (home, away):
+            for entry in side.get("lineup") or []:
+                player_season_pk = player_season_by_stat.get(
+                    str((entry.get("player") or {}).get("id"))
+                )
+                stat = entry.get("stat") or {}
+                minutes = _to_int(stat.get("minutesPlayed")) or 0
+                yellow_red = _to_int(stat.get("yellowRedCards")) or 0
+                yellow = (_to_int(stat.get("yellowCards")) or 0) + yellow_red
+                red = max(_to_int(stat.get("redCards")) or 0, yellow_red)
+                if player_season_pk is None or not (minutes or yellow or red):
+                    continue
+                appearances.append(
+                    {
+                        "player_season_id": player_season_pk,
+                        "stat_match_id": stat_id,
+                        "ingestion_run_id": run_id,
+                        "minutes": minutes,
+                        "yellow_cards": yellow,
+                        "red_cards": red,
+                    }
+                )
+    return results, appearances
+
+
 def _persist(
     session,
     run,
@@ -599,6 +695,21 @@ def _persist(
     player_season_by_fantasy = repo.upsert_player_seasons(player_season_rows)
     on_progress(f"Upserted {len(player_season_rows)} player seasons")
 
+    unscored_written = 0
+    if fetch.unscored_matches:
+        player_season_by_stat = {
+            str(player["statObject"]["id"]): player_season_by_fantasy[str(player["id"])]
+            for player in fetch.players
+            if (player.get("statObject") or {}).get("id")
+        }
+        results, unscored = _unscored_rows(
+            fetch.unscored_matches, player_season_by_stat, run.id
+        )
+        unscored_written = repo.record_unscored_matches(results, unscored)
+        on_progress(
+            f"Recorded {unscored_written} appearances in {len(results)} unscored match(es)"
+        )
+
     snapshot_rows = []
     season_stats_rows = []
     for player in fetch.players:
@@ -750,6 +861,8 @@ def _persist(
             "players_with_minutes": players_with_minutes,
             "histories_fetched": len(fetch.histories),
             "skipped_history_matches": skipped_history_matches,
+            "unscored_matches": len(fetch.unscored_matches),
+            "unscored_appearances": unscored_written,
         },
     }
 
@@ -781,6 +894,7 @@ def run_ingestion(
     started_at = time.monotonic()
     try:
         fetch = fetch_all(client, options, on_progress)
+        fetch_unscored_matches(client, session_factory, fetch, on_progress)
         fetch_seconds = sum(fetch.timings.values())
         on_progress(f"Fetch stage finished in {fetch_seconds:.1f}s")
 
@@ -828,4 +942,10 @@ def run_ingestion(
     return report
 
 
-__all__ = ["IngestionOptions", "FetchResult", "fetch_all", "run_ingestion"]
+__all__ = [
+    "IngestionOptions",
+    "FetchResult",
+    "fetch_all",
+    "fetch_unscored_matches",
+    "run_ingestion",
+]
