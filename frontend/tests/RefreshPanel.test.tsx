@@ -403,7 +403,8 @@ describe("RefreshPanel", () => {
     renderPanel();
     await userEvent.click(screen.getByTestId("refresh-button"));
 
-    expect(refreshIngestion).toHaveBeenCalledWith("russia", {});
+    // The league has a season under way, which is what a refresh targets.
+    expect(refreshIngestion).toHaveBeenCalledWith("russia", { current: true });
     // While the job runs the button is blocked, so a second click cannot start
     // a parallel import.
     await waitFor(() =>
@@ -487,7 +488,7 @@ describe("RefreshPanel", () => {
     );
   });
 
-  it("can refresh the active season instead of the latest completed one", async () => {
+  it("defaults to the active season and can still import the completed one", async () => {
     refreshIngestion.mockResolvedValue(job({ status: "pending" }));
     getIngestionStatus
       .mockResolvedValueOnce(status())
@@ -495,10 +496,14 @@ describe("RefreshPanel", () => {
 
     renderPanel();
     await waitFor(() => expect(getIngestionStatus).toHaveBeenCalled());
-    await userEvent.selectOptions(screen.getByTestId("refresh-season"), "current");
+    // Re-importing last season by default left the current one stale.
+    expect((screen.getByTestId("refresh-season") as HTMLSelectElement).value).toBe(
+      "current",
+    );
+    await userEvent.selectOptions(screen.getByTestId("refresh-season"), "latest");
     await userEvent.click(screen.getByTestId("refresh-button"));
 
-    expect(refreshIngestion).toHaveBeenCalledWith("russia", { current: true });
+    expect(refreshIngestion).toHaveBeenCalledWith("russia", {});
   });
 
   it("offers a retry when the status cannot be loaded at all", async () => {

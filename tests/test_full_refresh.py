@@ -99,6 +99,23 @@ class PlanTest(unittest.TestCase):
         )
         self.assertTrue(all(step.status == "pending" for step in steps))
 
+    def test_the_cups_come_after_the_national_leagues(self) -> None:
+        # A cup's forecast reads the leagues, so it must not be built on their
+        # previous snapshots, as the catalogue order (cups first) would do.
+        steps = plan_full_refresh(
+            [
+                _competition("russia"),
+                _competition("champions-league"),
+                _competition("europa-league"),
+                _competition("england"),
+                _competition("italy"),
+            ]
+        )
+        self.assertEqual(
+            ["russia", "england", "italy", "champions-league", "europa-league"],
+            list(dict.fromkeys(step.tournament_slug for step in steps)),
+        )
+
     def test_a_league_without_an_active_season_skips_the_current_import(self) -> None:
         steps = plan_full_refresh([_competition("russia", active=False)])
         current = next(step for step in steps if step.kind == STEP_CURRENT_SEASON)

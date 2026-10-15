@@ -38,6 +38,7 @@ import asyncio
 import logging
 import subprocess
 import sys
+from collections.abc import Sequence
 from contextlib import asynccontextmanager, suppress
 from typing import Any, Callable
 
@@ -136,6 +137,7 @@ SyncCatalogue = Callable[..., dict[str, Any]]
 RefreshOdds = Callable[..., dict[str, Any]]
 
 SpawnWorker = Callable[[int], None]
+SpawnChain = Callable[[Sequence[int]], None]
 
 # Materialises the projections of one (run, tour) pair before a player read is
 # answered; see :mod:`fantasy_analytics.forecast_service`.
@@ -262,7 +264,7 @@ def api_error(
 
 
 def default_spawn_worker(
-    job_id: int,
+    job_ids: int | Sequence[int],
     *,
     database_url: str | None = None,
     endpoint: str = DEFAULT_ENDPOINT,
@@ -271,8 +273,17 @@ def default_spawn_worker(
 
     ``start_new_session=True`` detaches the child from the API process group so
     a queued import keeps running even if the API is restarted or stopped.
+    Several job ids make one worker run them one after another: that is how
+    the nightly sweep refreshes every league without a burst of parallel
+    imports that Sports.ru answers with failures.
     """
-    args = [sys.executable, "-m", "fantasy_analytics.ingestion_worker", str(job_id)]
+    ids = [job_ids] if isinstance(job_ids, int) else list(job_ids)
+    args = [
+        sys.executable,
+        "-m",
+        "fantasy_analytics.ingestion_worker",
+        *(str(job_id) for job_id in ids),
+    ]
     if database_url:
         args += ["--database-url", database_url]
     if endpoint:
@@ -329,6 +340,7 @@ def create_app(
     *,
     session_factory: sessionmaker | None = None,
     spawn_worker: SpawnWorker | None = None,
+    spawn_chain: SpawnChain | None = None,
     ensure_forecasts: EnsureForecasts = ensure_tour_forecasts,
     sync_competitions: SyncCatalogue | None = None,
     fetch_squad: FetchSquad | None = None,
@@ -347,15 +359,29 @@ def create_app(
     instead of a subprocess, a real solver run and the network.
     ``nightly_refresh`` is off unless the caller passes settings (the CLI
     ``main()`` does); tests therefore never start a sleeping background task.
+    ``spawn_chain`` runs several jobs one after another (the nightly sweep);
+    by default it is one worker process for all of them, or ``spawn_worker``
+    called for each when only that was injected.
     """
     if session_factory is None:
         engine = create_db_engine(database_url)
         session_factory = create_session_factory(engine)
+    if spawn_chain is None and spawn_worker is None:
+        def spawn_chain(job_ids: Sequence[int]) -> None:
+            default_spawn_worker(
+                job_ids, database_url=database_url, endpoint=endpoint
+            )
     if spawn_worker is None:
         def spawn_worker(job_id: int) -> None:
             default_spawn_worker(
                 job_id, database_url=database_url, endpoint=endpoint
             )
+    if spawn_chain is None:
+        injected_worker = spawn_worker
+
+        def spawn_chain(job_ids: Sequence[int]) -> None:
+            for job_id in job_ids:
+                injected_worker(job_id)
     if sync_competitions is None:
         def sync_competitions(factory: sessionmaker) -> dict[str, Any]:
             return default_sync_catalogue(factory, endpoint=endpoint)
@@ -383,6 +409,7 @@ def create_app(
                     app.state.session_factory,
                     app.state.spawn_worker,
                     settings=settings,
+                    spawn_chain=app.state.spawn_chain,
                 )
                 try:
                     odds_client = SportsGraphQLClient(
@@ -431,6 +458,7 @@ def create_app(
     )
     app.state.session_factory = session_factory
     app.state.spawn_worker = spawn_worker
+    app.state.spawn_chain = spawn_chain
     app.state.ensure_forecasts = ensure_forecasts
     app.state.sync_competitions = sync_competitions
     app.state.fetch_squad = fetch_squad
@@ -1087,6 +1115,7 @@ def create_app(
             app.state.spawn_worker,
             settings=app.state.nightly_refresh,
             force=force,
+            spawn_chain=app.state.spawn_chain,
         )
 
     @app.get(

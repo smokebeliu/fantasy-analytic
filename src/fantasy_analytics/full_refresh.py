@@ -5,10 +5,14 @@ sweep only re-imports current seasons. Keeping the analytics fresh after a
 model change therefore meant clicking through every league twice and then
 the odds button — the *full refresh* does that sequence in one go:
 
-    for each imported league, in catalogue order:
+    for each imported league, national leagues first, then the cups:
         1. import the latest completed season (the forecast's prior);
         2. import the current season, when the league has one;
         3. fetch the 1x2 line and rebuild the next-tour forecast.
+
+A cup's forecast reads the national leagues its clubs play in (step 24), so
+the cups go last: in catalogue order the Champions League came before every
+league and its stored forecast was built on the leagues' previous snapshots.
 
 The steps run strictly one after another: the imports are heavy (a full
 season is ~40–90 s and a burst of GraphQL calls) and the odds refresh needs
@@ -38,6 +42,7 @@ from sqlalchemy.orm import sessionmaker
 
 from .db import IngestionJobRepository, session_scope
 from .db.job_repository import ACTIVE_STATUSES
+from .features import NON_LEAGUE_SLUGS
 from .ingestion_worker import safe_error_message
 from .read_repository import ReadRepository
 
@@ -144,16 +149,21 @@ class FullRefreshRun:
 
 
 def plan_full_refresh(competitions: list[dict[str, Any]]) -> list[FullRefreshStep]:
-    """Lay out the steps for every imported league, in catalogue order.
+    """Lay out the steps for every imported league: leagues, then cups.
 
-    Only leagues with at least one imported season are touched: the point is
-    to refresh what the app already serves, not to pull in every league
-    Sports.ru offers. A league without an active season in the catalogue gets
-    its current-season step marked skipped up front, so the screen shows why
-    nothing happened there.
+    Within each group the catalogue order holds. A cup comes after every
+    national league because its forecast is built from theirs (see the module
+    docstring). Only leagues with at least one imported season are touched:
+    the point is to refresh what the app already serves, not to pull in every
+    league Sports.ru offers. A league without an active season in the
+    catalogue gets its current-season step marked skipped up front, so the
+    screen shows why nothing happened there.
     """
     steps: list[FullRefreshStep] = []
-    for competition in competitions:
+    ordered = sorted(
+        competitions, key=lambda item: str(item.get("slug")) in NON_LEAGUE_SLUGS
+    )
+    for competition in ordered:
         if not competition.get("is_imported"):
             continue
         slug = str(competition["slug"])

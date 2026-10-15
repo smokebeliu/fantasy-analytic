@@ -555,8 +555,12 @@ The optional JSON body selects a season (`{"season_name": "2025/2026"}`,
 `{"season_id": "59"}` or `{"current": true}`); the default is the latest
 completed season. A successful job records the import counts, the quality verdict
 and a `data_freshness` timestamp; a failed job records a bounded, credential-free
-error message. The worker can also be run directly for a queued job:
-`PYTHONPATH=src python3 -m fantasy_analytics.ingestion_worker <job_id>`.
+error message. The worker can also be run directly for queued jobs:
+`PYTHONPATH=src python3 -m fantasy_analytics.ingestion_worker <job_id> [<job_id> ...]`
+runs them one after another. A job still pending two hours after it was queued
+has no worker coming for it (one died mid-chain, say, in a redeploy), so the
+next refresh of that league marks it failed as abandoned instead of being
+swallowed by it.
 
 While a job runs, the worker mirrors the pipeline's progress onto the job row as a
 coarse stage (`queued` → `starting` → `fetch_season` → `fetch_players` →
@@ -583,7 +587,11 @@ already has an active season in `seasons`. Catalogued-only leagues and leagues
 whose only import is a finished historical season are skipped. A second
 scheduled job the same local day is not created, and a league that already has
 a pending/running refresh is left alone. Jobs are marked
-`trigger_type=scheduled` so they show up next to the manual ones.
+`trigger_type=scheduled` so they show up next to the manual ones. All of them
+go to a single worker that runs them one after another, national leagues first
+and the cups last: launched in parallel, a dozen imports hit Sports.ru at once
+and several failed every night («request failed after 3 attempts»), and a
+cup's forecast reads the leagues, so it must not be built before them.
 
 ```bash
 # Who would be refreshed tonight, and when is the next run?
@@ -595,8 +603,9 @@ curl -X POST 'http://127.0.0.1:8000/admin/ingestion/nightly?force=true'
 
 **Everything in one go.** After a model change the whole dataset has to be
 rebuilt, which used to mean every league twice plus the odds button. The
-*full refresh* does that sequence for every imported league, in catalogue
-order and strictly one step after another: the latest completed season (the
+*full refresh* does that sequence for every imported league — national leagues
+in catalogue order, then the cups, whose forecast reads those leagues — and
+strictly one step after another: the latest completed season (the
 forecast's prior), then the current season (skipped when the league has none),
 then the 1x2 line with the next-tour forecast rebuilt. Each import is a regular
 job (`trigger_type=full_refresh`) visible in the per-league panel; a failing
@@ -744,7 +753,8 @@ version are shown in the header, and loading/empty/error states are covered acro
 all views.
 
 The `Обновление` screen (`/admin`) drives the manual refresh: one button enqueues
-a real ingestion job, the panel shows the stage, the progress, the start time and
+a real ingestion job — for the season being played by default, or the latest
+completed one when the league has none under way — the panel shows the stage, the progress, the start time and
 the elapsed duration, and it polls only while the job is in flight. A second click
 is impossible while a refresh runs (the button is disabled and the API answers
 `409`), the state is rediscovered from the server after a page reload, and the

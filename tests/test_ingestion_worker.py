@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import os
 import unittest
+from datetime import timedelta
+from unittest import mock
 
 from sqlalchemy import text
 
@@ -22,7 +24,8 @@ from fantasy_analytics.db import (
     migration,
     session_scope,
 )
-from fantasy_analytics.ingestion_worker import execute_job, safe_error_message
+from fantasy_analytics.db.job_repository import STALE_PENDING_AFTER
+from fantasy_analytics.ingestion_worker import execute_job, main, safe_error_message
 
 # Reuse the fetch fixture and fake client from the ingestion tests; the tests
 # directory is on sys.path during unittest discovery.
@@ -278,6 +281,46 @@ class WorkerIntegrationTest(unittest.TestCase):
 
         self.assertEqual("skipped", status)
         self.assertEqual(0, self._count("clubs"))
+
+    def test_a_job_left_pending_too_long_is_abandoned(self) -> None:
+        # A nightly chain whose worker died leaves its queue behind; the
+        # league must not stay locked behind a job nobody will run.
+        stale_id = self._enqueue()
+        created_at = self._job(stale_id).created_at
+
+        with session_scope(self.session_factory) as session:
+            repo = IngestionJobRepository(session)
+            same, created = repo.enqueue(tournament_slug="russia")
+            self.assertFalse(created)
+            self.assertEqual(stale_id, same.id)
+            fresh, created = repo.enqueue(
+                tournament_slug="russia",
+                now=created_at + STALE_PENDING_AFTER + timedelta(minutes=1),
+            )
+            self.assertTrue(created)
+            fresh_id = fresh.id
+
+        self.assertNotEqual(stale_id, fresh_id)
+        abandoned = self._job(stale_id)
+        self.assertEqual("failed", abandoned.status)
+        self.assertIn("Abandoned", abandoned.error_message)
+
+    def test_one_worker_runs_several_jobs_in_order_past_a_crash(self) -> None:
+        calls: list[int] = []
+
+        def fake_execute(engine, session_factory, job_id, **kwargs):
+            calls.append(job_id)
+            if job_id == 2:
+                raise RuntimeError("worker hiccup")
+            return "succeeded"
+
+        with mock.patch(
+            "fantasy_analytics.ingestion_worker.execute_job", side_effect=fake_execute
+        ):
+            code = main(["1", "2", "3", "--database-url", TEST_DATABASE_URL, "--quiet"])
+
+        self.assertEqual([1, 2, 3], calls)
+        self.assertEqual(1, code)
 
 
 if __name__ == "__main__":

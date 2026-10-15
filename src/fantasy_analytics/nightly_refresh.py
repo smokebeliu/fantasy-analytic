@@ -12,9 +12,12 @@ Eligibility is read from PostgreSQL, not from Sports.ru:
 
 Each eligible league is enqueued as a regular :class:`IngestionJob` with
 ``trigger_type='scheduled'`` and ``use_current_season=True``, so the existing
-worker, quality gate and per-tournament lock apply unchanged. Different leagues
-still refresh in parallel; a league that already has a pending/running job, or
-that already received a scheduled job today, is skipped.
+worker, quality gate and per-tournament lock apply unchanged. The leagues run
+one after another in a single worker, national leagues first and the cups
+(whose forecast reads them) last: launched all at once, a dozen imports hit
+Sports.ru together and several failed every night ("request failed after 3
+attempts"). A league that already has a pending/running job, or that already
+received a scheduled job today, is skipped.
 
 The API process runs :func:`run_nightly_loop` from its lifespan: it sleeps until
 the configured local hour (default 03:00 Europe/Moscow) and then sweeps. A
@@ -39,6 +42,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .db import IngestionJobRepository, create_db_engine, create_session_factory, session_scope
 from .db.models import Competition, IngestionJob, Season
+from .features import NON_LEAGUE_SLUGS
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +61,7 @@ SKIP_ALREADY_RUNNING = "already_running"
 SKIP_ALREADY_RAN_TODAY = "already_ran_today"
 
 SpawnWorker = Callable[[int], None]
+SpawnChain = Callable[[list[int]], None]
 SleepFn = Callable[[float], Awaitable[None]]
 NowFn = Callable[[], datetime]
 
@@ -276,18 +281,25 @@ def enqueue_nightly_jobs(
     settings: NightlyRefreshSettings | None = None,
     now: datetime | None = None,
     force: bool = False,
+    spawn_chain: SpawnChain | None = None,
 ) -> dict[str, Any]:
     """Enqueue a current-season refresh for every eligible league.
 
     ``force`` bypasses the once-a-day guard (used by the admin "run now"
     endpoint) but never starts a second concurrent job for the same league.
+    The new jobs are queued national leagues first, cups last, and handed to
+    ``spawn_chain`` in one go so a single worker runs them in that order;
+    without it each job gets its own ``spawn_worker`` call.
     """
     settings = settings or NightlyRefreshSettings()
     moment = now or datetime.now(UTC)
     day_start = start_of_local_day(moment, settings.tz)
 
     with session_scope(session_factory) as session:
-        eligible = list_imported_active_leagues(session)
+        eligible = sorted(
+            list_imported_active_leagues(session),
+            key=lambda league: league.tournament_slug in NON_LEAGUE_SLUGS,
+        )
 
     enqueued: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
@@ -317,7 +329,6 @@ def enqueue_nightly_jobs(
             payload = _job_payload(job)
 
         if created:
-            spawn_worker(payload["id"])
             enqueued.append(payload)
         else:
             skipped.append(
@@ -326,6 +337,13 @@ def enqueue_nightly_jobs(
                     "reason": SKIP_ALREADY_RUNNING,
                 }
             )
+
+    job_ids = [payload["id"] for payload in enqueued]
+    if job_ids and spawn_chain is not None:
+        spawn_chain(job_ids)
+    else:
+        for job_id in job_ids:
+            spawn_worker(job_id)
 
     report = {
         "ran_at": moment.astimezone(UTC).isoformat(),

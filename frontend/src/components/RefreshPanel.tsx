@@ -33,6 +33,19 @@ const POLL_INTERVAL_MS = 2500;
 const LATEST_COMPLETED = "latest";
 const ACTIVE_SEASON = "current";
 
+/**
+ * The season a refresh targets unless told otherwise: the one being played
+ * when the league has it — that is what keeps prices, availability and the
+ * next tour fresh — and the latest completed one (the forecast's prior)
+ * otherwise. Defaulting to the completed season used to re-import last
+ * season while the current one stayed stale.
+ */
+export function defaultSeasonFor(
+  competition: CompetitionModel | null | undefined,
+): string {
+  return competition?.has_active_season ? ACTIVE_SEASON : LATEST_COMPLETED;
+}
+
 /** Translate the season selector into the refresh request body. */
 export function refreshBodyFor(choice: string): RefreshRequestBody {
   if (choice === ACTIVE_SEASON) return { current: true };
@@ -66,7 +79,11 @@ export function RefreshPanel({
   const [slug, setSlug] = useState<string>(
     initialSlug ?? initialStatus?.tournament_slug ?? competitions[0]?.slug ?? "",
   );
-  const [season, setSeason] = useState<string>(LATEST_COMPLETED);
+  const [season, setSeason] = useState<string>(() =>
+    defaultSeasonFor(
+      competitions.find((item) => item.slug === slug) ?? initialStatus?.competition,
+    ),
+  );
   const [now, setNow] = useState(() => Date.now());
 
   // The league a response belongs to, read synchronously so a status fetch that
@@ -137,12 +154,12 @@ export function RefreshPanel({
   const changeLeague = useCallback((next: string) => {
     slugRef.current = next;
     setSlug(next);
-    setSeason(LATEST_COMPLETED);
+    setSeason(defaultSeasonFor(competitions.find((item) => item.slug === next)));
     setStatus(null);
     setLoadError(null);
     setActionError(null);
     seenJob.current = null;
-  }, []);
+  }, [competitions]);
 
   const polling = shouldPoll(status);
 
@@ -308,9 +325,9 @@ export function RefreshPanel({
         </div>
         <p className="inline-note" data-testid="refresh-season-hint">
           {season === LATEST_COMPLETED
-            ? "Обновляет исторические данные (по умолчанию)."
+            ? "Обновляет прошлый сезон — базу прогноза."
             : season === ACTIVE_SEASON
-              ? "Обновляет текущий турнир: составы, цены и календарь."
+              ? "Обновляет текущий турнир: составы, цены и календарь (по умолчанию)."
               : "Импортирует выбранный сезон этой лиги."}
         </p>
 
