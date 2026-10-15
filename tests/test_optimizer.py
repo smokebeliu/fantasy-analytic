@@ -1686,13 +1686,15 @@ class StepTwentyThreeOptimizerTest(unittest.TestCase):
         rules = self._rules()
         # Only one forward starts in this pool (5 defenders and 5 midfielders
         # are better), so the other two roster slots are decided by what the
-        # tours ahead are worth. Four forwards for three slots: the starter,
-        # then the two with the best runs ahead.
+        # tours ahead are worth, since by default the bench earns them
+        # (``horizon_bench_weight`` 1). Four forwards for three slots: the
+        # starter, then the two with the best runs ahead.
         pool.append(self._candidate(311, "FORWARD", 3.5, future=0.0, price=4.0, club=311))
         pool.append(self._candidate(312, "FORWARD", 3.0, future=1.0, price=4.0, club=312))
-        pool.append(self._candidate(300, "FORWARD", 0.5, future=0.0, price=4.0, club=300))
+        pool.append(self._candidate(300, "FORWARD", 0.5, future=0.0, price=3.5, club=300))
         pool.append(self._candidate(301, "FORWARD", 0.5, future=5.0, price=4.0, club=301))
         solution = solve_squad(pool, rules)
+        self.assertEqual(1.0, solution["horizon_bench_weight"])
         ids = {p["player_season_id"] for p in solution["squad"]}
         self.assertIn(301, ids)
         self.assertIn(312, ids)
@@ -1702,6 +1704,130 @@ class StepTwentyThreeOptimizerTest(unittest.TestCase):
         self.assertAlmostEqual(
             sum(p["expected_points"] for p in starters), solution["starting_expected_points"]
         )
+
+    def test_at_zero_bench_weight_the_bench_earns_no_horizon(self) -> None:
+        # The same pool with the bench weight off: a forward who would only
+        # start *next* tour is worth nothing this tour, so the spare forward
+        # slot goes to the cheapest player and the roster's money stays in
+        # the eleven. The horizon eleven is this tour's eleven.
+        pool = [c for c in self._pool() if c.role != "FORWARD"]
+        pool.append(self._candidate(311, "FORWARD", 3.5, future=0.0, price=4.0, club=311))
+        pool.append(self._candidate(312, "FORWARD", 3.2, future=1.0, price=4.0, club=312))
+        pool.append(self._candidate(300, "FORWARD", 0.5, future=0.0, price=3.5, club=300))
+        pool.append(self._candidate(301, "FORWARD", 0.5, future=2.0, price=4.0, club=301))
+        pool.append(self._candidate(302, "FORWARD", 0.5, future=0.0, price=3.5, club=302))
+        solution = solve_squad(pool, self._rules(), horizon_bench_weight=0.0)
+        ids = {p["player_season_id"] for p in solution["squad"]}
+        self.assertIn(311, ids)
+        self.assertIn(312, ids)
+        self.assertNotIn(301, ids)
+        self.assertEqual(1, len(ids & {300, 302}))
+        self.assertEqual(0.0, solution["horizon_bench_weight"])
+        starters = {p["player_season_id"] for p in solution["squad"] if p["is_starter"]}
+        horizon = {p["player_season_id"] for p in solution["squad"] if p["is_horizon_starter"]}
+        self.assertEqual(starters, horizon)
+        self.assertAlmostEqual(
+            sum(p["future_points"] for p in solution["squad"] if p["is_starter"]),
+            solution["horizon_expected_points"],
+        )
+        self.assertNotIn("horizon_coupled", solution)
+
+    def test_the_roster_is_chosen_on_the_run_but_the_lineup_on_this_tour(self) -> None:
+        # Three forwards for two starting slots and three roster slots. On
+        # the run of fixtures the second (3.2 now, 3.0 ahead) is worth more
+        # than the third (3.4 now, nothing ahead), so the roster takes the
+        # first two and the cheapest fodder for the third slot.
+        pool = [c for c in self._pool() if c.role != "FORWARD"]
+        pool.append(self._candidate(311, "FORWARD", 3.5, future=0.0, price=4.0, club=311))
+        pool.append(self._candidate(312, "FORWARD", 3.2, future=3.0, price=4.0, club=312))
+        pool.append(self._candidate(313, "FORWARD", 3.4, future=0.0, price=4.0, club=313))
+        pool.append(self._candidate(300, "FORWARD", 0.5, future=0.0, price=3.5, club=300))
+        solution = solve_squad(pool, self._rules(), horizon_bench_weight=0.0)
+        ids = {p["player_season_id"] for p in solution["squad"]}
+        self.assertEqual({311, 312, 300}, {i for i in ids if i >= 300})
+
+    def test_a_player_who_wins_his_slot_on_the_run_may_still_sit_out_this_tour(self) -> None:
+        # The second forward is a poor start now (2.0, below the weakest
+        # defender and midfielder of the eleven at 3.0) but has 4.0 ahead: on
+        # the run he is the second best forward and earns a roster slot.
+        # This tour's lineup is then picked on this tour alone, so he waits
+        # on the bench, flagged as a horizon starter, and the eleven is the
+        # best this tour's forecast allows from the roster.
+        pool = [c for c in self._pool() if c.role != "FORWARD"]
+        pool.append(self._candidate(311, "FORWARD", 3.5, future=0.0, price=4.0, club=311))
+        pool.append(self._candidate(312, "FORWARD", 2.0, future=4.0, price=4.0, club=312))
+        pool.append(self._candidate(300, "FORWARD", 0.5, future=0.0, price=3.5, club=300))
+        pool.append(self._candidate(302, "FORWARD", 0.5, future=0.0, price=3.5, club=302))
+        solution = solve_squad(pool, self._rules(), horizon_bench_weight=0.0)
+        by_id = {p["player_season_id"]: p for p in solution["squad"]}
+        self.assertIn(312, by_id)
+        self.assertFalse(by_id[312]["is_starter"])
+        self.assertTrue(by_id[312]["is_horizon_starter"])
+        # The lineup's expected points are this tour's best from the roster:
+        # the keeper, the five defenders, the four best midfielders and the
+        # first forward (or four defenders and five midfielders; same sum).
+        self.assertAlmostEqual(
+            sum(p["expected_points"] for p in solution["starting"]),
+            solution["starting_expected_points"],
+        )
+        self.assertAlmostEqual(3.0 + 20.0 + 17.0 + 3.5, solution["starting_expected_points"])
+        self.assertEqual(11, len(solution["starting"]))
+        self.assertEqual([], solution["constraints"]["locked"])
+        self.assertFalse(any(p["is_locked"] for p in solution["squad"]))
+        # The reported horizon is the run eleven's, with the forward in it.
+        horizon = [p for p in solution["squad"] if p["is_horizon_starter"]]
+        self.assertEqual(11, len(horizon))
+        self.assertAlmostEqual(4.0, solution["horizon_expected_points"])
+        self.assertAlmostEqual(
+            sum(p["future_points"] for p in horizon), solution["horizon_expected_points"]
+        )
+
+    def test_the_two_pass_transfer_plan_reports_the_future_of_the_swap(self) -> None:
+        # Transfers mode with the bench weight off: the current squad holds
+        # the poor forward (0.5 now, nothing ahead) and the plan swaps him
+        # for the one with the run ahead. The swap's entries, like the rest
+        # of the report, must still carry the future points the roster was
+        # chosen on, although the lineup pass saw none.
+        pool = [c for c in self._pool() if c.role != "FORWARD"]
+        pool.append(self._candidate(311, "FORWARD", 3.5, future=0.0, price=4.0, club=311))
+        pool.append(self._candidate(312, "FORWARD", 3.0, future=4.0, price=4.0, club=312))
+        pool.append(self._candidate(300, "FORWARD", 0.5, future=0.0, price=4.0, club=300))
+        pool.append(self._candidate(302, "FORWARD", 0.5, future=0.0, price=4.0, club=302))
+        current = [1, 2, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 311, 300, 302]
+        solution = solve_squad(
+            pool, self._rules(), current_ids=current, max_transfers=1, horizon_bench_weight=0.0
+        )
+        transfers = solution["transfers"]
+        self.assertEqual(1, transfers["made"])
+        self.assertEqual(312, transfers["in"][0]["player_season_id"])
+        self.assertAlmostEqual(4.0, transfers["in"][0]["future_points"])
+        self.assertAlmostEqual(4.0, transfers["pairs"][0]["in"]["future_points"])
+        self.assertAlmostEqual(0.0, transfers["out"][0]["future_points"])
+
+    def test_a_partial_bench_weight_discounts_the_rotation_player(self) -> None:
+        pool = [c for c in self._pool() if c.role != "FORWARD"]
+        pool.append(self._candidate(311, "FORWARD", 3.5, future=0.0, price=4.0, club=311))
+        pool.append(self._candidate(300, "FORWARD", 0.5, future=0.0, price=3.5, club=300))
+        pool.append(self._candidate(302, "FORWARD", 0.5, future=0.0, price=3.5, club=302))
+        # A rotation forward with 5 points ahead who costs 2 more than fodder.
+        # At half weight he is worth 2.5 points ahead, still more than the
+        # spend tie-break, so he is bought; the reported horizon eleven then
+        # differs from this tour's.
+        pool.append(self._candidate(301, "FORWARD", 0.5, future=5.0, price=5.5, club=301))
+        solution = solve_squad(pool, self._rules(), horizon_bench_weight=0.5)
+        ids = {p["player_season_id"] for p in solution["squad"]}
+        self.assertIn(301, ids)
+        horizon = {p["player_season_id"] for p in solution["squad"] if p["is_horizon_starter"]}
+        self.assertIn(301, horizon)
+        self.assertFalse(
+            next(p for p in solution["squad"] if p["player_season_id"] == 301)["is_starter"]
+        )
+
+    def test_bench_weight_outside_the_unit_range_is_rejected(self) -> None:
+        with self.assertRaises(OptimizerError):
+            solve_squad(self._pool(), self._rules(), horizon_bench_weight=1.5)
+        with self.assertRaises(OptimizerError):
+            solve_squad(self._pool(), self._rules(), horizon_bench_weight=-0.1)
 
     def test_horizon_counts_only_the_best_eleven_of_the_roster(self) -> None:
         # Every outfield player in the pool has a strong run of fixtures ahead

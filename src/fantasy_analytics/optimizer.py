@@ -80,6 +80,12 @@ from .forecast import MODEL_EVENT, ForecastError, build_forecast_dataset
 #   old sum made four bench players' next-tour forecasts (~40 points on a
 #   two-tour horizon) weigh nearly as much as the current eleven, so a plan
 #   preferred cheap depth over a star who would actually start.
+#   The future eleven is free to differ from this tour's, so a player who
+#   sits out this tour but would start the next is worth ``horizon_decay``
+#   of his next-tour forecast, which is why a horizon squad carries a few
+#   dear substitutes with a fixture ahead; ``horizon_bench_weight`` (below)
+#   is the knob that limits it, and at its default of 1 the squads are the
+#   same as before the knob existed.
 OPTIMIZER_VERSION = "1.6.0"
 
 # Search configuration, in *deterministic* time: a machine-independent measure of
@@ -150,6 +156,32 @@ DEFAULT_TRANSFER_GAIN_SIGMA = 0.0
 # gave part of that back.
 DEFAULT_HORIZON_DECAY = 0.7
 DEFAULT_HORIZON_TOURS = 2
+
+# How much of his ``future_points`` a player earns when he would start in the
+# tours ahead but sits on the bench *this* tour. At 1 the roster may hold a
+# player purely for the next fixture, which is where the dear substitutes of
+# a horizon squad come from (~4 units of budget and ~12 expected points on
+# the bench per tour in the carry-over backtests, against ~2.5 points on a
+# bench of fodder). At 0 the horizon is judged on this tour's eleven alone:
+# a bench slot is then worth nothing, goes to the cheapest legal player, and
+# the money stays in the eleven. One might expect the latter to score more —
+# the game hands out fresh transfers every tour, so a player wanted next
+# tour could be bought then — but the transfer allowance, not the budget, is
+# what binds a carried squad (2.4-2.6 of 3 transfers spent per tour), and a
+# bench that would start next tour also covers this tour's absences. Over
+# the two full seasons replayed with ``--carry-squad --horizon-tours 2``:
+#
+#   bench weight        1.0     0.5     0.0
+#   La Liga 2025/26    2242    2205    2156   realised points with auto-subs
+#                      2126    2114    2087   ... of the eleven alone
+#   Premier League     2414    2413    2309   with auto-subs
+#   2025/26            2324    2330    2295   of the eleven alone
+#   bench per tour     ~22     ~20     ~19    units of budget
+#
+# so the full weight stays the default; 0.5 buys a cheaper bench for little
+# or nothing, and 0 is the setting for a manager who wants every unit of
+# budget in the eleven and a bench of fodder, at the price above.
+DEFAULT_HORIZON_BENCH_WEIGHT = 1.0
 
 ROLES = ("GOALKEEPER", "DEFENDER", "MIDFIELDER", "FORWARD")
 
@@ -978,8 +1010,117 @@ def solve_squad(
     min_transfer_gain: float | None = None,
     transfer_gain_sigma: float | None = None,
     captain_risk_weight: float | None = None,
+    horizon_bench_weight: float | None = None,
 ) -> dict[str, Any]:
     """Solve the squad-selection integer program and return an explanation.
+
+    With a horizon whose bench weight is below 1 the answer takes two solves.
+    The first chooses the *roster*: its eleven is judged on the run
+    of fixtures, so the money goes to players who start now and keep
+    starting, and the bench is the cheapest one allowed. That eleven is not
+    the one to field, though — a player with a modest match now and a plum
+    fixture next can win a roster slot on the run and still be the wrong
+    start *this* tour, since the lineup is free to change every tour. So the
+    second solve fixes the roster and picks the eleven, the captain and the
+    bench order on this tour's forecast alone. The horizon fields of the
+    report (``horizon_expected_points``, ``is_horizon_starter``) describe the
+    first solve's eleven; everything else describes the second's.
+    """
+    kwargs = dict(
+        current_ids=current_ids,
+        max_transfers=max_transfers,
+        locked_starter_ids=locked_starter_ids,
+        formation=formation,
+        fixture_conflict_weight=fixture_conflict_weight,
+        solve_limit=solve_limit,
+        min_transfer_gain=min_transfer_gain,
+        transfer_gain_sigma=transfer_gain_sigma,
+        captain_risk_weight=captain_risk_weight,
+    )
+    roster = _solve_squad_once(
+        candidates,
+        rules,
+        locked_ids=locked_ids,
+        horizon_bench_weight=horizon_bench_weight,
+        **kwargs,
+    )
+    if not roster["horizon_coupled"]:
+        roster.pop("horizon_coupled")
+        return roster
+
+    picked = [entry["player_season_id"] for entry in roster["squad"]]
+    lineup = _solve_squad_once(
+        [replace(candidate, future_points=0.0) for candidate in candidates],
+        rules,
+        locked_ids=[*(locked_ids or ()), *picked],
+        horizon_bench_weight=horizon_bench_weight,
+        **kwargs,
+    )
+    lineup.pop("horizon_coupled")
+    # The lineup solve is the roster solve with fifteen pins: it can only
+    # fail to be optimal if the search budget is absurdly small, and then the
+    # roster's own status already says so.
+    lineup["status"] = roster["status"]
+    lineup["proven_optimal"] = roster["proven_optimal"]
+    lineup["horizon_expected_points"] = roster["horizon_expected_points"]
+    lineup["horizon_bench_weight"] = roster["horizon_bench_weight"]
+    horizon_ids = {
+        entry["player_season_id"]
+        for entry in roster["squad"]
+        if entry["is_horizon_starter"]
+    }
+    future_of = {
+        entry["player_season_id"]: entry["future_points"] for entry in roster["squad"]
+    }
+    pinned = set(roster["constraints"]["locked"])
+    for entry in lineup["squad"]:
+        entry["is_horizon_starter"] = entry["player_season_id"] in horizon_ids
+        # The lineup solve saw no future and pinned the whole roster; both
+        # are implementation details the report must not show.
+        entry["future_points"] = future_of[entry["player_season_id"]]
+        entry["is_locked"] = entry["player_season_id"] in pinned
+    lineup["starting"] = [e for e in lineup["squad"] if e["is_starter"]]
+    for entry in lineup["bench"]:
+        entry["future_points"] = future_of[entry["player_season_id"]]
+        entry["is_locked"] = entry["player_season_id"] in pinned
+    for key in ("captain", "vice_captain"):
+        lineup[key]["future_points"] = future_of[lineup[key]["player_season_id"]]
+    if lineup["transfers"] is not None:
+        # The pairs hold the same entries, so they are updated with them.
+        roster_transfers = roster["transfers"]
+        for side in ("in", "out"):
+            future_by_id = {
+                entry["player_season_id"]: entry.get("future_points")
+                for entry in roster_transfers[side]
+            }
+            for entry in lineup["transfers"][side]:
+                if "future_points" in entry:
+                    entry["future_points"] = future_by_id[entry["player_season_id"]]
+    lineup["constraints"] = roster["constraints"]
+    return lineup
+
+
+def _solve_squad_once(
+    candidates: Sequence[Candidate],
+    rules: SquadRules,
+    *,
+    current_ids: Sequence[int] | None = None,
+    max_transfers: int | None = None,
+    locked_ids: Sequence[int] | None = None,
+    locked_starter_ids: Sequence[int] | None = None,
+    formation: str | None = None,
+    fixture_conflict_weight: float | None = None,
+    solve_limit: float | None = None,
+    min_transfer_gain: float | None = None,
+    transfer_gain_sigma: float | None = None,
+    captain_risk_weight: float | None = None,
+    horizon_bench_weight: float | None = None,
+) -> dict[str, Any]:
+    """One solve of the squad-selection integer program (see :func:`solve_squad`).
+
+    Besides the public report it returns ``horizon_coupled``: whether the
+    eleven was judged on the run of fixtures, which is when the caller has
+    to pick the lineup again on this tour alone.
 
     With ``current_ids`` the solver runs in *limited-transfers* mode: at most
     ``max_transfers`` (defaulting to the tour's ``total_transfers``) of the
@@ -1010,9 +1151,12 @@ def solve_squad(
     widens the transfer threshold by that many standard deviations of both
     players' forecasts. A candidate's ``future_points`` count in every mode
     through the best eleven the chosen roster can field in the tours ahead
-    (``solution["horizon_expected_points"]``), so a squad with a horizon keeps
-    players whose good fixtures are still to come without paying for a bench
-    that will not play.
+    (``solution["horizon_expected_points"]``). ``horizon_bench_weight``
+    (default :data:`DEFAULT_HORIZON_BENCH_WEIGHT`) says how much of that a
+    player earns when he would start ahead but not now: at 1 the roster may
+    hold a player for the fixture after this one; at 0 the horizon eleven is
+    this tour's eleven, so the roster is the best starting eleven for the
+    run of fixtures and the bench is simply the cheapest one allowed.
 
     Raises :class:`OptimizerError` when the pool is too small or the constraints
     cannot be satisfied.
@@ -1138,6 +1282,13 @@ def solve_squad(
     )
     if risk_weight < 0:
         raise OptimizerError("captain_risk_weight must be non-negative")
+    bench_weight = (
+        DEFAULT_HORIZON_BENCH_WEIGHT
+        if horizon_bench_weight is None
+        else float(horizon_bench_weight)
+    )
+    if not 0.0 <= bench_weight <= 1.0:
+        raise OptimizerError("horizon_bench_weight must be between 0 and 1")
 
     # Fixture awareness (step 16): a pair of starters that meet each other in
     # the tour is charged the priced magnitude of their cancellation, so such a
@@ -1165,12 +1316,25 @@ def solve_squad(
 
     # The tours ahead (step 23 horizon): the roster earns the discounted
     # forecast of the following tours through the best eleven it could field
-    # there, not through all fifteen. The future eleven is free of the pins
-    # and the formation, which bind this tour only, but keeps the role limits
-    # so a bench of five forwards cannot all be counted. Nothing to count means
-    # no variables: a tour without a horizon keeps the model bit-identical.
+    # there, not through all fifteen. Nothing to count means no variables: a
+    # tour without a horizon keeps the model bit-identical.
+    #
+    # At a bench weight of 0 (the default) that eleven is this tour's, so the
+    # horizon simply lengthens the run each starter is judged on and no
+    # roster slot is ever bought for a fixture its player would only start
+    # *next* tour. Above 0 the future eleven gets its own variables: it is
+    # free of the pins and the formation, which bind this tour only, but
+    # keeps the role limits so a bench of five forwards cannot all be
+    # counted, and a future starter who sits out this tour earns only the
+    # weighted share of his points.
+    has_horizon = any(candidate.future_points_scaled > 0 for candidate in candidates)
     future_start: list[cp_model.IntVar] = []
-    if any(candidate.future_points_scaled > 0 for candidate in candidates):
+    future_term: Any = 0
+    if has_horizon and bench_weight <= 0.0:
+        future_term = sum(
+            candidates[i].future_points_scaled * start[i] for i in range(n)
+        )
+    elif has_horizon:
         future_start = [model.NewBoolVar(f"future_start_{i}") for i in range(n)]
         model.Add(sum(future_start) == rules.starting_players)
         for i in range(n):
@@ -1182,9 +1346,20 @@ def solve_squad(
             )
             model.Add(sum(future_start[i] for i in idx) >= start_min)
             model.Add(sum(future_start[i] for i in idx) <= start_max)
-    future_term = sum(
-        candidates[i].future_points_scaled * future_start[i] for i in range(n)
-    ) if future_start else 0
+        future_term = sum(
+            candidates[i].future_points_scaled * future_start[i] for i in range(n)
+        )
+        if bench_weight < 1.0:
+            for i in range(n):
+                forfeit = int(round((1.0 - bench_weight) * candidates[i].future_points_scaled))
+                if forfeit <= 0:
+                    continue
+                # ``rotated`` is only bounded from below and only ever
+                # subtracted, so the solver settles it at exactly
+                # ``future_start and not start`` (see the clash variables).
+                rotated = model.NewBoolVar(f"future_bench_{i}")
+                model.Add(rotated >= future_start[i] - start[i])
+                future_term -= forfeit * rotated
 
     # Objective: maximise starting + captain points less the fixture charge, then
     # keep as many current players as possible, then spend as little as possible.
@@ -1265,11 +1440,12 @@ def solve_squad(
 
     starters = [candidates[i] for i in starters_idx]
     bench_idx = [i for i in picked if i not in set(starters_idx)]
-    horizon_idx = (
-        [i for i in picked if solver.Value(future_start[i]) == 1]
-        if future_start
-        else []
-    )
+    if future_start:
+        horizon_idx = [i for i in picked if solver.Value(future_start[i]) == 1]
+    elif has_horizon:
+        horizon_idx = list(starters_idx)
+    else:
+        horizon_idx = []
     horizon_points = round(
         sum(candidates[i].future_points for i in horizon_idx), 4
     )
@@ -1343,6 +1519,8 @@ def solve_squad(
         "formation": _formation(starters),
         "total_price": total_price,
         "unused_budget": round(rules.total_budget - total_price, 2),
+        "horizon_bench_weight": bench_weight,
+        "horizon_coupled": has_horizon and bench_weight < 1.0,
         "captain": _candidate_public(candidates[captain_idx])
         | {
             "captain_score": round(captain_scores[captain_idx] / _POINTS_SCALE, 4),
@@ -1838,6 +2016,7 @@ def build_squad_optimization(
     captain_risk_weight: float | None = None,
     horizon_tours: int | None = None,
     horizon_decay: float | None = None,
+    horizon_bench_weight: float | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build the optimal squad for a tour and return a JSON-serialisable report.
@@ -1859,6 +2038,10 @@ def build_squad_optimization(
     be chosen on their discounted sum (``horizon_decay``, default
     :data:`DEFAULT_HORIZON_DECAY`) on top of the target tour's eleven. A
     transfer is then judged on the run of fixtures it buys.
+    ``horizon_bench_weight`` (default :data:`DEFAULT_HORIZON_BENCH_WEIGHT`)
+    is how much of that run a player who sits out the target tour may earn;
+    0 keeps the money in the eleven and the bench cheap, see
+    :func:`solve_squad`.
     """
     generated_at = now or datetime.now(UTC)
     try:
@@ -1905,6 +2088,11 @@ def build_squad_optimization(
     horizon_report["requested"] = horizon
     horizon_report["decay"] = (
         DEFAULT_HORIZON_DECAY if horizon_decay is None else float(horizon_decay)
+    )
+    horizon_report["bench_weight"] = (
+        DEFAULT_HORIZON_BENCH_WEIGHT
+        if horizon_bench_weight is None
+        else float(horizon_bench_weight)
     )
 
     candidates = candidates_from_forecast(rows, model)
@@ -1955,6 +2143,7 @@ def build_squad_optimization(
         min_transfer_gain=min_transfer_gain,
         transfer_gain_sigma=transfer_gain_sigma,
         captain_risk_weight=captain_risk_weight,
+        horizon_bench_weight=horizon_bench_weight,
     )
 
     violations = validate_squad(
@@ -2024,6 +2213,7 @@ def _following_tours(session, season_id: int, tour_id: int, count: int) -> list[
 __all__ = [
     "DEFAULT_CAPTAIN_RISK_WEIGHT",
     "DEFAULT_FIXTURE_CONFLICT_WEIGHT",
+    "DEFAULT_HORIZON_BENCH_WEIGHT",
     "DEFAULT_HORIZON_DECAY",
     "DEFAULT_HORIZON_TOURS",
     "DEFAULT_MIN_TRANSFER_GAIN",

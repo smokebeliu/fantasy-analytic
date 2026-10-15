@@ -354,7 +354,12 @@ standard deviations of both forecasts; `--horizon-tours N` (with
 lets the roster earn their discounted sum through the best eleven it could
 field there (`solution.horizon_expected_points`, `is_horizon_starter` on each
 player), so a transfer is judged on the run of fixtures it buys without a
-bench that will not play outweighing a star who will. The bench is ordered to
+bench that will not play outweighing a star who will. That eleven may differ
+from this tour's, which is why a horizon squad carries a few dear substitutes
+with a good fixture ahead; `--horizon-bench-weight` (0..1, default 1) scales
+what such a player earns, and at 0 the roster is the best eleven for the run
+plus the cheapest legal bench — the lineup itself is always picked on the
+target tour alone. The bench is ordered to
 maximise what the automatic
 substitutions are expected to bring, given how likely each starter is to miss
 the match. Every result is
@@ -477,7 +482,9 @@ squad kept from tour to tour, only the tour's transfer allowance spent
 `--min-transfer-gain` plus `--transfer-gain-sigma` standard deviations of both
 forecasts; `--horizon-tours N` chooses the roster on the discounted
 (`--horizon-decay`) forecast of the next tours, built from the current tour's
-cutoff so nothing played in between leaks in. `--captain-risk-weight` hands
+cutoff so nothing played in between leaks in, and `--horizon-bench-weight`
+says how much of that a player who sits out the current tour may earn (0
+keeps the bench cheap). `--captain-risk-weight` hands
 the armband to the upper tail of the forecast rather than the mean.
 
 What the run reports:

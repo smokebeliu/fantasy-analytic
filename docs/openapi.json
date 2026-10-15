@@ -2338,7 +2338,7 @@
                 "type": "null"
               }
             ],
-            "description": "History source: 'current_season' or 'prior_season' (cross-season)",
+            "description": "History source: 'current_season', 'prior_season' (cross-season) or 'parallel_league' (a cup player whose only play this season is in his national league)",
             "title": "Stat Source"
           },
           "uncertainty": {
@@ -3076,6 +3076,20 @@
             ],
             "description": "Starting formation as defenders-midfielders-forwards, e.g. '4-4-2'; goalkeepers fill the remaining starting slots",
             "title": "Formation"
+          },
+          "horizon_bench_weight": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Share of his run ahead a player earns when he would start next tour but sits on the bench this one. 1 (default) lets the roster hold a player for the next fixture; 0 judges the horizon on this tour's eleven only, so the money stays in the eleven and the bench is the cheapest allowed",
+            "title": "Horizon Bench Weight"
           },
           "horizon_decay": {
             "anyOf": [

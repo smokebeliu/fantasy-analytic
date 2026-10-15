@@ -511,6 +511,7 @@ def simulate_squad(
     min_transfer_gain: float | None = None,
     transfer_gain_sigma: float | None = None,
     captain_risk_weight: float | None = None,
+    horizon_bench_weight: float | None = None,
 ) -> dict[str, Any]:
     """Solve a tour's squad on projections and score it with the real points.
 
@@ -539,6 +540,7 @@ def simulate_squad(
         min_transfer_gain=min_transfer_gain,
         transfer_gain_sigma=transfer_gain_sigma,
         captain_risk_weight=captain_risk_weight,
+        horizon_bench_weight=horizon_bench_weight,
     )
     violations = validate_squad(solution, rules)
     if violations:
@@ -1094,6 +1096,7 @@ def run_backtest(
     captain_risk_weight: float | None = None,
     horizon_tours: int = 1,
     horizon_decay: float | None = None,
+    horizon_bench_weight: float | None = None,
     parallel_sources: bool = True,
 ) -> dict[str, Any]:
     """Replay a season tour by tour and compare the models.
@@ -1323,6 +1326,7 @@ def run_backtest(
                             min_transfer_gain=min_transfer_gain,
                             transfer_gain_sigma=transfer_gain_sigma,
                             captain_risk_weight=captain_risk_weight,
+                            horizon_bench_weight=horizon_bench_weight,
                         )
                     except OptimizerError as error:
                         squad = {"error": str(error)}
@@ -1472,6 +1476,7 @@ def run_backtest(
             "captain_risk_weight": captain_risk_weight,
             "horizon_tours": horizon_tours,
             "horizon_decay": horizon_decay,
+            "horizon_bench_weight": horizon_bench_weight,
             "parallel_sources": parallel_sources,
         },
         "versions": {

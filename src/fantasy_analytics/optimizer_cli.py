@@ -27,6 +27,7 @@ from .forecast import MODEL_EVENT, MODEL_MEAN, MODEL_RECENT
 from .optimizer import (
     DEFAULT_CAPTAIN_RISK_WEIGHT,
     DEFAULT_FIXTURE_CONFLICT_WEIGHT,
+    DEFAULT_HORIZON_BENCH_WEIGHT,
     DEFAULT_HORIZON_DECAY,
     DEFAULT_HORIZON_TOURS,
     DEFAULT_MIN_TRANSFER_GAIN,
@@ -125,6 +126,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--horizon-decay",
         type=float,
         help=f"Discount per tour ahead for --horizon-tours (default: {DEFAULT_HORIZON_DECAY})",
+    )
+    parser.add_argument(
+        "--horizon-bench-weight",
+        type=float,
+        help=(
+            "Share of his run ahead a player earns when he would start next "
+            "tour but sits on the bench this one; 0 judges the horizon on this "
+            f"tour's eleven only (default: {DEFAULT_HORIZON_BENCH_WEIGHT})"
+        ),
     )
     parser.add_argument(
         "--locked",
@@ -283,6 +293,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             captain_risk_weight=args.captain_risk_weight,
             horizon_tours=args.horizon_tours,
             horizon_decay=args.horizon_decay,
+            horizon_bench_weight=args.horizon_bench_weight,
         )
     except OptimizerError as error:
         print(f"Optimization failed: {error}", file=sys.stderr)

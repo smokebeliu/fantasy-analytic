@@ -756,6 +756,7 @@ def create_app(
         captain_risk_weight: float | None = None,
         horizon_tours: int | None = None,
         horizon_decay: float | None = None,
+        horizon_bench_weight: float | None = None,
     ) -> dict[str, Any]:
         try:
             return build_squad_optimization(
@@ -777,6 +778,7 @@ def create_app(
                 captain_risk_weight=captain_risk_weight,
                 horizon_tours=horizon_tours,
                 horizon_decay=horizon_decay,
+                horizon_bench_weight=horizon_bench_weight,
             )
         except OptimizerError as error:
             raise api_error(422, str(error), type_="optimizer_error") from error
@@ -825,6 +827,7 @@ def create_app(
             captain_risk_weight=request.captain_risk_weight,
             horizon_tours=request.horizon_tours,
             horizon_decay=request.horizon_decay,
+            horizon_bench_weight=request.horizon_bench_weight,
         )
 
     @app.post(

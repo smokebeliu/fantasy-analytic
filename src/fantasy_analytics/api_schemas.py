@@ -447,6 +447,18 @@ class TransfersRequest(SquadRequest):
         le=1,
         description="Discount per tour ahead for horizon_tours (default 0.7)",
     )
+    horizon_bench_weight: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description=(
+            "Share of his run ahead a player earns when he would start next "
+            "tour but sits on the bench this one. 1 (default) lets the roster "
+            "hold a player for the next fixture; 0 judges the horizon on this "
+            "tour's eleven only, so the money stays in the eleven and the "
+            "bench is the cheapest allowed"
+        ),
+    )
 
 
 class ImportSquadRequest(BaseModel):
