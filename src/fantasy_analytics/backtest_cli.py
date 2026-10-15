@@ -111,6 +111,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Discount per tour ahead for --horizon-tours (default: 0.7)",
     )
     parser.add_argument(
+        "--horizon-bench-weight",
+        type=float,
+        help=(
+            "Share of his run ahead a player earns when he would start next "
+            "tour but not this one (default: 1; 0 judges the horizon on this "
+            "tour's eleven only and keeps the bench cheap)"
+        ),
+    )
+    parser.add_argument(
         "--no-parallel",
         action="store_true",
         help=(
@@ -299,7 +308,8 @@ def _markdown(report: dict[str, Any]) -> str:
             f"minimum gain {params.get('min_transfer_gain')}, "
             f"sigma {params.get('transfer_gain_sigma')}, "
             f"horizon {params.get('horizon_tours')} tour(s), "
-            f"decay {params.get('horizon_decay')}).",
+            f"decay {params.get('horizon_decay')}, "
+            f"bench weight {params.get('horizon_bench_weight')}).",
         ]
 
     lines += ["", "## Accuracy by position", "", "| Model | " + " | ".join(ROLES) + " |",
@@ -546,6 +556,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         captain_risk_weight=args.captain_risk_weight,
         horizon_tours=args.horizon_tours,
         horizon_decay=args.horizon_decay,
+        horizon_bench_weight=args.horizon_bench_weight,
         parallel_sources=not args.no_parallel,
     )
 

@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .client import GraphQLRequestError, SportsGraphQLClient
 from .competitions import DEFAULT_TOURNAMENT_SLUG, resolve_slug
 from .db import session_scope
-from .db.models import Competition, FantasyTour, Match, Season
+from .db.models import REMOVED_TOUR_STATUS, Competition, FantasyTour, Match, Season
 from .db.odds_repository import OddsRepository
 from .nightly_refresh import NightlyRefreshSettings, list_imported_active_leagues
 from .odds import parse_line1x2
@@ -140,6 +140,7 @@ def _next_unfinished_tour(session: Session, season_id: int) -> FantasyTour | Non
         .where(
             FantasyTour.season_id == season_id,
             func.upper(func.coalesce(FantasyTour.status, "")) != "FINISHED",
+            FantasyTour.status != REMOVED_TOUR_STATUS,
         )
         .order_by(
             FantasyTour.starts_at.is_(None),

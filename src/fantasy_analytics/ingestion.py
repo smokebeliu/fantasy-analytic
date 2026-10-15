@@ -480,6 +480,16 @@ def _persist(
             }
         )
     tour_by_fantasy = repo.upsert_tours(tour_rows)
+    # Sports.ru can drop a tour from the calendar after it was imported; left
+    # alone it would stay "OPENED" for ever and every screen would keep
+    # targeting it (with its old transfer allowance) instead of the real next
+    # tour. An empty list says nothing about the calendar, so it retires none.
+    if tour_rows:
+        retired = repo.retire_missing_tours(
+            season_pk, (row["fantasy_tour_id"] for row in tour_rows)
+        )
+        if retired:
+            on_progress(f"Marked tours no longer in the calendar as removed: {retired}")
 
     flattened_matches = _flatten_matches(season)
     match_rows = []

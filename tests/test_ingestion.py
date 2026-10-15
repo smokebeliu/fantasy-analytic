@@ -37,7 +37,9 @@ from fantasy_analytics.queries import (
     SEASON_QUERY,
     TOURNAMENT_QUERY,
 )
+from fantasy_analytics.features import resolve_target_tour
 from fantasy_analytics.quality import run_quality_checks
+from fantasy_analytics.read_repository import ReadRepository
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL") or os.environ.get(
     "DATABASE_URL"
@@ -584,6 +586,89 @@ class IngestionIntegrationTest(unittest.TestCase):
         self.assertEqual(4, self._count("player_season_stats"))
         self.assertEqual(4, self._count("club_season_stats"))
         self.assertEqual(2, self._count("ingestion_runs"))
+
+    def test_a_tour_dropped_from_the_calendar_is_marked_removed(self) -> None:
+        """Sports.ru dropped the UCL's second round after it was imported and
+        handed its transfers to the third. The dropped tour must stop being
+        listed or targeted, and the next one must carry its new allowance."""
+
+        def calendar(*tours: tuple[str, str, int]) -> dict:
+            fixture = _build_fixture()
+            season = fixture["season"]["data"]["fantasyQueries"]["season"]
+            for index, (tour_id, status, transfers) in enumerate(tours, start=2):
+                season["tours"].append(
+                    {
+                        "id": tour_id,
+                        "name": f"{index} тур",
+                        "status": status,
+                        "startedAt": f"2025-08-0{index}T17:30:00Z",
+                        "finishedAt": f"2025-08-0{index}T21:30:00Z",
+                        "transfersStartedAt": None,
+                        "transfersFinishedAt": f"2025-08-0{index}T17:30:00Z",
+                        "constraints": {
+                            "totalTransfers": transfers,
+                            "maxSameTeamPlayers": 3,
+                        },
+                        "matches": [],
+                    }
+                )
+            return fixture
+
+        def tours() -> dict[str, tuple[str, int]]:
+            with self.engine.connect() as connection:
+                return {
+                    row[0]: (row[1], row[2])
+                    for row in connection.execute(
+                        text(
+                            "SELECT fantasy_tour_id, status, total_transfers "
+                            "FROM fantasy_tours"
+                        )
+                    )
+                }
+
+        run_ingestion(
+            FakeClient(calendar(("1773", "OPENED", 3), ("1774", "NOT_STARTED", 3))),
+            self.session_factory,
+            IngestionOptions(),
+        )
+        report = run_ingestion(
+            FakeClient(calendar(("1774", "OPENED", 6))),
+            self.session_factory,
+            IngestionOptions(),
+        )
+
+        self.assertEqual(
+            {
+                "1772": ("FINISHED", 3),
+                "1773": ("REMOVED", 3),
+                "1774": ("OPENED", 6),
+            },
+            tours(),
+        )
+        self.assertEqual(2, report["counts"]["tours"])
+        with self.session_factory() as session:
+            repo = ReadRepository(session)
+            season_id = session.execute(
+                text("SELECT DISTINCT season_id FROM fantasy_tours")
+            ).scalar_one()
+            total, listed = repo.list_tours(season_id=season_id, limit=10, offset=0)
+            self.assertEqual(2, total)
+            self.assertEqual(["1772", "1774"], [t["fantasy_tour_id"] for t in listed])
+            _, removed = repo.list_tours(
+                season_id=season_id, status="REMOVED", limit=10, offset=0
+            )
+            self.assertEqual(["1773"], [t["fantasy_tour_id"] for t in removed])
+            # The natural "next tour" skips the dropped one.
+            target = resolve_target_tour(session, season_id, None)
+            self.assertEqual("1774", target.fantasy_tour_id)
+
+        # Should the game bring the tour back, its real status returns too.
+        run_ingestion(
+            FakeClient(calendar(("1773", "OPENED", 3), ("1774", "NOT_STARTED", 6))),
+            self.session_factory,
+            IngestionOptions(),
+        )
+        self.assertEqual(("OPENED", 3), tours()["1773"])
 
     def test_failed_fetch_publishes_no_partial_snapshot(self) -> None:
         client = FakeClient(_build_fixture(), fail_on_history=True)

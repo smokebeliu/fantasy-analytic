@@ -100,9 +100,13 @@ export function SquadBuilder({
   const [importNote, setImportNote] = useState<string | null>(null);
   // Money and transfers the Sports.ru import reported for this squad. They
   // replace the season's opening budget and the tour's full allowance until
-  // the squad is cleared or another team is imported.
+  // the squad is cleared or another team is imported. The transfers belong to
+  // the tour the team is on in the game (null when the import did not say).
   const [importedBudget, setImportedBudget] = useState<number | null>(null);
-  const [importedTransfersLeft, setImportedTransfersLeft] = useState<number | null>(null);
+  const [importedTransfers, setImportedTransfers] = useState<{
+    tourId: string | null;
+    left: number;
+  } | null>(null);
 
   const poolHover = usePlayerHoverCard();
 
@@ -123,15 +127,32 @@ export function SquadBuilder({
 
   const formations = useMemo(() => formationOptions(limits), [limits]);
 
-  // The tour's own free-transfer allowance is the default and the maximum: the
-  // solver does not price the penalty the game charges for extra transfers, so
-  // suggesting more of them than the tour gives away would be misleading.
+  // The free-transfer allowance is the default and the maximum: the solver
+  // does not price the penalty the game charges for extra transfers, so
+  // suggesting more of them than the game gives away would be misleading.
+  // It is the tour's own allowance, unless the imported team is on this very
+  // tour: then the game's live count of transfers left wins, since it knows
+  // the ones already made and any extra handed out since our last import
+  // (the UCL's third round allowed six once the second was dropped). A team
+  // whose tour is unknown can only lower the tour's allowance. No allowance
+  // exceeds the roster size: a team cannot replace more players than it holds.
   const tourTransfers = selectedTour?.total_transfers ?? 3;
-  const allowedTransfers =
-    importedTransfersLeft != null
-      ? Math.min(importedTransfersLeft, tourTransfers)
-      : tourTransfers;
+  let allowedTransfers = tourTransfers;
+  if (importedTransfers != null) {
+    if (importedTransfers.tourId === selectedTour?.fantasy_tour_id) {
+      allowedTransfers = importedTransfers.left;
+    } else if (importedTransfers.tourId == null) {
+      allowedTransfers = Math.min(importedTransfers.left, tourTransfers);
+    }
+  }
+  allowedTransfers = Math.max(0, Math.min(allowedTransfers, limits.totalPlayers));
   const transferLimit = Math.min(maxTransfers ?? allowedTransfers, allowedTransfers);
+  // With nothing left to spend the only honest choice is zero, which still
+  // lets the solver re-pick the eleven, the captain and the bench order.
+  const transferOptions =
+    allowedTransfers > 0
+      ? Array.from({ length: allowedTransfers }, (_, i) => i + 1)
+      : [0];
 
   // With nothing pinned and no formation chosen there is nothing for the
   // constrained run to preserve, so it would return the same squad as the
@@ -318,7 +339,11 @@ export function SquadBuilder({
       setLocked(new Set());
       setResult(null);
       setImportedBudget(res.budget ?? null);
-      setImportedTransfersLeft(res.transfers_left ?? null);
+      setImportedTransfers(
+        res.transfers_left != null
+          ? { tourId: res.remote_tour?.fantasy_tour_id ?? null, left: res.transfers_left }
+          : null,
+      );
       const missingNames = res.missing
         .map((item) => item.player_name || item.fantasy_player_id)
         .filter(Boolean);
@@ -437,7 +462,7 @@ export function SquadBuilder({
             onChange={(e) => setMaxTransfers(Number(e.target.value))}
             data-testid="transfers-select"
           >
-            {Array.from({ length: allowedTransfers }, (_, i) => i + 1).map((n) => (
+            {transferOptions.map((n) => (
               <option key={n} value={n}>
                 {n}
               </option>
@@ -677,7 +702,7 @@ export function SquadBuilder({
                   onClick={() => {
                     setSelected([]);
                     setImportedBudget(null);
-                    setImportedTransfersLeft(null);
+                    setImportedTransfers(null);
                   }}
                 >
                   Очистить

@@ -151,7 +151,10 @@ PostgreSQL (season, rules, clubs, tours, matches, every player page with its
 fantasy snapshot and season aggregate, club season aggregates and each player's
 match history with minutes). Catalog rows are upserted idempotently by external
 identifier, while price/score/aggregate snapshots are versioned per ingestion
-run. It needs both `DATABASE_URL` and outbound access to the GraphQL API.
+run. A tour the season no longer lists (Sports.ru dropped the UCL 2026/27 second
+round and moved its transfers to the third) is kept but marked `REMOVED`: the
+read API stops listing it unless asked for that status, and no tool picks it as
+the next tour. It needs both `DATABASE_URL` and outbound access to the GraphQL API.
 
 ```bash
 export DATABASE_URL=postgresql+psycopg://fantasy:fantasy@localhost:5432/fantasy
@@ -354,7 +357,12 @@ standard deviations of both forecasts; `--horizon-tours N` (with
 lets the roster earn their discounted sum through the best eleven it could
 field there (`solution.horizon_expected_points`, `is_horizon_starter` on each
 player), so a transfer is judged on the run of fixtures it buys without a
-bench that will not play outweighing a star who will. The bench is ordered to
+bench that will not play outweighing a star who will. That eleven may differ
+from this tour's, which is why a horizon squad carries a few dear substitutes
+with a good fixture ahead; `--horizon-bench-weight` (0..1, default 1) scales
+what such a player earns, and at 0 the roster is the best eleven for the run
+plus the cheapest legal bench — the lineup itself is always picked on the
+target tour alone. The bench is ordered to
 maximise what the automatic
 substitutions are expected to bring, given how likely each starter is to miss
 the match. Every result is
@@ -477,7 +485,9 @@ squad kept from tour to tour, only the tour's transfer allowance spent
 `--min-transfer-gain` plus `--transfer-gain-sigma` standard deviations of both
 forecasts; `--horizon-tours N` chooses the roster on the discounted
 (`--horizon-decay`) forecast of the next tours, built from the current tour's
-cutoff so nothing played in between leaks in. `--captain-risk-weight` hands
+cutoff so nothing played in between leaks in, and `--horizon-bench-weight`
+says how much of that a player who sits out the current tour may earn (0
+keeps the bench cheap). `--captain-risk-weight` hands
 the armband to the upper tail of the forecast rather than the mean.
 
 What the run reports:
@@ -715,9 +725,12 @@ spells out, because the labels alone cannot:
   formation is chosen it is unavailable with the reason on the button: it would
   return the same squad as building from scratch;
 - **`Оптимизировать замены (N)`** keeps the squad you own and suggests at most `N`
-  replacements, `N` defaulting to the tour's own allowance (three in the RPL) or,
-  after a Sports.ru import, to the transfers the team actually has left. The
-  import also brings the team's money (its value plus the bank, `budget` in the
+  replacements, `N` defaulting to the tour's own allowance (three in the RPL, but
+  the game raises it now and then — the UCL 2026/27 third round allows six) or,
+  after a Sports.ru import on the same tour, to the transfers the team actually
+  has left, which wins over a stored allowance that has gone stale since the
+  last refresh. With none left the only choice is `0`, which still re-picks the
+  eleven, the captain and the bench. The import also brings the team's money (its value plus the bank, `budget` in the
   response), which replaces the season's opening budget in the builder and in
   the plan (`budget` on `POST /optimizer/transfers`), since prices drift and a
   squad is rarely worth exactly the opening budget mid-season. The
